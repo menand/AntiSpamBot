@@ -8,7 +8,7 @@ import (
 
 func TestStorePutAndTake(t *testing.T) {
 	s := NewStore()
-	p := s.Put(1, 2, 100, 3, time.Minute)
+	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute))
 	if p.ChatID != 1 || p.UserID != 2 || p.MessageID != 100 || p.CorrectIdx != 3 {
 		t.Fatalf("unexpected pending: %+v", p)
 	}
@@ -25,8 +25,8 @@ func TestStorePutAndTake(t *testing.T) {
 
 func TestStorePutCancelsExisting(t *testing.T) {
 	s := NewStore()
-	first := s.Put(1, 2, 100, 0, time.Minute)
-	_ = s.Put(1, 2, 200, 0, time.Minute) // overwrites
+	first := s.Put(1, 2, 100, 0, time.Now().Add(time.Minute))
+	_ = s.Put(1, 2, 200, 0, time.Now().Add(time.Minute)) // overwrites
 
 	select {
 	case <-first.Done():
@@ -38,7 +38,7 @@ func TestStorePutCancelsExisting(t *testing.T) {
 
 func TestPendingCancelIsIdempotent(t *testing.T) {
 	s := NewStore()
-	p := s.Put(1, 2, 0, 0, time.Minute)
+	p := s.Put(1, 2, 0, 0, time.Now().Add(time.Minute))
 	p.Cancel()
 	p.Cancel() // must not panic
 	p.Cancel()
@@ -46,7 +46,7 @@ func TestPendingCancelIsIdempotent(t *testing.T) {
 
 func TestStoreConcurrentTake(t *testing.T) {
 	s := NewStore()
-	s.Put(1, 2, 0, 0, time.Minute)
+	s.Put(1, 2, 0, 0, time.Now().Add(time.Minute))
 
 	const workers = 50
 	var wg sync.WaitGroup

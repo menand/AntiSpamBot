@@ -38,7 +38,7 @@ func key(chatID, userID int64) string {
 	return fmt.Sprintf("%d:%d", chatID, userID)
 }
 
-func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, ttl time.Duration) *Pending {
+func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time) *Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -51,7 +51,7 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, ttl time.Du
 		UserID:     userID,
 		MessageID:  messageID,
 		CorrectIdx: correctIdx,
-		ExpiresAt:  time.Now().Add(ttl),
+		ExpiresAt:  expiresAt,
 		cancelCh:   make(chan struct{}),
 	}
 	s.items[k] = p

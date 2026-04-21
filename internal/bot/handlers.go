@@ -13,6 +13,7 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
+	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
 func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
@@ -43,6 +44,9 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
+	if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventJoin, time.Now()); err != nil {
+		b.log.Warn("record join event", "err", err)
+	}
 	b.startCaptcha(upd.Chat.ID, user)
 	return nil
 }
@@ -72,6 +76,7 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 		return nil
 	}
 	p.Cancel()
+	_ = b.db.DeletePending(b.runCtx, chatID, query.From.ID)
 
 	if optIdx == p.CorrectIdx {
 		_ = b.api.AnswerCallbackQuery(ctx,
@@ -95,10 +100,51 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 	}
 	text := "Привет! Я анти-спам бот.\n\n" +
 		"Добавь меня в свою группу как <b>администратора</b> с правами <b>«Банить участников»</b> и <b>«Удалять сообщения»</b> — и я буду проверять новых участников капчей.\n\n" +
-		"Проверка: пользователь должен выбрать кружок указанного цвета из 6 вариантов."
+		"Проверка: пользователь должен выбрать кружок указанного цвета из 6 вариантов.\n\n" +
+		"В группе работают команды:\n" +
+		"/stats — статистика чата (только для админов)"
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML))
 	return nil
+}
+
+func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+	if message.From == nil || message.From.IsBot {
+		return nil
+	}
+	// Skip service messages (joins, leaves, title changes, etc.)
+	if len(message.NewChatMembers) > 0 || message.LeftChatMember != nil ||
+		message.NewChatTitle != "" || message.NewChatPhoto != nil ||
+		message.PinnedMessage != nil {
+		return nil
+	}
+
+	chatID := message.Chat.ID
+	userID := message.From.ID
+	when := time.Unix(int64(message.Date), 0)
+
+	newcomer := b.isNewcomer(b.runCtx, chatID, userID, when)
+	if err := b.db.IncMessage(b.runCtx, chatID, when, newcomer); err != nil {
+		b.log.Warn("inc message", "err", err)
+	}
+	return nil
+}
+
+func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Time) bool {
+	joinedAt, ok, err := b.db.MemberJoinedAt(ctx, chatID, userID)
+	if err != nil {
+		b.log.Warn("member joined_at", "err", err)
+		return false
+	}
+	if !ok {
+		// Pre-existing member before the bot was added.
+		return false
+	}
+	window := time.Duration(b.cfg.NewcomerDays) * 24 * time.Hour
+	return when.Sub(joinedAt) < window
 }
 
 func (b *Bot) startCaptcha(chatID int64, user telego.User) {
@@ -134,7 +180,19 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User) {
 		return
 	}
 
-	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, b.cfg.CaptchaTimeout)
+	expires := time.Now().Add(b.cfg.CaptchaTimeout)
+	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires)
+
+	if err := b.db.PutPending(ctx, storage.PendingRow{
+		ChatID:     chatID,
+		UserID:     user.ID,
+		MessageID:  msg.MessageID,
+		CorrectIdx: ch.CorrectIdx,
+		ExpiresAt:  expires,
+	}); err != nil {
+		b.log.Warn("persist pending", "err", err)
+	}
+
 	go b.waitTimeout(p)
 }
 
@@ -154,31 +212,42 @@ func (b *Bot) waitTimeout(p *captcha.Pending) {
 	if !ok || existing != p {
 		return
 	}
-
-	// Timeout cleanup must survive shutdown of runCtx — use a detached context.
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	_ = b.db.DeletePending(cleanupCtx, p.ChatID, p.UserID)
 	if err := b.onFail(cleanupCtx, p, "таймаут"); err != nil {
 		b.log.Error("on fail timeout", "err", err, "chat", p.ChatID, "user", p.UserID)
 	}
 }
 
 func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
-	b.attempts.Reset(p.ChatID, p.UserID)
+	_ = b.db.ResetAttempts(ctx, p.ChatID, p.UserID)
+	if err := b.db.UpsertMember(ctx, p.ChatID, p.UserID, time.Now()); err != nil {
+		b.log.Warn("upsert member", "err", err)
+	}
+	if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now()); err != nil {
+		b.log.Warn("record pass event", "err", err)
+	}
 	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID)
 	_ = b.deleteMessage(ctx, p.ChatID, p.MessageID)
 	return b.release(ctx, p.ChatID, p.UserID)
 }
 
 func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) error {
-	count := b.attempts.Increment(p.ChatID, p.UserID)
+	count, err := b.db.IncrementAttempt(ctx, p.ChatID, p.UserID, attemptsTTL)
+	if err != nil {
+		b.log.Warn("increment attempt", "err", err)
+		count = 1 // fall forward as first attempt
+	}
 	_ = b.deleteMessage(ctx, p.ChatID, p.MessageID)
 
 	if count >= b.cfg.MaxAttempts {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
+		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now())
 		return b.ban(ctx, p.ChatID, p.UserID)
 	}
 	b.log.Info("kicking user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
+	_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now())
 	return b.kick(ctx, p.ChatID, p.UserID)
 }
 
