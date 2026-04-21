@@ -16,8 +16,9 @@ type Config struct {
 	MaxAttempts    int
 	LogLevel       slog.Level
 	AllowedChats   map[int64]struct{} // nil = allow all
-	DBPath         string
-	NewcomerDays   int
+	DBPath              string
+	NewcomerDays        int
+	SilentAnnounceDays  int // 0 = disabled
 }
 
 func Load() (*Config, error) {
@@ -65,14 +66,23 @@ func Load() (*Config, error) {
 		return nil, errors.New("NEWCOMER_DAYS must be > 0")
 	}
 
+	silentDays, err := parseInt("SILENT_ANNOUNCE_DAYS", 30)
+	if err != nil {
+		return nil, err
+	}
+	if silentDays < 0 {
+		return nil, errors.New("SILENT_ANNOUNCE_DAYS must be >= 0 (0 disables announcements)")
+	}
+
 	return &Config{
-		Token:          token,
-		CaptchaTimeout: timeout,
-		MaxAttempts:    maxAttempts,
-		LogLevel:       logLevel,
-		AllowedChats:   allowedChats,
-		DBPath:         dbPath,
-		NewcomerDays:   newcomerDays,
+		Token:              token,
+		CaptchaTimeout:     timeout,
+		MaxAttempts:        maxAttempts,
+		LogLevel:           logLevel,
+		AllowedChats:       allowedChats,
+		DBPath:             dbPath,
+		NewcomerDays:       newcomerDays,
+		SilentAnnounceDays: silentDays,
 	}, nil
 }
 

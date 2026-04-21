@@ -39,3 +39,33 @@ CREATE TABLE IF NOT EXISTS message_counts (
     oldtimer_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, day)
 );
+
+-- Per-user per-chat activity: cumulative counts + first/last message timestamps.
+-- Used for silence detection and cumulative top lists.
+CREATE TABLE IF NOT EXISTS user_activity (
+    chat_id          INTEGER NOT NULL,
+    user_id          INTEGER NOT NULL,
+    first_message_at INTEGER,
+    last_message_at  INTEGER,
+    message_count    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+-- Per-user per-day message counts for top-writers queries over a time window.
+CREATE TABLE IF NOT EXISTS user_message_counts (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    day     TEXT    NOT NULL,
+    count   INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id, day)
+);
+CREATE INDEX IF NOT EXISTS idx_umc_chat_day ON user_message_counts(chat_id, day);
+
+-- Cache of display names so we can render mentions without calling Telegram on every /stats.
+CREATE TABLE IF NOT EXISTS user_info (
+    user_id    INTEGER PRIMARY KEY,
+    first_name TEXT,
+    last_name  TEXT,
+    username   TEXT,
+    updated_at INTEGER NOT NULL
+);
