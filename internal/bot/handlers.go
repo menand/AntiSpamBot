@@ -103,6 +103,12 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 		"Проверка: пользователь должен выбрать кружок указанного цвета из 6 вариантов.\n\n" +
 		"В группе работают команды:\n" +
 		"/stats — статистика чата (только для админов)"
+
+	if message.From != nil {
+		text += fmt.Sprintf("\n\n<i>Твой Telegram ID: <code>%d</code></i>\n<i>(понадобится, если будешь настраивать бота как владелец через <code>OWNER_IDS</code>)</i>",
+			message.From.ID)
+	}
+
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML))
 	return nil

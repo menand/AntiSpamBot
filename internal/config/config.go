@@ -11,14 +11,15 @@ import (
 )
 
 type Config struct {
-	Token          string
-	CaptchaTimeout time.Duration
-	MaxAttempts    int
-	LogLevel       slog.Level
-	AllowedChats   map[int64]struct{} // nil = allow all
-	DBPath              string
-	NewcomerDays        int
-	SilentAnnounceDays  int // 0 = disabled
+	Token              string
+	CaptchaTimeout     time.Duration
+	MaxAttempts        int
+	LogLevel           slog.Level
+	AllowedChats       map[int64]struct{} // nil = allow all
+	DBPath             string
+	NewcomerDays       int
+	SilentAnnounceDays int // 0 = disabled
+	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
 }
 
 func Load() (*Config, error) {
@@ -74,6 +75,11 @@ func Load() (*Config, error) {
 		return nil, errors.New("SILENT_ANNOUNCE_DAYS must be >= 0 (0 disables announcements)")
 	}
 
+	ownerIDs, err := parseChatIDs("OWNER_IDS")
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		Token:              token,
 		CaptchaTimeout:     timeout,
@@ -83,6 +89,7 @@ func Load() (*Config, error) {
 		DBPath:             dbPath,
 		NewcomerDays:       newcomerDays,
 		SilentAnnounceDays: silentDays,
+		OwnerIDs:           ownerIDs,
 	}, nil
 }
 
