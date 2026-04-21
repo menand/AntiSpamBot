@@ -143,8 +143,7 @@ docker compose down
 Обновить до свежей версии (данные не потеряются):
 
 ```bash
-git pull
-docker compose up -d --build
+git pull && docker compose up -d --build
 ```
 
 Автостарт при перезагрузке VDS обеспечен `restart: unless-stopped` в `docker-compose.yml`.
