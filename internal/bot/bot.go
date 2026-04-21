@@ -103,6 +103,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
+	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handleGroupMessage) // fallback: count messages in groups
@@ -117,6 +118,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 			{Command: "help", Description: "Справка"},
 			{Command: "stats", Description: "Статистика чата (для админов)"},
 			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
+			{Command: "logs", Description: "Прислать лог-файл (для владельцев бота)"},
 		},
 	})
 }

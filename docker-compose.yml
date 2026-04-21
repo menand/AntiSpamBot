@@ -8,6 +8,7 @@ services:
       - .env
     environment:
       DB_PATH: /data/bot.db
+      LOG_FILE: /data/bot.log
     volumes:
       - bot-data:/data
     logging:

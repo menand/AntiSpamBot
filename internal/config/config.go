@@ -20,6 +20,7 @@ type Config struct {
 	NewcomerDays       int
 	SilentAnnounceDays int // 0 = disabled
 	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
+	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
 }
 
 func Load() (*Config, error) {
@@ -90,6 +91,7 @@ func Load() (*Config, error) {
 		NewcomerDays:       newcomerDays,
 		SilentAnnounceDays: silentDays,
 		OwnerIDs:           ownerIDs,
+		LogFile:            os.Getenv("LOG_FILE"),
 	}, nil
 }
 

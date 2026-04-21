@@ -49,6 +49,17 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.renderChatsMenu(ctx, query)
+	case "logs":
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		// Reuse the command handler — it takes a Message; synthesize one with the
+		// essentials (from/chat). Easier than duplicating the logic here.
+		synthetic := telego.Message{
+			From: &query.From,
+			Chat: telego.Chat{ID: query.Message.GetChat().ID, Type: "private"},
+		}
+		return b.handleLogsCommand(ctx, synthetic)
 	case "stats":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -85,6 +96,9 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 	if b.isOwner(userID) {
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton("📊 Мои чаты").WithCallbackData(cbChats),
+		})
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton("📄 Прислать лог").WithCallbackData("menu:logs"),
 		})
 	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
