@@ -21,6 +21,18 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	if upd == nil {
 		return nil
 	}
+
+	oldStatus := upd.OldChatMember.MemberStatus()
+	newStatus := upd.NewChatMember.MemberStatus()
+	user := upd.NewChatMember.MemberUser()
+
+	b.log.Info("chat_member event",
+		"chat", upd.Chat.ID,
+		"chat_type", upd.Chat.Type,
+		"user", user.ID,
+		"old", oldStatus,
+		"new", newStatus)
+
 	if upd.Chat.Type != "group" && upd.Chat.Type != "supergroup" {
 		return nil
 	}
@@ -28,15 +40,11 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
-	oldStatus := upd.OldChatMember.MemberStatus()
-	newStatus := upd.NewChatMember.MemberStatus()
 	joined := (oldStatus == "left" || oldStatus == "kicked") &&
 		(newStatus == "member" || newStatus == "restricted")
 	if !joined {
 		return nil
 	}
-
-	user := upd.NewChatMember.MemberUser()
 	if user.IsBot {
 		return nil
 	}
@@ -44,17 +52,23 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
-	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
-		ChatID: upd.Chat.ID,
-		Title:  upd.Chat.Title,
-		Type:   upd.Chat.Type,
-	})
+	b.onUserJoined(upd.Chat.ID, upd.Chat.Title, upd.Chat.Type, user)
+	return nil
+}
 
-	if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventJoin, time.Now()); err != nil {
+// onUserJoined is the common kickoff for both chat_member events and
+// message.new_chat_members service messages. Safe to call multiple times
+// for the same user — startCaptcha dedups via the in-memory store.
+func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User) {
+	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
+		ChatID: chatID,
+		Title:  chatTitle,
+		Type:   chatType,
+	})
+	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now()); err != nil {
 		b.log.Warn("record join event", "err", err)
 	}
-	b.startCaptcha(upd.Chat.ID, user)
-	return nil
+	b.startCaptcha(chatID, user)
 }
 
 func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error {
@@ -125,11 +139,33 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
 		return nil
 	}
+
+	// Service message: new members joined. This is a fallback for cases where
+	// Telegram doesn't emit a chat_member update (some group types, some
+	// rejoin scenarios). startCaptcha dedups via the in-memory store, so even
+	// if chat_member also fires for the same user, only one captcha is shown.
+	if len(message.NewChatMembers) > 0 {
+		if b.chatAllowed(message.Chat.ID) {
+			for _, nm := range message.NewChatMembers {
+				if nm.IsBot {
+					continue
+				}
+				if b.me != nil && nm.ID == b.me.ID {
+					continue
+				}
+				b.log.Info("new_chat_members service message",
+					"chat", message.Chat.ID, "user", nm.ID)
+				b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm)
+			}
+		}
+		return nil
+	}
+
 	if message.From == nil || message.From.IsBot {
 		return nil
 	}
-	// Skip service messages (joins, leaves, title changes, etc.)
-	if len(message.NewChatMembers) > 0 || message.LeftChatMember != nil ||
+	// Skip other service messages (leaves, title changes, etc.)
+	if message.LeftChatMember != nil ||
 		message.NewChatTitle != "" || message.NewChatPhoto != nil ||
 		message.PinnedMessage != nil {
 		return nil
@@ -216,6 +252,11 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 }
 
 func (b *Bot) startCaptcha(chatID int64, user telego.User) {
+	if b.store.Exists(chatID, user.ID) {
+		b.log.Debug("captcha already in progress, skipping duplicate kickoff",
+			"chat", chatID, "user", user.ID)
+		return
+	}
 	ctx := b.runCtx
 	ch := captcha.New()
 

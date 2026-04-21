@@ -58,6 +58,13 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 	return p
 }
 
+func (s *Store) Exists(chatID, userID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.items[key(chatID, userID)]
+	return ok
+}
+
 func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
