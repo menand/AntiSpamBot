@@ -94,14 +94,31 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	defer func() { _ = bh.Stop() }()
 
+	if err := b.setCommands(ctx); err != nil {
+		b.log.Warn("set commands", "err", err)
+	}
+
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
+	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handleGroupMessage) // fallback: count messages in groups
 
 	return bh.Start()
+}
+
+func (b *Bot) setCommands(ctx context.Context) error {
+	return b.api.SetMyCommands(ctx, &telego.SetMyCommandsParams{
+		Commands: []telego.BotCommand{
+			{Command: "start", Description: "Меню"},
+			{Command: "help", Description: "Справка"},
+			{Command: "stats", Description: "Статистика чата (для админов)"},
+			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
+		},
+	})
 }
 
 func (b *Bot) restorePending(ctx context.Context) (int, error) {

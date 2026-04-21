@@ -44,6 +44,12 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
+	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
+		ChatID: upd.Chat.ID,
+		Title:  upd.Chat.Title,
+		Type:   upd.Chat.Type,
+	})
+
 	if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventJoin, time.Now()); err != nil {
 		b.log.Warn("record join event", "err", err)
 	}
@@ -98,19 +104,20 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 	if message.Chat.Type != "private" {
 		return nil
 	}
-	text := "Привет! Я анти-спам бот.\n\n" +
-		"Добавь меня в свою группу как <b>администратора</b> с правами <b>«Банить участников»</b> и <b>«Удалять сообщения»</b> — и я буду проверять новых участников капчей.\n\n" +
-		"Проверка: пользователь должен выбрать кружок указанного цвета из 6 вариантов.\n\n" +
-		"В группе работают команды:\n" +
-		"/stats — статистика чата (только для админов)"
 
+	userID := int64(0)
 	if message.From != nil {
-		text += fmt.Sprintf("\n\n<i>Твой Telegram ID: <code>%d</code></i>\n<i>(понадобится, если будешь настраивать бота как владелец через <code>OWNER_IDS</code>)</i>",
-			message.From.ID)
+		userID = message.From.ID
+	}
+
+	text := b.mainMenuText(userID)
+	if message.From != nil {
+		text += fmt.Sprintf("\n\n<i>Твой Telegram ID: <code>%d</code></i>", message.From.ID)
 	}
 
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-		WithParseMode(telego.ModeHTML))
+		WithParseMode(telego.ModeHTML).
+		WithReplyMarkup(b.mainMenuKeyboard(userID)))
 	return nil
 }
 
@@ -131,6 +138,12 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	chatID := message.Chat.ID
 	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
+
+	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
+		ChatID: chatID,
+		Title:  message.Chat.Title,
+		Type:   message.Chat.Type,
+	})
 
 	if err := b.db.RememberUser(b.runCtx, storage.UserInfo{
 		UserID:    user.ID,

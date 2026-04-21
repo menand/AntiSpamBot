@@ -1,4 +1,12 @@
-# AntiSpamBot
+<p align="center">
+  <img src="docs/logo.svg" alt="AntiSpamBot logo" width="180"/>
+</p>
+
+<h1 align="center">AntiSpamBot</h1>
+
+<p align="center">
+  <i>Подозрительно косится на каждого нового участника.</i>
+</p>
 
 Telegram анти-спам бот на Go. При входе нового участника в группу показывает капчу с 6 цветными кружочками — пользователь должен выбрать кружок указанного цвета за 30 секунд. Неправильный ответ или таймаут → кик (с возможностью перезайти). Три провала подряд → перманентный бан.
 
@@ -184,10 +192,35 @@ git pull && docker compose up -d --build
 
 ## Команды бота
 
-- `/start`, `/help` — **в личке** с ботом, показывает инструкцию и твой Telegram ID (удобно для настройки `OWNER_IDS`).
-- `/stats [day|week|month|all]` — **в группе**, для админов чата (или для владельцев бота, указанных в `OWNER_IDS`). Выводит статистику за период. Без аргумента — за неделю.
+Все команды видны в «/»-подсказке в Telegram (бот регистрирует их при старте через `setMyCommands`):
 
-Поддерживаются русские алиасы: `/stats сутки`, `/stats неделя`, `/stats месяц`, `/stats все`.
+- `/start`, `/help` — **в личке**. Показывает меню с inline-кнопками («Справка», «Добавить в группу», и для владельцев — «Мои чаты»). Также показывает твой Telegram ID (удобно для настройки `OWNER_IDS`).
+- `/stats [day|week|month|all]` — **в группе**, для админов чата (или для владельцев бота, указанных в `OWNER_IDS`). Выводит статистику за период. Без аргумента — за неделю. Русские алиасы: `/stats сутки|неделя|месяц|все`.
+- `/chats` — **в личке**, только для владельцев. Список всех чатов, где работает бот, с inline-кнопками для просмотра статистики каждого (с переключателями периода прямо в DM).
+
+## Аватарка для бота
+
+В папке [`docs/logo.svg`](docs/logo.svg) лежит иконка бота (робот с капчей-нимбом и значком «no spam»). Telegram принимает PNG/JPG — конвертируем из SVG:
+
+```bash
+# через ImageMagick:
+convert -background none -resize 512x512 docs/logo.svg docs/logo.png
+
+# или через rsvg-convert (librsvg):
+rsvg-convert -w 512 -h 512 docs/logo.svg -o docs/logo.png
+
+# или онлайн на любом svg→png конвертере
+```
+
+Затем в Telegram у @BotFather:
+
+```
+/setuserpic → выбираешь бота → отправляешь docs/logo.png
+```
+
+Telegram обрежет в круг. Если хочется другой вариант — SVG легко подправить вручную (цвета, выражение лица), или сгенерировать раст через ChatGPT/DALL-E с таким промптом:
+
+> Cute cartoon robot mascot for a Telegram anti-spam bot. Square format, 512x512, Telegram-style rounded corners. Blue gradient background. Friendly but slightly suspicious-looking robot face with squinty cyan eyes and a small smirk. Antenna on top with a red indicator light emitting small yellow sparkles. Around the head: a halo of six colored dots (red, green, yellow, purple, orange, blue) — a hint to the color-circle captcha. A small tilted red "no entry" prohibition badge in the upper right corner. Modern flat design with subtle shadows, thick outlines, vector style.
 
 ## Настройка владельца
 

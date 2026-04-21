@@ -69,3 +69,12 @@ CREATE TABLE IF NOT EXISTS user_info (
     username   TEXT,
     updated_at INTEGER NOT NULL
 );
+
+-- Known chats: populated opportunistically from every chat_member and message
+-- update we see. Used by the owner-only /chats menu to list chats.
+CREATE TABLE IF NOT EXISTS chats (
+    chat_id    INTEGER PRIMARY KEY,
+    title      TEXT,
+    type       TEXT,
+    updated_at INTEGER NOT NULL
+);
