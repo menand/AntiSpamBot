@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/joho/godotenv"
+	"gopkg.in/natefinch/lumberjack.v2"
 
 	"github.com/menand/AntiSpamBot/internal/bot"
 	"github.com/menand/AntiSpamBot/internal/config"
@@ -26,7 +28,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	writers := []io.Writer{os.Stdout}
+	if cfg.LogFile != "" {
+		writers = append(writers, &lumberjack.Logger{
+			Filename:   cfg.LogFile,
+			MaxSize:    10, // MB per file before rotation
+			MaxBackups: 3,
+			MaxAge:     30, // days
+			Compress:   false,
+		})
+	}
+	log := slog.New(slog.NewJSONHandler(io.MultiWriter(writers...),
+		&slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(log)
 
 	b, err := bot.New(cfg, log)
