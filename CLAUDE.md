@@ -48,7 +48,23 @@ Tables:
 - `attempts(chat_id, user_id, count, updated_at)` — failure counter with 24h TTL. Increment uses a transaction that resets `count=1` if `now - updated_at > ttl`.
 - `events(id, chat_id, user_id, kind, at)` — append-only event log, `kind ∈ {join,pass,kick,ban}`.
 - `members(chat_id, user_id, joined_at)` — upserted on captcha pass. `joined_at` drives newcomer/oldtimer classification.
-- `message_counts(chat_id, day, newcomer_count, oldtimer_count)` — daily aggregates, UPSERT-incremented per message.
+- `message_counts(chat_id, day, newcomer_count, oldtimer_count)` — daily chat aggregates (no user_id), UPSERT per message.
+- `user_activity(chat_id, user_id, first_message_at, last_message_at, message_count)` — per-user cumulative state, drives silence detection and cumulative counts.
+- `user_message_counts(chat_id, user_id, day, count)` — per-user per-day counts, drives top-writers over a time window.
+- `user_info(user_id, first_name, last_name, username, updated_at)` — cached display names so `/stats` doesn't hit Telegram for every row.
+
+### Per-user message handling (`handleGroupMessage`)
+
+On every non-service group message from a non-bot:
+1. `RememberUser` — upsert name/username cache (eventually consistent, outside the main tx).
+2. `IncMessage` — aggregate newcomer/oldtimer counter (uses `isNewcomer` = join within `NewcomerDays`).
+3. `RecordMessage` — transactional upsert of `user_activity` + `user_message_counts`, returns `MessageRecord{Silence, HasBaseline, WasFirstMessage}`.
+4. `maybeAnnounceReturn` — if `HasBaseline && Silence >= SilentAnnounceDays*24h`, posts a tiered announcement ("день/месяц/год" via `humanDaysRU` + `pluralRU`). `SilentAnnounceDays=0` disables.
+
+Baseline selection for silence:
+- Prior `last_message_at` → silence since last message.
+- Else `members.joined_at` → silence since join; `WasFirstMessage=true`.
+- Else no baseline (pre-existing member, first sighting) → no announcement.
 
 ### Restart behavior
 

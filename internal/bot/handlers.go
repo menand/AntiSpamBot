@@ -123,14 +123,63 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	}
 
 	chatID := message.Chat.ID
-	userID := message.From.ID
+	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
 
-	newcomer := b.isNewcomer(b.runCtx, chatID, userID, when)
+	if err := b.db.RememberUser(b.runCtx, storage.UserInfo{
+		UserID:    user.ID,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Username:  user.Username,
+	}); err != nil {
+		b.log.Warn("remember user", "err", err)
+	}
+
+	newcomer := b.isNewcomer(b.runCtx, chatID, user.ID, when)
 	if err := b.db.IncMessage(b.runCtx, chatID, when, newcomer); err != nil {
 		b.log.Warn("inc message", "err", err)
 	}
+
+	rec, err := b.db.RecordMessage(b.runCtx, chatID, user.ID, when)
+	if err != nil {
+		b.log.Warn("record message", "err", err)
+		return nil
+	}
+	b.maybeAnnounceReturn(ctx, message, user, rec)
 	return nil
+}
+
+func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user telego.User, rec storage.MessageRecord) {
+	if b.cfg.SilentAnnounceDays == 0 || !rec.HasBaseline {
+		return
+	}
+	threshold := time.Duration(b.cfg.SilentAnnounceDays) * 24 * time.Hour
+	if rec.Silence < threshold {
+		return
+	}
+	days := int(rec.Silence / (24 * time.Hour))
+	mention := mentionHTML(user)
+	var text string
+	switch {
+	case rec.WasFirstMessage:
+		text = fmt.Sprintf("🎉 Смотрите-ка! %s был(а) в чате <b>%s</b> и наконец-то впервые что-то пишет.",
+			mention, humanDaysRU(days))
+	case days >= 365:
+		text = fmt.Sprintf("🎊 Сенсация! %s молчал(а) <b>%s</b> и вот наконец-то написал(а)!",
+			mention, humanDaysRU(days))
+	case days >= 90:
+		text = fmt.Sprintf("👀 Ого! %s вернулся после <b>%s</b> тишины.",
+			mention, humanDaysRU(days))
+	default:
+		text = fmt.Sprintf("✨ %s снова с нами после <b>%s</b> молчания.",
+			mention, humanDaysRU(days))
+	}
+	_, err := b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
+		WithParseMode(telego.ModeHTML).
+		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
+	if err != nil {
+		b.log.Warn("announce return", "err", err, "chat", message.Chat.ID, "user", user.ID)
+	}
 }
 
 func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Time) bool {

@@ -45,11 +45,41 @@ func (b *Bot) handleStatsCommand(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
-	text := renderStats(period, s, b.cfg.NewcomerDays)
+	topWriters, err := b.db.TopWriters(ctx, message.Chat.ID, from, until, 5)
+	if err != nil {
+		b.log.Warn("top writers", "err", err)
+	}
+	topFailers, err := b.db.TopFailers(ctx, message.Chat.ID, from, until, 5)
+	if err != nil {
+		b.log.Warn("top failers", "err", err)
+	}
+
+	infos, err := b.db.GetUserInfos(ctx, collectUserIDs(topWriters, topFailers))
+	if err != nil {
+		b.log.Warn("get user infos", "err", err)
+		infos = map[int64]storage.UserInfo{}
+	}
+
+	text := renderStats(period, s, b.cfg.NewcomerDays, topWriters, topFailers, infos)
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
 		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
 	return nil
+}
+
+func collectUserIDs(lists ...[]storage.UserCount) []int64 {
+	seen := make(map[int64]struct{})
+	var out []int64
+	for _, l := range lists {
+		for _, uc := range l {
+			if _, ok := seen[uc.UserID]; ok {
+				continue
+			}
+			seen[uc.UserID] = struct{}{}
+			out = append(out, uc.UserID)
+		}
+	}
+	return out
 }
 
 func (b *Bot) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, error) {
@@ -120,7 +150,13 @@ func periodLabel(p statsPeriod) string {
 	return string(p)
 }
 
-func renderStats(p statsPeriod, s storage.Stats, newcomerDays int) string {
+func renderStats(
+	p statsPeriod,
+	s storage.Stats,
+	newcomerDays int,
+	topWriters, topFailers []storage.UserCount,
+	infos map[int64]storage.UserInfo,
+) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "<b>📊 Статистика за %s</b>\n\n", periodLabel(p))
 
@@ -142,10 +178,27 @@ func renderStats(p statsPeriod, s storage.Stats, newcomerDays int) string {
 		fmt.Fprintf(&sb, "• Старички: %d (%s)\n", s.MsgOldtimer, pct(s.MsgOldtimer, total))
 	}
 
+	if len(topWriters) > 0 {
+		sb.WriteString("\n🔝 <b>Топ писателей:</b>\n")
+		for i, uc := range topWriters {
+			fmt.Fprintf(&sb, "%d. %s — %d %s\n",
+				i+1, mentionOrID(infos, uc.UserID),
+				uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
+		}
+	}
+
+	if len(topFailers) > 0 {
+		sb.WriteString("\n🚫 <b>Топ провалов капчи:</b>\n")
+		for i, uc := range topFailers {
+			fmt.Fprintf(&sb, "%d. %s — %d %s\n",
+				i+1, mentionOrID(infos, uc.UserID),
+				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"))
+		}
+	}
+
 	if p != periodAll {
 		fmt.Fprintf(&sb, "\n<i>Новичок — тот, кто прошёл капчу за последние %d дн.</i>", newcomerDays)
 	}
-
 	if p == periodAll {
 		fmt.Fprintf(&sb, "\n<i>Статистика собирается с момента запуска бота в этом чате.</i>")
 	}
