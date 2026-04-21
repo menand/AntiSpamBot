@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
@@ -52,14 +53,24 @@ func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	}); err != nil {
 		return fmt.Errorf("ban (for kick): %w", err)
 	}
-	if err := b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
-		ChatID:       tu.ID(chatID),
-		UserID:       userID,
-		OnlyIfBanned: true,
-	}); err != nil {
-		return fmt.Errorf("unban (for kick): %w", err)
+	// Retry unban so a transient API error doesn't turn a kick into a permaban.
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		lastErr = b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
+			ChatID:       tu.ID(chatID),
+			UserID:       userID,
+			OnlyIfBanned: true,
+		})
+		if lastErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("unban (for kick): %w", ctx.Err())
+		case <-time.After(time.Duration(i+1) * 300 * time.Millisecond):
+		}
 	}
-	return nil
+	return fmt.Errorf("unban (for kick) after retries: %w", lastErr)
 }
 
 func (b *Bot) ban(ctx context.Context, chatID, userID int64) error {
