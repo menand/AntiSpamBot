@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,13 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	if upd == nil {
 		return nil
 	}
+	if upd.Chat.Type != "group" && upd.Chat.Type != "supergroup" {
+		return nil
+	}
+	if !b.chatAllowed(upd.Chat.ID) {
+		return nil
+	}
+
 	oldStatus := upd.OldChatMember.MemberStatus()
 	newStatus := upd.NewChatMember.MemberStatus()
 	joined := (oldStatus == "left" || oldStatus == "kicked") &&
@@ -35,14 +43,13 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
-	b.startCaptcha(ctx, upd.Chat.ID, user)
+	b.startCaptcha(upd.Chat.ID, user)
 	return nil
 }
 
 func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error {
-	var targetUserID int64
-	var optIdx int
-	if _, err := fmt.Sscanf(query.Data, "cap:%d:%d", &targetUserID, &optIdx); err != nil {
+	targetUserID, optIdx, ok := parseCallback(query.Data)
+	if !ok {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 		return nil
 	}
@@ -51,6 +58,9 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 			tu.CallbackQuery(query.ID).
 				WithText("Эта капча не для тебя.").
 				WithShowAlert())
+		return nil
+	}
+	if query.Message == nil {
 		return nil
 	}
 
@@ -66,20 +76,33 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 	if optIdx == p.CorrectIdx {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Правильно, добро пожаловать!"))
-		if err := b.onSuccess(ctx, p); err != nil {
+		if err := b.onSuccess(b.runCtx, p); err != nil {
 			b.log.Error("on success", "err", err, "chat", chatID, "user", query.From.ID)
 		}
 	} else {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Неверно.").WithShowAlert())
-		if err := b.onFail(ctx, p, "неверный ответ"); err != nil {
+		if err := b.onFail(b.runCtx, p, "неверный ответ"); err != nil {
 			b.log.Error("on fail", "err", err, "chat", chatID, "user", query.From.ID)
 		}
 	}
 	return nil
 }
 
-func (b *Bot) startCaptcha(ctx context.Context, chatID int64, user telego.User) {
+func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "private" {
+		return nil
+	}
+	text := "Привет! Я анти-спам бот.\n\n" +
+		"Добавь меня в свою группу как <b>администратора</b> с правами <b>«Банить участников»</b> и <b>«Удалять сообщения»</b> — и я буду проверять новых участников капчей.\n\n" +
+		"Проверка: пользователь должен выбрать кружок указанного цвета из 6 вариантов."
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
+		WithParseMode(telego.ModeHTML))
+	return nil
+}
+
+func (b *Bot) startCaptcha(chatID int64, user telego.User) {
+	ctx := b.runCtx
 	ch := captcha.New()
 
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
@@ -131,7 +154,11 @@ func (b *Bot) waitTimeout(p *captcha.Pending) {
 	if !ok || existing != p {
 		return
 	}
-	if err := b.onFail(b.runCtx, p, "таймаут"); err != nil {
+
+	// Timeout cleanup must survive shutdown of runCtx — use a detached context.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := b.onFail(cleanupCtx, p, "таймаут"); err != nil {
 		b.log.Error("on fail timeout", "err", err, "chat", p.ChatID, "user", p.UserID)
 	}
 }
@@ -153,6 +180,30 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 	}
 	b.log.Info("kicking user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 	return b.kick(ctx, p.ChatID, p.UserID)
+}
+
+func (b *Bot) chatAllowed(chatID int64) bool {
+	if b.cfg.AllowedChats == nil {
+		return true
+	}
+	_, ok := b.cfg.AllowedChats[chatID]
+	return ok
+}
+
+func parseCallback(data string) (userID int64, optIdx int, ok bool) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 3 || parts[0] != "cap" {
+		return 0, 0, false
+	}
+	uid, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	idx, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return 0, 0, false
+	}
+	return uid, idx, true
 }
 
 func mentionHTML(u telego.User) string {

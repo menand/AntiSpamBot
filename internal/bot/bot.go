@@ -72,6 +72,8 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
+	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
+	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 
 	return bh.Start()
 }

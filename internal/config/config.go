@@ -3,8 +3,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -12,6 +14,8 @@ type Config struct {
 	Token          string
 	CaptchaTimeout time.Duration
 	MaxAttempts    int
+	LogLevel       slog.Level
+	AllowedChats   map[int64]struct{} // nil = allow all
 }
 
 func Load() (*Config, error) {
@@ -24,8 +28,24 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	if timeout <= 0 {
+		return nil, errors.New("CAPTCHA_TIMEOUT_SECONDS must be > 0")
+	}
 
 	maxAttempts, err := parseInt("MAX_ATTEMPTS", 3)
+	if err != nil {
+		return nil, err
+	}
+	if maxAttempts <= 0 {
+		return nil, errors.New("MAX_ATTEMPTS must be > 0")
+	}
+
+	logLevel, err := parseLogLevel("LOG_LEVEL", slog.LevelInfo)
+	if err != nil {
+		return nil, err
+	}
+
+	allowedChats, err := parseChatIDs("ALLOWED_CHATS")
 	if err != nil {
 		return nil, err
 	}
@@ -34,6 +54,8 @@ func Load() (*Config, error) {
 		Token:          token,
 		CaptchaTimeout: timeout,
 		MaxAttempts:    maxAttempts,
+		LogLevel:       logLevel,
+		AllowedChats:   allowedChats,
 	}, nil
 }
 
@@ -59,4 +81,45 @@ func parseInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
 	}
 	return n, nil
+}
+
+func parseLogLevel(name string, def slog.Level) (slog.Level, error) {
+	v := strings.ToLower(os.Getenv(name))
+	if v == "" {
+		return def, nil
+	}
+	switch v {
+	case "debug":
+		return slog.LevelDebug, nil
+	case "info":
+		return slog.LevelInfo, nil
+	case "warn", "warning":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	}
+	return 0, fmt.Errorf("invalid %s: %q (expected debug|info|warn|error)", name, v)
+}
+
+func parseChatIDs(name string) (map[int64]struct{}, error) {
+	v := strings.TrimSpace(os.Getenv(name))
+	if v == "" {
+		return nil, nil
+	}
+	out := make(map[int64]struct{})
+	for _, raw := range strings.Split(v, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s entry %q: %w", name, raw, err)
+		}
+		out[id] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
