@@ -16,6 +16,8 @@ type Config struct {
 	MaxAttempts    int
 	LogLevel       slog.Level
 	AllowedChats   map[int64]struct{} // nil = allow all
+	DBPath         string
+	NewcomerDays   int
 }
 
 func Load() (*Config, error) {
@@ -50,12 +52,27 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	dbPath := os.Getenv("DB_PATH")
+	if dbPath == "" {
+		dbPath = "bot.db"
+	}
+
+	newcomerDays, err := parseInt("NEWCOMER_DAYS", 7)
+	if err != nil {
+		return nil, err
+	}
+	if newcomerDays <= 0 {
+		return nil, errors.New("NEWCOMER_DAYS must be > 0")
+	}
+
 	return &Config{
 		Token:          token,
 		CaptchaTimeout: timeout,
 		MaxAttempts:    maxAttempts,
 		LogLevel:       logLevel,
 		AllowedChats:   allowedChats,
+		DBPath:         dbPath,
+		NewcomerDays:   newcomerDays,
 	}, nil
 }
 
