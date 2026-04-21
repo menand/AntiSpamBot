@@ -8,11 +8,18 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/joho/godotenv"
+
 	"github.com/menand/AntiSpamBot/internal/bot"
 	"github.com/menand/AntiSpamBot/internal/config"
 )
 
 func main() {
+	// Auto-load .env for local development. In Docker compose the env comes
+	// from env_file/environment, and this call is a silent no-op when .env
+	// doesn't exist.
+	_ = godotenv.Load()
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("load config", "err", err)
