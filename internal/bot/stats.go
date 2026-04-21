@@ -24,16 +24,18 @@ func (b *Bot) handleStatsCommand(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
-	isAdmin, err := b.isChatAdmin(ctx, message.Chat.ID, message.From.ID)
-	if err != nil {
-		b.log.Warn("check admin", "err", err)
-		return nil
-	}
-	if !isAdmin {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Команда доступна только администраторам чата.").
-			WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
-		return nil
+	if !b.isOwner(message.From.ID) {
+		isAdmin, err := b.isChatAdmin(ctx, message.Chat.ID, message.From.ID)
+		if err != nil {
+			b.log.Warn("check admin", "err", err)
+			return nil
+		}
+		if !isAdmin {
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
+				"Команда доступна только администраторам чата.").
+				WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
+			return nil
+		}
 	}
 
 	period := parseStatsPeriod(message.Text)

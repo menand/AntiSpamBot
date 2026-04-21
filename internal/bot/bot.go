@@ -8,6 +8,7 @@ import (
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
+	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/config"
@@ -63,11 +64,22 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	b.me = me
 
-	if err := b.restorePending(ctx); err != nil {
+	restored, err := b.restorePending(ctx)
+	if err != nil {
 		b.log.Error("restore pending captchas", "err", err)
 	}
 
 	go b.attemptsSweepLoop(ctx)
+
+	b.notifyOwners(ctx, fmt.Sprintf(
+		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВосстановлено капч: %d",
+		b.Username(), restored))
+
+	defer func() {
+		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		b.notifyOwners(shutCtx, "🔴 <b>Бот остановлен</b>")
+	}()
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
 		AllowedUpdates: []string{"message", "callback_query", "chat_member"},
@@ -92,10 +104,10 @@ func (b *Bot) Run(ctx context.Context) error {
 	return bh.Start()
 }
 
-func (b *Bot) restorePending(ctx context.Context) error {
+func (b *Bot) restorePending(ctx context.Context) (int, error) {
 	rows, err := b.db.LoadAllPending(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	now := time.Now()
 	for _, row := range rows {
@@ -108,7 +120,23 @@ func (b *Bot) restorePending(ctx context.Context) error {
 		go b.waitTimeout(p)
 	}
 	b.log.Info("restored pending captchas", "count", len(rows))
-	return nil
+	return len(rows), nil
+}
+
+func (b *Bot) isOwner(userID int64) bool {
+	_, ok := b.cfg.OwnerIDs[userID]
+	return ok
+}
+
+func (b *Bot) notifyOwners(ctx context.Context, text string) {
+	for ownerID := range b.cfg.OwnerIDs {
+		_, err := b.api.SendMessage(ctx, tu.Message(tu.ID(ownerID), text).
+			WithParseMode(telego.ModeHTML))
+		if err != nil {
+			b.log.Warn("notify owner failed — did they /start the bot in DM?",
+				"err", err, "owner", ownerID)
+		}
+	}
 }
 
 func (b *Bot) attemptsSweepLoop(ctx context.Context) {
