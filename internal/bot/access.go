@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"time"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -38,4 +39,25 @@ func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
 	}
 	isAdmin, err := b.isChatAdmin(ctx, chatID, userID)
 	return err == nil && isAdmin
+}
+
+// effectiveMaxAttempts resolves the max-attempts value for a chat: per-chat
+// override if set, else the global default from config. Errors fall back to
+// the global default.
+func (b *Bot) effectiveMaxAttempts(ctx context.Context, chatID int64) int {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err == nil && s.MaxAttempts.Valid {
+		return int(s.MaxAttempts.Int64)
+	}
+	return b.cfg.MaxAttempts
+}
+
+// effectiveCaptchaTimeout resolves the captcha timeout for a chat: per-chat
+// override if set, else global default.
+func (b *Bot) effectiveCaptchaTimeout(ctx context.Context, chatID int64) time.Duration {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err == nil && s.CaptchaTimeoutSeconds.Valid {
+		return time.Duration(s.CaptchaTimeoutSeconds.Int64) * time.Second
+	}
+	return b.cfg.CaptchaTimeout
 }

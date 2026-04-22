@@ -22,6 +22,7 @@ type Config struct {
 	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
 	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
 	CaptchaDelay       time.Duration      // delay between join and sending captcha
+	DailyStatsUTCHour  int                // hour of day (UTC) at/after which daily digests are posted
 }
 
 func Load() (*Config, error) {
@@ -90,6 +91,14 @@ func Load() (*Config, error) {
 		return nil, errors.New("CAPTCHA_DELAY_MS must be >= 0")
 	}
 
+	digestHour, err := parseInt("DAILY_STATS_UTC_HOUR", 6) // 06:00 UTC ≈ 09:00 MSK
+	if err != nil {
+		return nil, err
+	}
+	if digestHour < 0 || digestHour > 23 {
+		return nil, errors.New("DAILY_STATS_UTC_HOUR must be 0..23")
+	}
+
 	return &Config{
 		Token:              token,
 		CaptchaTimeout:     timeout,
@@ -102,6 +111,7 @@ func Load() (*Config, error) {
 		OwnerIDs:           ownerIDs,
 		LogFile:            os.Getenv("LOG_FILE"),
 		CaptchaDelay:       captchaDelay,
+		DailyStatsUTCHour:  digestHour,
 	}, nil
 }
 

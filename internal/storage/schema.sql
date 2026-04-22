@@ -79,8 +79,16 @@ CREATE TABLE IF NOT EXISTS chats (
     updated_at INTEGER NOT NULL
 );
 
--- Per-chat configurable behavior. Absent row = defaults (greeting enabled).
+-- Per-chat configurable behavior. Absent row = defaults (greeting enabled,
+-- attempts/timeout fall back to global config, daily digests off).
+--
+-- Nullable columns (max_attempts, captcha_timeout_seconds) mean "use the
+-- global env default"; a non-null value overrides globally.
 CREATE TABLE IF NOT EXISTS chat_settings (
-    chat_id          INTEGER PRIMARY KEY,
-    greeting_enabled INTEGER NOT NULL DEFAULT 1
+    chat_id                 INTEGER PRIMARY KEY,
+    greeting_enabled        INTEGER NOT NULL DEFAULT 1,
+    max_attempts            INTEGER,
+    captcha_timeout_seconds INTEGER,
+    daily_stats_enabled     INTEGER NOT NULL DEFAULT 0,
+    last_daily_stats_day    TEXT
 );
