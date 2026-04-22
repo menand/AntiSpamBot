@@ -146,6 +146,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	// if chat_member also fires for the same user, only one captcha is shown.
 	if len(message.NewChatMembers) > 0 {
 		if b.chatAllowed(message.Chat.ID) {
+			hadHuman := false
 			for _, nm := range message.NewChatMembers {
 				if nm.IsBot {
 					continue
@@ -153,9 +154,18 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 				if b.me != nil && nm.ID == b.me.ID {
 					continue
 				}
+				hadHuman = true
 				b.log.Info("new_chat_members service message",
 					"chat", message.Chat.ID, "user", nm.ID)
 				b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm)
+			}
+			// Remove Telegram's "X joined the chat" service message — clutters
+			// the chat and we're already showing the captcha.
+			if hadHuman {
+				if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+					b.log.Warn("delete join service message",
+						"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
+				}
 			}
 		}
 		return nil
@@ -258,6 +268,17 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User) {
 		return
 	}
 	ctx := b.runCtx
+
+	// Cache display name now — we'll need it when sending the greeting after a
+	// successful pass (by then the user hasn't written anything, so user_info
+	// wouldn't be populated from message-handling path).
+	_ = b.db.RememberUser(ctx, storage.UserInfo{
+		UserID:    user.ID,
+		FirstName: user.FirstName,
+		LastName:  user.LastName,
+		Username:  user.Username,
+	})
+
 	ch := captcha.New()
 
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
@@ -338,8 +359,15 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 		b.log.Warn("record pass event", "err", err)
 	}
 	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID)
-	_ = b.deleteMessage(ctx, p.ChatID, p.MessageID)
-	return b.release(ctx, p.ChatID, p.UserID)
+	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
+		b.log.Warn("delete captcha on pass",
+			"err", err, "chat", p.ChatID, "msg", p.MessageID)
+	}
+	if err := b.release(ctx, p.ChatID, p.UserID); err != nil {
+		return err
+	}
+	b.maybeSendGreeting(ctx, p.ChatID, p.UserID)
+	return nil
 }
 
 func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) error {
@@ -348,7 +376,10 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 		b.log.Warn("increment attempt", "err", err)
 		count = 1 // fall forward as first attempt
 	}
-	_ = b.deleteMessage(ctx, p.ChatID, p.MessageID)
+	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
+		b.log.Warn("delete captcha on fail/timeout",
+			"err", err, "chat", p.ChatID, "msg", p.MessageID, "reason", reason)
+	}
 
 	if count >= b.cfg.MaxAttempts {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
