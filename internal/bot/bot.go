@@ -24,8 +24,9 @@ type Bot struct {
 	db    *storage.DB
 	log   *slog.Logger
 
-	me     *telego.User
-	runCtx context.Context
+	me        *telego.User
+	runCtx    context.Context
+	startedAt time.Time
 }
 
 func New(cfg *config.Config, log *slog.Logger) (*Bot, error) {
@@ -50,6 +51,7 @@ func (b *Bot) Username() string {
 
 func (b *Bot) Run(ctx context.Context) error {
 	b.runCtx = ctx
+	b.startedAt = time.Now()
 
 	db, err := storage.Open(ctx, b.cfg.DBPath)
 	if err != nil {
@@ -104,6 +106,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))
+	bh.HandleMessage(b.handleInfoCommand, th.CommandEqual("info"))
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
@@ -120,6 +123,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 			{Command: "stats", Description: "Статистика чата (для админов)"},
 			{Command: "greeting", Description: "Приветствие после капчи: on/off (для админов)"},
 			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
+			{Command: "info", Description: "Uptime бота (для владельцев)"},
 			{Command: "logs", Description: "Прислать лог-файл (для владельцев бота)"},
 		},
 	})
