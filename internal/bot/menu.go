@@ -366,7 +366,9 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
-		hourPresetRow(chatID, digestHourUTC, []int{6, 9, 12, 15, 18, 21}),
+		// UTC hours chosen to display as 00/04/08/12/16/20 MSK after the
+		// MSK = UTC+3 shift applied by mskHourLabel.
+		hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}),
 		{
 			tu.InlineKeyboardButton("⬅️ К статистике").
 				WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
@@ -375,12 +377,14 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
-// hourPresetRow renders a row of UTC hours as buttons, but labels them in
-// MSK (UTC+3) for user-friendliness. Stores the UTC value in the callback.
+// hourPresetRow renders a row of UTC hours as buttons, labelled in MSK
+// (UTC+3) with just the hour digits (e.g. "04"). Compact so the row fits on
+// narrow clients without Telegram collapsing buttons.
 func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.InlineKeyboardButton {
 	row := make([]telego.InlineKeyboardButton, 0, len(presetsUTC))
 	for _, utcHour := range presetsUTC {
-		label := mskHourLabel(utcHour)
+		msk := (utcHour + 3) % 24
+		label := fmt.Sprintf("%02d", msk)
 		if utcHour == currentUTC {
 			label = "• " + label + " •"
 		}
@@ -391,7 +395,8 @@ func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.Inli
 	return row
 }
 
-// mskHourLabel formats a UTC hour as "HH:00" in Moscow time.
+// mskHourLabel formats a UTC hour as "HH:00" in Moscow time. Used in the
+// settings text where the ":00" makes the hour-of-day obvious.
 func mskHourLabel(utcHour int) string {
 	msk := (utcHour + 3) % 24
 	return fmt.Sprintf("%02d:00", msk)
