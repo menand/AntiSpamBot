@@ -374,7 +374,7 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 		}
 	}
 
-	ch := captcha.New()
+	ch := captcha.New(b.effectiveCaptchaMode(ctx, chatID))
 
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
 		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
@@ -385,8 +385,8 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 
 	correct := ch.Correct()
 	text := fmt.Sprintf(
-		"Привет, %s!\nДля защиты от спама выбери <b>%s</b> кружок за %d секунд.",
-		mentionHTML(user), correct.Name, int(captchaTimeout.Seconds()),
+		"Привет, %s!\nДля защиты от спама выбери <b>%s</b> за %d секунд.",
+		mentionHTML(user), correct.Prompt, int(captchaTimeout.Seconds()),
 	)
 
 	buttons := make([]telego.InlineKeyboardButton, 0, len(ch.Options))

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -60,4 +61,19 @@ func (b *Bot) effectiveCaptchaTimeout(ctx context.Context, chatID int64) time.Du
 		return time.Duration(s.CaptchaTimeoutSeconds.Int64) * time.Second
 	}
 	return b.cfg.CaptchaTimeout
+}
+
+// effectiveCaptchaMode resolves the captcha style for a chat. Unknown
+// values stored in the DB (future / corrupt) fall back to ModeCircles.
+func (b *Bot) effectiveCaptchaMode(ctx context.Context, chatID int64) captcha.Mode {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err != nil || !s.CaptchaMode.Valid {
+		return captcha.ModeCircles
+	}
+	switch captcha.Mode(s.CaptchaMode.String) {
+	case captcha.ModeEmoji:
+		return captcha.ModeEmoji
+	default:
+		return captcha.ModeCircles
+	}
 }
