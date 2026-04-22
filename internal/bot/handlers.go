@@ -171,12 +171,23 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
+	// Service message: member left or was kicked. Delete it (same rationale
+	// as new_chat_members — "bot kicked X" / "X left the chat" spam).
+	if message.LeftChatMember != nil {
+		if b.chatAllowed(message.Chat.ID) {
+			if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+				b.log.Warn("delete leave service message",
+					"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
+			}
+		}
+		return nil
+	}
+
 	if message.From == nil || message.From.IsBot {
 		return nil
 	}
-	// Skip other service messages (leaves, title changes, etc.)
-	if message.LeftChatMember != nil ||
-		message.NewChatTitle != "" || message.NewChatPhoto != nil ||
+	// Skip other service messages (title changes, pins, etc.)
+	if message.NewChatTitle != "" || message.NewChatPhoto != nil ||
 		message.PinnedMessage != nil {
 		return nil
 	}
