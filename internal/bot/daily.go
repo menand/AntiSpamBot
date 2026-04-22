@@ -36,11 +36,8 @@ func (b *Bot) dailyDigestLoop(ctx context.Context) {
 
 func (b *Bot) maybeSendDigests(ctx context.Context) {
 	now := time.Now().UTC()
-	if now.Hour() < b.cfg.DailyStatsUTCHour {
-		return
-	}
 	today := now.Format("2006-01-02")
-	chatIDs, err := b.db.ChatsNeedingDailyStats(ctx, today)
+	chatIDs, err := b.db.ChatsNeedingDailyStats(ctx, now.Hour(), b.cfg.DailyStatsUTCHour, today)
 	if err != nil {
 		b.log.Warn("daily digest: query chats", "err", err)
 		return
@@ -51,8 +48,13 @@ func (b *Bot) maybeSendDigests(ctx context.Context) {
 }
 
 func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
-	until := time.Now()
-	from := until.Add(-24 * time.Hour)
+	// Yesterday's calendar day in UTC: from midnight yesterday to midnight
+	// today. Makes the digest report a stable "yesterday" regardless of
+	// what hour the chat chose to receive it.
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	from := midnight.Add(-24 * time.Hour)
+	until := midnight
 
 	s, err := b.db.QueryStats(ctx, chatID, from, until)
 	if err != nil {
