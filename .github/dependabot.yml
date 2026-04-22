@@ -1,0 +1,57 @@
+version: 2
+
+# Daily deps bumps. Dependabot groups patch/minor into one PR per ecosystem,
+# so we get at most 2 PRs/day (gomod + docker) instead of 10 separate ones.
+# Major-version bumps stay as individual PRs (they often need manual review).
+# Security advisories bypass this schedule and fire immediately.
+
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: daily
+      time: "04:00"
+      timezone: Europe/Moscow
+    open-pull-requests-limit: 10
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - go
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: daily
+      time: "04:00"
+      timezone: Europe/Moscow
+    groups:
+      docker-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - docker
+
+  # GitHub Actions config (.github/workflows/*.yml) changes rarely; weekly is fine.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: deps
+      include: scope
+    labels:
+      - dependencies
+      - github-actions
