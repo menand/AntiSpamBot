@@ -159,6 +159,25 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set daily stats", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "hour":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 0 || v > 23 {
+			return nil
+		}
+		if err := b.db.SetDailyStatsHour(ctx, chatID, &v); err != nil {
+			b.log.Warn("set daily hour", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	}
 	return nil
 }
@@ -319,6 +338,10 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	if s.CaptchaTimeoutSeconds.Valid {
 		timeoutSec = int(s.CaptchaTimeoutSeconds.Int64)
 	}
+	digestHourUTC := b.cfg.DailyStatsUTCHour
+	if s.DailyStatsUTCHour.Valid {
+		digestHourUTC = int(s.DailyStatsUTCHour.Int64)
+	}
 
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
@@ -326,11 +349,12 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
 			"🎉 Приветствие: <b>%s</b>\n"+
-			"📊 Ежедневная сводка в чат: <b>%s</b>",
+			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>",
 		html.EscapeString(title),
 		maxAttempts, timeoutSec,
 		onOffLabel(s.GreetingEnabled),
 		onOffLabel(s.DailyStatsEnabled),
+		mskHourLabel(digestHourUTC),
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -342,12 +366,35 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
+		hourPresetRow(chatID, digestHourUTC, []int{6, 9, 12, 15, 18, 21}),
 		{
 			tu.InlineKeyboardButton("⬅️ К статистике").
 				WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
 		},
 	}
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+// hourPresetRow renders a row of UTC hours as buttons, but labels them in
+// MSK (UTC+3) for user-friendliness. Stores the UTC value in the callback.
+func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.InlineKeyboardButton {
+	row := make([]telego.InlineKeyboardButton, 0, len(presetsUTC))
+	for _, utcHour := range presetsUTC {
+		label := mskHourLabel(utcHour)
+		if utcHour == currentUTC {
+			label = "• " + label + " •"
+		}
+		row = append(row,
+			tu.InlineKeyboardButton(label).
+				WithCallbackData(fmt.Sprintf("menu:hour:%d:%d", chatID, utcHour)))
+	}
+	return row
+}
+
+// mskHourLabel formats a UTC hour as "HH:00" in Moscow time.
+func mskHourLabel(utcHour int) string {
+	msk := (utcHour + 3) % 24
+	return fmt.Sprintf("%02d:00", msk)
 }
 
 func intPresetRow(chatID int64, key string, current int, presets []int) []telego.InlineKeyboardButton {

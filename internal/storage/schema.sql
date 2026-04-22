@@ -90,5 +90,6 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     max_attempts            INTEGER,
     captcha_timeout_seconds INTEGER,
     daily_stats_enabled     INTEGER NOT NULL DEFAULT 0,
+    daily_stats_utc_hour    INTEGER,
     last_daily_stats_day    TEXT
 );

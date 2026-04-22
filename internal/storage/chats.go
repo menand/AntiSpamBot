@@ -41,6 +41,7 @@ type ChatSettings struct {
 	MaxAttempts           sql.NullInt64 // NULL = use global
 	CaptchaTimeoutSeconds sql.NullInt64 // NULL = use global
 	DailyStatsEnabled     bool          // defaults to false when no row exists
+	DailyStatsUTCHour     sql.NullInt64 // NULL = use global DAILY_STATS_UTC_HOUR
 	LastDailyStatsDay     sql.NullString
 }
 
@@ -52,11 +53,11 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	var greetingInt, dailyInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
-		       daily_stats_enabled, last_daily_stats_day
+		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
-		&dailyInt, &s.LastDailyStatsDay)
+		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -127,6 +128,24 @@ func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *in
 	return nil
 }
 
+// SetDailyStatsHour overrides the UTC hour (0-23) at which the daily digest
+// is posted for this chat. Pass nil to clear (fall back to the global default).
+func (d *DB) SetDailyStatsHour(ctx context.Context, chatID int64, utcHour *int) error {
+	var v any
+	if utcHour != nil {
+		v = int64(*utcHour)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, daily_stats_utc_hour)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET daily_stats_utc_hour = excluded.daily_stats_utc_hour
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set daily_stats_utc_hour: %w", err)
+	}
+	return nil
+}
+
 // SetDailyStatsEnabled toggles whether the bot posts a daily digest to this
 // chat. Default is off.
 func (d *DB) SetDailyStatsEnabled(ctx context.Context, chatID int64, enabled bool) error {
@@ -159,14 +178,18 @@ func (d *DB) MarkDailyStatsSent(ctx context.Context, chatID int64, day string) e
 	return nil
 }
 
-// ChatsNeedingDailyStats returns chat IDs where daily stats are enabled and
-// the last digest wasn't sent today.
-func (d *DB) ChatsNeedingDailyStats(ctx context.Context, day string) ([]int64, error) {
+// ChatsNeedingDailyStats returns chat IDs where:
+//   - daily stats are enabled,
+//   - the chat's effective UTC hour (per-chat override or defaultHour) has
+//     been reached (currentHour >= effective hour),
+//   - today's digest hasn't been sent yet.
+func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentHour, defaultHour int, day string) ([]int64, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT chat_id FROM chat_settings
 		WHERE daily_stats_enabled = 1
+		  AND COALESCE(daily_stats_utc_hour, ?) <= ?
 		  AND (last_daily_stats_day IS NULL OR last_daily_stats_day != ?)
-	`, day)
+	`, defaultHour, currentHour, day)
 	if err != nil {
 		return nil, fmt.Errorf("chats needing daily: %w", err)
 	}
