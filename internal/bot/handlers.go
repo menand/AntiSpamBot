@@ -192,6 +192,17 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
+	// User is in the pre-captcha delay window (or still has an active captcha
+	// that somehow slipped past restriction): delete whatever they wrote.
+	// Don't proceed to stats/silence detection for these messages.
+	if b.store.IsCaptchaActive(message.Chat.ID, message.From.ID) {
+		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+			b.log.Warn("delete pre-captcha message",
+				"err", err, "chat", message.Chat.ID, "user", message.From.ID)
+		}
+		return nil
+	}
+
 	chatID := message.Chat.ID
 	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
@@ -281,6 +292,14 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User) {
 			"chat", chatID, "user", user.ID)
 		return
 	}
+	// Run the captcha flow asynchronously — it sleeps for CaptchaDelay to let
+	// the user's Telegram client fully render the chat before the captcha
+	// arrives. During that window, handleGroupMessage deletes any messages
+	// they send (store.IsCaptchaActive returns true while inflight is held).
+	go b.runCaptcha(chatID, user)
+}
+
+func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 	defer b.store.FinishKickoff(chatID, user.ID)
 
 	ctx := b.runCtx
@@ -294,6 +313,18 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User) {
 		LastName:  user.LastName,
 		Username:  user.Username,
 	})
+
+	// Sleep before the captcha flow so the user's client has time to fully
+	// open the chat. Without this, the captcha message + immediate restrict
+	// event sometimes don't merge into the user's already-rendered view and
+	// they only see the captcha after reopening the chat.
+	if b.cfg.CaptchaDelay > 0 {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(b.cfg.CaptchaDelay):
+		}
+	}
 
 	ch := captcha.New()
 

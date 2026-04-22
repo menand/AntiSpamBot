@@ -21,6 +21,7 @@ type Config struct {
 	SilentAnnounceDays int // 0 = disabled
 	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
 	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
+	CaptchaDelay       time.Duration      // delay between join and sending captcha
 }
 
 func Load() (*Config, error) {
@@ -81,6 +82,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	captchaDelay, err := parseDurationMs("CAPTCHA_DELAY_MS", 2000*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+	if captchaDelay < 0 {
+		return nil, errors.New("CAPTCHA_DELAY_MS must be >= 0")
+	}
+
 	return &Config{
 		Token:              token,
 		CaptchaTimeout:     timeout,
@@ -92,7 +101,20 @@ func Load() (*Config, error) {
 		SilentAnnounceDays: silentDays,
 		OwnerIDs:           ownerIDs,
 		LogFile:            os.Getenv("LOG_FILE"),
+		CaptchaDelay:       captchaDelay,
 	}, nil
+}
+
+func parseDurationMs(name string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	ms, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 func parseDurationSec(name string, def time.Duration) (time.Duration, error) {
