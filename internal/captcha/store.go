@@ -96,6 +96,19 @@ func (s *Store) Exists(chatID, userID int64) bool {
 	return ok
 }
 
+// IsCaptchaActive reports whether the user is either in the middle of a
+// captcha kickoff (pre-Put) or has an active pending captcha. Used to decide
+// whether to delete messages arriving from the user before they're restricted.
+func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(chatID, userID)
+	if _, ok := s.items[k]; ok {
+		return true
+	}
+	return s.inflight[k]
+}
+
 func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
