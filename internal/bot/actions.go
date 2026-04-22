@@ -10,15 +10,28 @@ import (
 )
 
 func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
-	err := b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
-		ChatID:      tu.ID(chatID),
-		UserID:      userID,
-		Permissions: telego.ChatPermissions{},
-	})
-	if err != nil {
-		return fmt.Errorf("restrict: %w", err)
+	// Retry with backoff — a DNS/TCP blip on this call means the user is NOT
+	// restricted and no captcha gets sent. Worse than a retry delay.
+	backoffs := []time.Duration{0, 1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
+	for _, wait := range backoffs {
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("restrict: %w", ctx.Err())
+			case <-time.After(wait):
+			}
+		}
+		lastErr = b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
+			ChatID:      tu.ID(chatID),
+			UserID:      userID,
+			Permissions: telego.ChatPermissions{},
+		})
+		if lastErr == nil {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("restrict after retries: %w", lastErr)
 }
 
 func (b *Bot) release(ctx context.Context, chatID, userID int64) error {
