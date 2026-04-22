@@ -358,8 +358,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
-		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}),
-		intPresetRow(chatID, "tmo", timeoutSec, []int{15, 30, 60, 120}),
+		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}, "х"),
+		intPresetRow(chatID, "tmo", timeoutSec, []int{15, 30, 45, 60}, "с"),
 		{
 			tu.InlineKeyboardButton(toggleLabel("🎉 Приветствие", s.GreetingEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
@@ -397,10 +397,10 @@ func mskHourLabel(utcHour int) string {
 	return fmt.Sprintf("%02d:00", msk)
 }
 
-func intPresetRow(chatID int64, key string, current int, presets []int) []telego.InlineKeyboardButton {
+func intPresetRow(chatID int64, key string, current int, presets []int, suffix string) []telego.InlineKeyboardButton {
 	row := make([]telego.InlineKeyboardButton, 0, len(presets))
 	for _, v := range presets {
-		label := strconv.Itoa(v)
+		label := strconv.Itoa(v) + suffix
 		if v == current {
 			label = "• " + label + " •"
 		}
