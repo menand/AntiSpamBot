@@ -116,12 +116,24 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) setCommands(ctx context.Context) error {
+	// Clear any commands that were previously announced at the default or
+	// group scope — we want the "/" menu empty in groups.
+	_ = b.api.DeleteMyCommands(ctx, &telego.DeleteMyCommandsParams{
+		Scope: &telego.BotCommandScopeAllGroupChats{Type: "all_group_chats"},
+	})
+	_ = b.api.DeleteMyCommands(ctx, &telego.DeleteMyCommandsParams{
+		Scope: &telego.BotCommandScopeAllChatAdministrators{Type: "all_chat_administrators"},
+	})
+	_ = b.api.DeleteMyCommands(ctx, &telego.DeleteMyCommandsParams{
+		Scope: &telego.BotCommandScopeDefault{Type: "default"},
+	})
+
+	// Only private chats see the "/" command menu.
 	return b.api.SetMyCommands(ctx, &telego.SetMyCommandsParams{
+		Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		Commands: []telego.BotCommand{
 			{Command: "start", Description: "Меню"},
 			{Command: "help", Description: "Справка"},
-			{Command: "stats", Description: "Статистика чата (для админов)"},
-			{Command: "greeting", Description: "Приветствие после капчи: on/off (для админов)"},
 			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
 			{Command: "info", Description: "Uptime бота (для владельцев)"},
 			{Command: "logs", Description: "Прислать лог-файл (для владельцев бота)"},
