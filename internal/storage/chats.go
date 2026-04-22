@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -27,6 +28,38 @@ func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 		time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("remember chat: %w", err)
+	}
+	return nil
+}
+
+// GetGreetingEnabled returns whether the bot should greet new members after
+// they pass captcha in this chat. Defaults to true when no row exists.
+func (d *DB) GetGreetingEnabled(ctx context.Context, chatID int64) (bool, error) {
+	var v int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT greeting_enabled FROM chat_settings WHERE chat_id = ?`,
+		chatID).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return true, fmt.Errorf("get greeting: %w", err)
+	}
+	return v != 0, nil
+}
+
+func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, greeting_enabled)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET greeting_enabled = excluded.greeting_enabled
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set greeting: %w", err)
 	}
 	return nil
 }

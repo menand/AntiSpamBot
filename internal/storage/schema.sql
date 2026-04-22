@@ -78,3 +78,9 @@ CREATE TABLE IF NOT EXISTS chats (
     type       TEXT,
     updated_at INTEGER NOT NULL
 );
+
+-- Per-chat configurable behavior. Absent row = defaults (greeting enabled).
+CREATE TABLE IF NOT EXISTS chat_settings (
+    chat_id          INTEGER PRIMARY KEY,
+    greeting_enabled INTEGER NOT NULL DEFAULT 1
+);
