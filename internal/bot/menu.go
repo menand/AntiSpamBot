@@ -69,8 +69,23 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.renderChatStats(ctx, query, chatID, statsPeriod(parts[3]))
+	case "settings":
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "gr":
-		if len(parts) != 4 {
+		// Toggles greeting. Supports both old format (menu:gr:chat:period)
+		// which comes from stale inline buttons, and new format
+		// (menu:gr:chat) from the settings submenu.
+		if len(parts) < 3 {
 			return nil
 		}
 		chatID, err := strconv.ParseInt(parts[2], 10, 64)
@@ -89,7 +104,61 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set greeting in menu", "err", err)
 			return nil
 		}
-		return b.renderChatStats(ctx, query, chatID, statsPeriod(parts[3]))
+		return b.renderChatSettings(ctx, query, chatID)
+	case "max":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 1 || v > 100 {
+			return nil
+		}
+		if err := b.db.SetMaxAttempts(ctx, chatID, &v); err != nil {
+			b.log.Warn("set max_attempts", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "tmo":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 5 || v > 600 {
+			return nil
+		}
+		if err := b.db.SetCaptchaTimeoutSec(ctx, chatID, &v); err != nil {
+			b.log.Warn("set captcha_timeout", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "daily":
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		s, _ := b.db.GetChatSettings(ctx, chatID)
+		if err := b.db.SetDailyStatsEnabled(ctx, chatID, !s.DailyStatsEnabled); err != nil {
+			b.log.Warn("set daily stats", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	}
 	return nil
 }
@@ -217,12 +286,6 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		html.EscapeString(title),
 		renderStats(p, s, b.cfg.NewcomerDays, topWriters, topFailers, infos))
 
-	greetingEnabled, _ := b.db.GetGreetingEnabled(ctx, chatID)
-	greetingLabel := "🎉 Приветствие: ✅"
-	if !greetingEnabled {
-		greetingLabel = "🎉 Приветствие: ❌"
-	}
-
 	rows := [][]telego.InlineKeyboardButton{
 		{
 			periodButton(chatID, periodDay, p, "Сутки"),
@@ -231,14 +294,85 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 			periodButton(chatID, periodAll, p, "Всё"),
 		},
 		{
-			tu.InlineKeyboardButton(greetingLabel).
-				WithCallbackData(fmt.Sprintf("menu:gr:%d:%s", chatID, p)),
+			tu.InlineKeyboardButton("⚙️ Настройки").
+				WithCallbackData(fmt.Sprintf("menu:settings:%d", chatID)),
 		},
 		{
 			tu.InlineKeyboardButton("⬅️ К списку чатов").WithCallbackData(cbChats),
 		},
 	}
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, chatID int64) error {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err != nil {
+		b.log.Warn("get chat settings", "err", err)
+		return nil
+	}
+
+	maxAttempts := b.cfg.MaxAttempts
+	if s.MaxAttempts.Valid {
+		maxAttempts = int(s.MaxAttempts.Int64)
+	}
+	timeoutSec := int(b.cfg.CaptchaTimeout.Seconds())
+	if s.CaptchaTimeoutSeconds.Valid {
+		timeoutSec = int(s.CaptchaTimeoutSeconds.Int64)
+	}
+
+	title := b.chatTitle(ctx, chatID)
+	text := fmt.Sprintf(
+		"⚙️ <b>Настройки: %s</b>\n\n"+
+			"🔄 Попыток до бана: <b>%d</b>\n"+
+			"⏱ Секунд на ответ: <b>%d</b>\n"+
+			"🎉 Приветствие: <b>%s</b>\n"+
+			"📊 Ежедневная сводка в чат: <b>%s</b>",
+		html.EscapeString(title),
+		maxAttempts, timeoutSec,
+		onOffLabel(s.GreetingEnabled),
+		onOffLabel(s.DailyStatsEnabled),
+	)
+
+	rows := [][]telego.InlineKeyboardButton{
+		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}),
+		intPresetRow(chatID, "tmo", timeoutSec, []int{15, 30, 60, 120}),
+		{
+			tu.InlineKeyboardButton(toggleLabel("🎉 Приветствие", s.GreetingEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
+			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
+		},
+		{
+			tu.InlineKeyboardButton("⬅️ К статистике").
+				WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
+		},
+	}
+	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func intPresetRow(chatID int64, key string, current int, presets []int) []telego.InlineKeyboardButton {
+	row := make([]telego.InlineKeyboardButton, 0, len(presets))
+	for _, v := range presets {
+		label := strconv.Itoa(v)
+		if v == current {
+			label = "• " + label + " •"
+		}
+		row = append(row,
+			tu.InlineKeyboardButton(label).
+				WithCallbackData(fmt.Sprintf("menu:%s:%d:%d", key, chatID, v)))
+	}
+	return row
+}
+
+func onOffLabel(on bool) string {
+	if on {
+		return "✅"
+	}
+	return "❌"
+}
+
+func toggleLabel(prefix string, on bool) string {
+	return prefix + " " + onOffLabel(on)
 }
 
 func periodButton(chatID int64, want, current statsPeriod, label string) telego.InlineKeyboardButton {

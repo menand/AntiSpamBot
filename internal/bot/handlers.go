@@ -381,10 +381,12 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 		return
 	}
 
+	captchaTimeout := b.effectiveCaptchaTimeout(ctx, chatID)
+
 	correct := ch.Correct()
 	text := fmt.Sprintf(
 		"Привет, %s!\nДля защиты от спама выбери <b>%s</b> кружок за %d секунд.",
-		mentionHTML(user), correct.Name, int(b.cfg.CaptchaTimeout.Seconds()),
+		mentionHTML(user), correct.Name, int(captchaTimeout.Seconds()),
 	)
 
 	buttons := make([]telego.InlineKeyboardButton, 0, len(ch.Options))
@@ -405,7 +407,7 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 		return
 	}
 
-	expires := time.Now().Add(b.cfg.CaptchaTimeout)
+	expires := time.Now().Add(captchaTimeout)
 	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires)
 
 	if err := b.db.PutPending(ctx, storage.PendingRow{
@@ -476,7 +478,7 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 			"err", err, "chat", p.ChatID, "msg", p.MessageID, "reason", reason)
 	}
 
-	if count >= b.cfg.MaxAttempts {
+	if count >= b.effectiveMaxAttempts(ctx, p.ChatID) {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now())
 		return b.ban(ctx, p.ChatID, p.UserID)

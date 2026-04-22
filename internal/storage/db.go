@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -33,6 +34,26 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		_ = raw.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
+
+	// Additive migrations for existing DBs. Fresh DBs already have these
+	// columns via schema.sql; the ALTER TABLE here harmlessly fails with
+	// "duplicate column name" and we ignore it. Keep entries idempotent —
+	// add-column with a default or NULL, no data rewrites.
+	migrations := []string{
+		`ALTER TABLE chat_settings ADD COLUMN max_attempts INTEGER`,
+		`ALTER TABLE chat_settings ADD COLUMN captcha_timeout_seconds INTEGER`,
+		`ALTER TABLE chat_settings ADD COLUMN daily_stats_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE chat_settings ADD COLUMN last_daily_stats_day TEXT`,
+	}
+	for _, stmt := range migrations {
+		if _, err := raw.ExecContext(ctx, stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				_ = raw.Close()
+				return nil, fmt.Errorf("apply migration %q: %w", stmt, err)
+			}
+		}
+	}
+
 	return &DB{sql: raw}, nil
 }
 

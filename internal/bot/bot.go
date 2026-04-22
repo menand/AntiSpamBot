@@ -72,6 +72,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 
 	go b.attemptsSweepLoop(ctx)
+	go b.dailyDigestLoop(ctx)
 
 	b.notifyOwners(ctx, fmt.Sprintf(
 		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВосстановлено капч: %d",
