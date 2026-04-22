@@ -273,11 +273,16 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 }
 
 func (b *Bot) startCaptcha(chatID int64, user telego.User) {
-	if b.store.Exists(chatID, user.ID) {
+	// Race guard: chat_member events and message.new_chat_members can both
+	// fire for the same join. Without a kickoff lock they race through the
+	// pre-Put phase (restrict + send) and produce two captcha messages.
+	if !b.store.BeginKickoff(chatID, user.ID) {
 		b.log.Debug("captcha already in progress, skipping duplicate kickoff",
 			"chat", chatID, "user", user.ID)
 		return
 	}
+	defer b.store.FinishKickoff(chatID, user.ID)
+
 	ctx := b.runCtx
 
 	// Cache display name now — we'll need it when sending the greeting after a

@@ -26,12 +26,43 @@ func (p *Pending) Done() <-chan struct{} {
 }
 
 type Store struct {
-	mu    sync.Mutex
-	items map[string]*Pending
+	mu       sync.Mutex
+	items    map[string]*Pending
+	inflight map[string]bool // kickoffs currently in setup (pre-Put)
 }
 
 func NewStore() *Store {
-	return &Store{items: make(map[string]*Pending)}
+	return &Store{
+		items:    make(map[string]*Pending),
+		inflight: make(map[string]bool),
+	}
+}
+
+// BeginKickoff marks (chatID, userID) as being set up for a captcha. Returns
+// true if we won the race and the caller is responsible for calling
+// FinishKickoff when done (regardless of whether Put was reached). Returns
+// false if another captcha is already active or another kickoff is already
+// in progress — the caller should bail out silently.
+func (s *Store) BeginKickoff(chatID, userID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := key(chatID, userID)
+	if _, ok := s.items[k]; ok {
+		return false
+	}
+	if s.inflight[k] {
+		return false
+	}
+	s.inflight[k] = true
+	return true
+}
+
+// FinishKickoff clears the in-flight flag. Safe to call multiple times.
+// Must be called by the same caller that got `true` from BeginKickoff.
+func (s *Store) FinishKickoff(chatID, userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.inflight, key(chatID, userID))
 }
 
 func key(chatID, userID int64) string {

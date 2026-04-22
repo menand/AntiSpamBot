@@ -44,6 +44,54 @@ func TestPendingCancelIsIdempotent(t *testing.T) {
 	p.Cancel()
 }
 
+func TestBeginKickoffExclusive(t *testing.T) {
+	s := NewStore()
+
+	const workers = 50
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	var won int32
+	var mu sync.Mutex
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			if s.BeginKickoff(1, 2) {
+				mu.Lock()
+				won++
+				mu.Unlock()
+				// simulate some setup work before either Put or cleanup
+				time.Sleep(time.Millisecond)
+				s.FinishKickoff(1, 2)
+			}
+		}()
+	}
+	wg.Wait()
+	if won != 1 {
+		t.Fatalf("expected exactly 1 kickoff to win, got %d", won)
+	}
+
+	// After everyone finished, next kickoff should succeed
+	if !s.BeginKickoff(1, 2) {
+		t.Fatal("kickoff should succeed after all previous ones finished")
+	}
+	s.FinishKickoff(1, 2)
+}
+
+func TestBeginKickoffBlockedByActiveCaptcha(t *testing.T) {
+	s := NewStore()
+	s.Put(1, 2, 100, 0, time.Now().Add(time.Minute))
+
+	if s.BeginKickoff(1, 2) {
+		t.Fatal("kickoff should fail when a captcha is already active")
+	}
+
+	s.Take(1, 2)
+	if !s.BeginKickoff(1, 2) {
+		t.Fatal("kickoff should succeed after Take cleared the captcha")
+	}
+	s.FinishKickoff(1, 2)
+}
+
 func TestStoreConcurrentTake(t *testing.T) {
 	s := NewStore()
 	s.Put(1, 2, 0, 0, time.Now().Add(time.Minute))
