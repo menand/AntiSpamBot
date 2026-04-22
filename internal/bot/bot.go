@@ -84,7 +84,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}()
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		AllowedUpdates: []string{"message", "callback_query", "chat_member"},
+		AllowedUpdates: []string{"message", "callback_query", "chat_member", "my_chat_member"},
 	})
 	if err != nil {
 		return fmt.Errorf("long polling: %w", err)
@@ -101,6 +101,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
+	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))

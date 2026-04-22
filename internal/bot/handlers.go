@@ -56,6 +56,31 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	return nil
 }
 
+// handleMyChatMember tracks the bot's own membership across chats. When the
+// bot leaves (voluntarily or via kick), we remove the chat from the registry
+// so it stops appearing in owners'/admins' "Мои чаты" menu. Historical
+// stats for the chat stay in the DB for archival.
+func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
+	upd := update.MyChatMember
+	if upd == nil {
+		return nil
+	}
+	oldStatus := upd.OldChatMember.MemberStatus()
+	newStatus := upd.NewChatMember.MemberStatus()
+	b.log.Info("my_chat_member event",
+		"chat", upd.Chat.ID,
+		"chat_type", upd.Chat.Type,
+		"old", oldStatus, "new", newStatus)
+
+	if newStatus == "left" || newStatus == "kicked" {
+		if err := b.db.DeleteChat(b.runCtx, upd.Chat.ID); err != nil {
+			b.log.Warn("delete chat on bot leave",
+				"err", err, "chat", upd.Chat.ID)
+		}
+	}
+	return nil
+}
+
 // onUserJoined is the common kickoff for both chat_member events and
 // message.new_chat_members service messages. Safe to call multiple times
 // for the same user — startCaptcha dedups via the in-memory store.
@@ -137,6 +162,29 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 
 func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error {
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+
+	// Service message: basic group upgraded to supergroup. Telegram emits
+	// MigrateToChatID in the old group and MigrateFromChatID in the new one;
+	// we handle both as insurance. MigrateChat is idempotent, so a double
+	// fire is harmless.
+	if message.MigrateToChatID != 0 {
+		oldID := message.Chat.ID
+		newID := message.MigrateToChatID
+		b.log.Info("chat migrating to supergroup", "old", oldID, "new", newID)
+		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
+			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
+		}
+		return nil
+	}
+	if message.MigrateFromChatID != 0 {
+		oldID := message.MigrateFromChatID
+		newID := message.Chat.ID
+		b.log.Info("chat migrated from basic group", "old", oldID, "new", newID)
+		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
+			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
+		}
 		return nil
 	}
 
