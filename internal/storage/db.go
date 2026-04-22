@@ -45,6 +45,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		`ALTER TABLE chat_settings ADD COLUMN daily_stats_enabled INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE chat_settings ADD COLUMN last_daily_stats_day TEXT`,
 		`ALTER TABLE chat_settings ADD COLUMN daily_stats_utc_hour INTEGER`,
+		`ALTER TABLE chat_settings ADD COLUMN captcha_mode TEXT`,
 	}
 	for _, stmt := range migrations {
 		if _, err := raw.ExecContext(ctx, stmt); err != nil {

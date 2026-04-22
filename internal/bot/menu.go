@@ -10,6 +10,7 @@ import (
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
+	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -178,6 +179,25 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set daily hour", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "cmode":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		mode := parts[3]
+		if mode != string(captcha.ModeCircles) && mode != string(captcha.ModeEmoji) {
+			return nil
+		}
+		if err := b.db.SetCaptchaMode(ctx, chatID, &mode); err != nil {
+			b.log.Warn("set captcha mode", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	}
 	return nil
 }
@@ -342,15 +362,21 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	if s.DailyStatsUTCHour.Valid {
 		digestHourUTC = int(s.DailyStatsUTCHour.Int64)
 	}
+	captchaMode := captcha.ModeCircles
+	if s.CaptchaMode.Valid && captcha.Mode(s.CaptchaMode.String) == captcha.ModeEmoji {
+		captchaMode = captcha.ModeEmoji
+	}
 
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
 		"⚙️ <b>Настройки: %s</b>\n\n"+
+			"🧩 Капча: <b>%s</b>\n"+
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
 			"🎉 Приветствие: <b>%s</b>\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>",
 		html.EscapeString(title),
+		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
 		onOffLabel(s.GreetingEnabled),
 		onOffLabel(s.DailyStatsEnabled),
@@ -358,6 +384,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
+		captchaModeRow(chatID, captchaMode),
 		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}, "х"),
 		intPresetRow(chatID, "tmo", timeoutSec, []int{15, 30, 45, 60}, "с"),
 		{
@@ -375,6 +402,34 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		},
 	}
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardButton {
+	opts := []struct {
+		mode  captcha.Mode
+		label string
+	}{
+		{captcha.ModeCircles, "🟢 Кружки"},
+		{captcha.ModeEmoji, "🦋 Эмодзи"},
+	}
+	row := make([]telego.InlineKeyboardButton, 0, len(opts))
+	for _, o := range opts {
+		label := o.label
+		if o.mode == current {
+			label = "• " + label + " •"
+		}
+		row = append(row,
+			tu.InlineKeyboardButton(label).
+				WithCallbackData(fmt.Sprintf("menu:cmode:%d:%s", chatID, o.mode)))
+	}
+	return row
+}
+
+func captchaModeLabel(m captcha.Mode) string {
+	if m == captcha.ModeEmoji {
+		return "Эмодзи"
+	}
+	return "Кружки"
 }
 
 // hourPresetRow renders a row of UTC hours as buttons, labelled in MSK

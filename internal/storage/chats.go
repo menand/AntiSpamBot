@@ -43,6 +43,7 @@ type ChatSettings struct {
 	DailyStatsEnabled     bool          // defaults to false when no row exists
 	DailyStatsUTCHour     sql.NullInt64 // NULL = use global DAILY_STATS_UTC_HOUR
 	LastDailyStatsDay     sql.NullString
+	CaptchaMode           sql.NullString // NULL = default (circles)
 }
 
 // GetChatSettings loads the full settings row for a chat, applying defaults
@@ -53,11 +54,13 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	var greetingInt, dailyInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
-		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day
+		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
+		       captcha_mode
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
-		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay)
+		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
+		&s.CaptchaMode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -124,6 +127,26 @@ func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *in
 	`, chatID, v)
 	if err != nil {
 		return fmt.Errorf("set captcha_timeout_seconds: %w", err)
+	}
+	return nil
+}
+
+// SetCaptchaMode stores the captcha style for this chat. Pass nil to clear
+// the override (fall back to the default mode). The bot validates known
+// values before calling this; unknown strings round-trip as-is but the bot
+// falls back to default at use time.
+func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) error {
+	var v any
+	if mode != nil {
+		v = *mode
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, captcha_mode)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET captcha_mode = excluded.captcha_mode
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set captcha_mode: %w", err)
 	}
 	return nil
 }

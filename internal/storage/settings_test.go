@@ -50,6 +50,34 @@ func TestSetMaxAttempts(t *testing.T) {
 	}
 }
 
+func TestSetCaptchaMode(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	s, _ := db.GetChatSettings(ctx, 1)
+	if s.CaptchaMode.Valid {
+		t.Error("default captcha_mode should be NULL")
+	}
+
+	v := "emoji"
+	if err := db.SetCaptchaMode(ctx, 1, &v); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.CaptchaMode.Valid || s.CaptchaMode.String != "emoji" {
+		t.Errorf("got %+v, want emoji", s.CaptchaMode)
+	}
+
+	// Clear.
+	if err := db.SetCaptchaMode(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.CaptchaMode.Valid {
+		t.Errorf("expected NULL after clear, got %+v", s.CaptchaMode)
+	}
+}
+
 func TestSetCaptchaTimeoutSec(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
