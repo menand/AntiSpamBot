@@ -45,9 +45,6 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 	case "add":
 		return b.editWithMenu(ctx, query, b.addInstructionsText(), backKeyboard())
 	case "chats":
-		if !b.isOwner(query.From.ID) {
-			return nil
-		}
 		return b.renderChatsMenu(ctx, query)
 	case "logs":
 		if !b.isOwner(query.From.ID) {
@@ -61,14 +58,35 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		return b.handleLogsCommand(ctx, synthetic)
 	case "stats":
-		if !b.isOwner(query.From.ID) {
-			return nil
-		}
 		if len(parts) != 4 {
 			return nil
 		}
 		chatID, err := strconv.ParseInt(parts[2], 10, 64)
 		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		return b.renderChatStats(ctx, query, chatID, statsPeriod(parts[3]))
+	case "gr":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		enabled, err := b.db.GetGreetingEnabled(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get greeting in menu", "err", err)
+			return nil
+		}
+		if err := b.db.SetGreetingEnabled(ctx, chatID, !enabled); err != nil {
+			b.log.Warn("set greeting in menu", "err", err)
 			return nil
 		}
 		return b.renderChatStats(ctx, query, chatID, statsPeriod(parts[3]))
@@ -92,11 +110,11 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 			tu.InlineKeyboardButton("📖 Справка").WithCallbackData(cbHelp),
 			tu.InlineKeyboardButton("➕ В группу").WithCallbackData(cbAdd),
 		},
+		{
+			tu.InlineKeyboardButton("📊 Мои чаты").WithCallbackData(cbChats),
+		},
 	}
 	if b.isOwner(userID) {
-		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton("📊 Мои чаты").WithCallbackData(cbChats),
-		})
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton("📄 Прислать лог").WithCallbackData("menu:logs"),
 		})
@@ -147,17 +165,17 @@ func backKeyboard() *telego.InlineKeyboardMarkup {
 }
 
 func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error {
-	chats, err := b.db.ListChats(ctx)
+	chats, err := b.userChats(ctx, query.From.ID)
 	if err != nil {
-		b.log.Warn("list chats", "err", err)
+		b.log.Warn("user chats", "err", err)
 		return nil
 	}
 	var sb strings.Builder
-	sb.WriteString("📊 <b>Чаты, где я работаю</b>\n\n")
+	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
 	if len(chats) == 0 {
-		sb.WriteString("<i>Пока ни одного чата не замечено. Добавь меня в группу и дождись первого события.</i>")
+		sb.WriteString("<i>У тебя нет чатов, которыми я управляю. Добавь меня в группу как администратора — и ты сможешь настраивать её отсюда.</i>")
 	} else {
-		fmt.Fprintf(&sb, "Найдено чатов: %d\nВыбери чат для статистики.", len(chats))
+		fmt.Fprintf(&sb, "Найдено чатов: %d\nВыбери чат для настроек и статистики.", len(chats))
 	}
 
 	rows := make([][]telego.InlineKeyboardButton, 0, len(chats)+1)
@@ -199,12 +217,22 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		html.EscapeString(title),
 		renderStats(p, s, b.cfg.NewcomerDays, topWriters, topFailers, infos))
 
+	greetingEnabled, _ := b.db.GetGreetingEnabled(ctx, chatID)
+	greetingLabel := "🎉 Приветствие: ✅"
+	if !greetingEnabled {
+		greetingLabel = "🎉 Приветствие: ❌"
+	}
+
 	rows := [][]telego.InlineKeyboardButton{
 		{
 			periodButton(chatID, periodDay, p, "Сутки"),
 			periodButton(chatID, periodWeek, p, "Неделя"),
 			periodButton(chatID, periodMonth, p, "Месяц"),
 			periodButton(chatID, periodAll, p, "Всё"),
+		},
+		{
+			tu.InlineKeyboardButton(greetingLabel).
+				WithCallbackData(fmt.Sprintf("menu:gr:%d:%s", chatID, p)),
 		},
 		{
 			tu.InlineKeyboardButton("⬅️ К списку чатов").WithCallbackData(cbChats),
@@ -251,23 +279,21 @@ func (b *Bot) handleChatsCommand(ctx *th.Context, message telego.Message) error 
 	if message.Chat.Type != "private" {
 		return nil
 	}
-	if message.From == nil || !b.isOwner(message.From.ID) {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Команда доступна только владельцам бота (OWNER_IDS)."))
+	if message.From == nil {
 		return nil
 	}
-	chats, err := b.db.ListChats(ctx)
+	chats, err := b.userChats(ctx, message.From.ID)
 	if err != nil {
-		b.log.Warn("list chats", "err", err)
+		b.log.Warn("user chats", "err", err)
 		return nil
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📊 <b>Чаты, где я работаю</b>\n\n")
+	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
 	if len(chats) == 0 {
-		sb.WriteString("<i>Пока ни одного чата не замечено.</i>")
+		sb.WriteString("<i>У тебя нет чатов, которыми я управляю. Добавь меня в группу как администратора — и ты сможешь настраивать её отсюда.</i>")
 	} else {
-		fmt.Fprintf(&sb, "Найдено чатов: %d\nВыбери чат для статистики.", len(chats))
+		fmt.Fprintf(&sb, "Найдено чатов: %d\nВыбери чат для настроек и статистики.", len(chats))
 	}
 
 	rows := make([][]telego.InlineKeyboardButton, 0, len(chats))

@@ -13,59 +13,11 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-func (b *Bot) handleStatsCommand(ctx *th.Context, message telego.Message) error {
-	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
-		return nil
-	}
-	if !b.chatAllowed(message.Chat.ID) {
-		return nil
-	}
-	if message.From == nil {
-		return nil
-	}
-
-	if !b.isOwner(message.From.ID) {
-		isAdmin, err := b.isChatAdmin(ctx, message.Chat.ID, message.From.ID)
-		if err != nil {
-			b.log.Warn("check admin", "err", err)
-			return nil
-		}
-		if !isAdmin {
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-				"Команда доступна только администраторам чата.").
-				WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
-			return nil
-		}
-	}
-
-	period := parseStatsPeriod(message.Text)
-	from, until := statsRange(period)
-
-	s, err := b.db.QueryStats(ctx, message.Chat.ID, from, until)
-	if err != nil {
-		b.log.Error("query stats", "err", err)
-		return nil
-	}
-
-	topWriters, err := b.db.TopWriters(ctx, message.Chat.ID, from, until, 5)
-	if err != nil {
-		b.log.Warn("top writers", "err", err)
-	}
-	topFailers, err := b.db.TopFailers(ctx, message.Chat.ID, from, until, 5)
-	if err != nil {
-		b.log.Warn("top failers", "err", err)
-	}
-
-	infos, err := b.db.GetUserInfos(ctx, collectUserIDs(topWriters, topFailers))
-	if err != nil {
-		b.log.Warn("get user infos", "err", err)
-		infos = map[int64]storage.UserInfo{}
-	}
-
-	text := renderStats(period, s, b.cfg.NewcomerDays, topWriters, topFailers, infos)
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-		WithParseMode(telego.ModeHTML).
-		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
+// handleStatsCommand is a no-op. Stats and settings are now accessed only via
+// the DM menu (/chats → pick chat → stats view). The handler stays registered
+// so that if someone types /stats in a group the command is swallowed without
+// the bot replying in the chat.
+func (b *Bot) handleStatsCommand(_ *th.Context, _ telego.Message) error {
 	return nil
 }
 
