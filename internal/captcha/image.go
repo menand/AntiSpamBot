@@ -118,20 +118,21 @@ func drawGlyph(canvas *image.RGBA, glyph image.Image, rng *rand.Rand) {
 	scale := 0.8 + rng.Float64()*0.4
 	angle := (rng.Float64()*50 - 25) * math.Pi / 180
 
-	// Rotation grows the bounding box; budget 1.35× so the glyph never
-	// clips at the canvas edge.
+	// Rotation grows the bounding box; budget 1.35× and place the glyph
+	// CENTER so the rotated bbox keeps `margin` clearance on every side.
 	eff := float64(src.Dx()) * scale * 1.35
 	const margin = 12.0
-	tx := margin + rng.Float64()*math.Max(1, float64(imgW)-eff-2*margin)
-	ty := margin + rng.Float64()*math.Max(1, float64(imgH)-eff-2*margin)
+	half := eff / 2
+	cxDst := margin + half + rng.Float64()*math.Max(1, float64(imgW)-eff-2*margin)
+	cyDst := margin + half + rng.Float64()*math.Max(1, float64(imgH)-eff-2*margin)
 
 	cx, cy := float64(src.Dx())/2, float64(src.Dy())/2
 	cos, sin := math.Cos(angle), math.Sin(angle)
 	s := scale
-	// p' = T(target center) ∘ R(angle) ∘ S(s) ∘ T(-glyph center) · p
+	// p' = T(dst center) ∘ R(angle) ∘ S(s) ∘ T(-glyph center) · p
 	m := f64.Aff3{
-		s * cos, -s * sin, tx + s*cx - s*(cos*cx-sin*cy),
-		s * sin, s * cos, ty + s*cy - s*(sin*cx+cos*cy),
+		s * cos, -s * sin, cxDst - s*(cos*cx-sin*cy),
+		s * sin, s * cos, cyDst - s*(sin*cx+cos*cy),
 	}
 	xdraw.CatmullRom.Transform(canvas, m, glyph, src, xdraw.Over, nil)
 }
