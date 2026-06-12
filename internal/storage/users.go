@@ -162,13 +162,14 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 	return scanUserCounts(rows)
 }
 
-// TopWriters returns users with the most messages in [from, until] (by day), sorted desc.
+// TopWriters returns users with the most messages in [from, until) (by day,
+// exclusive upper bound — same semantics as QueryStats), sorted desc.
 func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
 	fromDay := from.UTC().Format("2006-01-02")
 	untilDay := until.UTC().Format("2006-01-02")
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, SUM(count) AS n FROM user_message_counts
-		WHERE chat_id = ? AND day >= ? AND day <= ?
+		WHERE chat_id = ? AND day >= ? AND day < ?
 		GROUP BY user_id
 		ORDER BY n DESC, user_id ASC
 		LIMIT ?

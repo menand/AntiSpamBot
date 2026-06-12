@@ -21,6 +21,13 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_, _ = db.RecordMessage(ctx, old, 1, now)
 	_ = db.IncMessage(ctx, old, now, true)
 	_ = db.SetGreetingEnabled(ctx, old, false)
+	maxAtt, tmo, hour, mode, greet := 5, 45, 21, "emoji", "Привет, {name}!"
+	_ = db.SetMaxAttempts(ctx, old, &maxAtt)
+	_ = db.SetCaptchaTimeoutSec(ctx, old, &tmo)
+	_ = db.SetDailyStatsEnabled(ctx, old, true)
+	_ = db.SetDailyStatsHour(ctx, old, &hour)
+	_ = db.SetCaptchaMode(ctx, old, &mode)
+	_ = db.SetGreetingText(ctx, old, &greet)
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -41,7 +48,7 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if _, ok, _ := db.MemberJoinedAt(ctx, neu, 1); !ok {
 		t.Error("member not migrated to new chat")
 	}
-	s, err := db.QueryStats(ctx, neu, now.Add(-24*time.Hour), now.Add(time.Hour))
+	s, err := db.QueryStats(ctx, neu, now.Add(-24*time.Hour), now.AddDate(0, 0, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,9 +58,33 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if s.MsgNewcomer != 1 {
 		t.Errorf("message_counts not migrated: %d", s.MsgNewcomer)
 	}
-	greet, _ := db.GetGreetingEnabled(ctx, neu)
-	if greet {
+	// ALL settings columns must survive the migration, not just
+	// greeting_enabled — this regressed once when new columns were added to
+	// chat_settings but not to the MigrateChat INSERT.
+	ms, err := db.GetChatSettings(ctx, neu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ms.GreetingEnabled {
 		t.Error("greeting_enabled=false did not migrate (still shows true default)")
+	}
+	if !ms.MaxAttempts.Valid || ms.MaxAttempts.Int64 != 5 {
+		t.Errorf("max_attempts did not migrate: %+v", ms.MaxAttempts)
+	}
+	if !ms.CaptchaTimeoutSeconds.Valid || ms.CaptchaTimeoutSeconds.Int64 != 45 {
+		t.Errorf("captcha_timeout_seconds did not migrate: %+v", ms.CaptchaTimeoutSeconds)
+	}
+	if !ms.DailyStatsEnabled {
+		t.Error("daily_stats_enabled did not migrate")
+	}
+	if !ms.DailyStatsUTCHour.Valid || ms.DailyStatsUTCHour.Int64 != 21 {
+		t.Errorf("daily_stats_utc_hour did not migrate: %+v", ms.DailyStatsUTCHour)
+	}
+	if !ms.CaptchaMode.Valid || ms.CaptchaMode.String != "emoji" {
+		t.Errorf("captcha_mode did not migrate: %+v", ms.CaptchaMode)
+	}
+	if !ms.GreetingText.Valid || ms.GreetingText.String != "Привет, {name}!" {
+		t.Errorf("greeting_text did not migrate: %+v", ms.GreetingText)
 	}
 }
 
@@ -95,7 +126,7 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 	}
 
 	// events: summed (2 joins).
-	s, _ := db.QueryStats(ctx, neu, now.Add(-2*24*time.Hour), now.Add(time.Hour))
+	s, _ := db.QueryStats(ctx, neu, now.Add(-2*24*time.Hour), now.AddDate(0, 0, 1))
 	if s.Joined != 2 {
 		t.Errorf("joined events: got %d want 2", s.Joined)
 	}
@@ -106,7 +137,7 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 	}
 
 	// user_activity merged (message_count summed).
-	top, _ := db.TopWriters(ctx, neu, now.Add(-2*24*time.Hour), now.Add(time.Hour), 10)
+	top, _ := db.TopWriters(ctx, neu, now.Add(-2*24*time.Hour), now.AddDate(0, 0, 1), 10)
 	if len(top) != 1 {
 		t.Fatalf("top writers: %+v", top)
 	}
@@ -115,7 +146,7 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 	}
 
 	// old side fully clean.
-	s2, _ := db.QueryStats(ctx, old, time.Unix(0, 0), now.Add(time.Hour))
+	s2, _ := db.QueryStats(ctx, old, time.Unix(0, 0), now.AddDate(0, 0, 1))
 	if s2.Joined != 0 || s2.MsgNewcomer != 0 {
 		t.Errorf("old chat still has data: %+v", s2)
 	}

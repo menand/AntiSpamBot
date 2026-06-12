@@ -12,6 +12,7 @@ type Pending struct {
 	MessageID  int
 	CorrectIdx int
 	ExpiresAt  time.Time
+	ThreadID   int // forum topic the captcha was sent to; 0 = no topic
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -69,7 +70,7 @@ func key(chatID, userID int64) string {
 	return fmt.Sprintf("%d:%d", chatID, userID)
 }
 
-func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time) *Pending {
+func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID int) *Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -83,17 +84,11 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 		MessageID:  messageID,
 		CorrectIdx: correctIdx,
 		ExpiresAt:  expiresAt,
+		ThreadID:   threadID,
 		cancelCh:   make(chan struct{}),
 	}
 	s.items[k] = p
 	return p
-}
-
-func (s *Store) Exists(chatID, userID int64) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	_, ok := s.items[key(chatID, userID)]
-	return ok
 }
 
 // IsCaptchaActive reports whether the user is either in the middle of a
@@ -118,4 +113,21 @@ func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 		delete(s.items, k)
 	}
 	return p, ok
+}
+
+// TakeChat removes and returns all pending captchas for a chat. Used when the
+// bot leaves a chat — the caller should Cancel each returned Pending so the
+// waitTimeout goroutines exit instead of firing kick/ban in a chat the bot no
+// longer belongs to.
+func (s *Store) TakeChat(chatID int64) []*Pending {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*Pending
+	for k, p := range s.items {
+		if p.ChatID == chatID {
+			delete(s.items, k)
+			out = append(out, p)
+		}
+	}
+	return out
 }

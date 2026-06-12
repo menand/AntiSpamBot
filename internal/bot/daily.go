@@ -85,7 +85,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	}
 
 	header := "🌅 <b>Сводка за сутки</b>\n\n"
-	body := renderStats(periodDay, s, b.cfg.NewcomerDays, topWriters, topFailers, infos)
+	body := renderStats(periodDay, "вчера", s, b.cfg.NewcomerDays, topWriters, topFailers, infos)
 
 	_, err = b.api.SendMessage(ctx,
 		tu.Message(tu.ID(chatID), header+body).
@@ -104,4 +104,3 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 		"messages", s.MsgNewcomer+s.MsgOldtimer,
 		"joined", s.Joined)
 }
-

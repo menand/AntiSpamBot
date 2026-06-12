@@ -39,12 +39,6 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	if !b.chatAllowed(upd.Chat.ID) {
 		return nil
 	}
-
-	joined := (oldStatus == "left" || oldStatus == "kicked") &&
-		(newStatus == "member" || newStatus == "restricted")
-	if !joined {
-		return nil
-	}
 	if user.IsBot {
 		return nil
 	}
@@ -52,14 +46,40 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
-	b.onUserJoined(upd.Chat.ID, upd.Chat.Title, upd.Chat.Type, user)
+	joined := (oldStatus == "left" || oldStatus == "kicked") &&
+		(newStatus == "member" || newStatus == "restricted")
+	if joined {
+		// chat_member updates carry no topic info; captcha goes to General (0).
+		b.onUserJoined(upd.Chat.ID, upd.Chat.Title, upd.Chat.Type, user, 0)
+		return nil
+	}
+
+	// User left (or was removed by an admin) while their captcha was still
+	// active: cancel it quietly. They didn't fail the check — recording a
+	// kick event here would skew the failure stats, and our own post-fail
+	// kick is not affected (onFail always Takes the pending before kicking,
+	// so this lookup misses for those).
+	if newStatus == "left" || newStatus == "kicked" {
+		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
+			p.Cancel()
+			_ = b.db.DeletePending(b.runCtx, upd.Chat.ID, user.ID)
+			if err := b.deleteMessage(b.runCtx, upd.Chat.ID, p.MessageID); err != nil {
+				b.log.Warn("delete captcha after user left",
+					"err", err, "chat", upd.Chat.ID, "msg", p.MessageID)
+			}
+			b.log.Info("captcha cancelled — user left mid-captcha",
+				"chat", upd.Chat.ID, "user", user.ID)
+		}
+	}
 	return nil
 }
 
-// handleMyChatMember tracks the bot's own membership across chats. When the
-// bot leaves (voluntarily or via kick), we remove the chat from the registry
-// so it stops appearing in owners'/admins' "Мои чаты" menu. Historical
-// stats for the chat stay in the DB for archival.
+// handleMyChatMember tracks the bot's own membership across chats. On leave
+// (voluntary or kicked) the chat is dropped from the registry and its pending
+// captchas are cancelled — their timeouts would otherwise fire kick/ban calls
+// in a chat the bot no longer belongs to. Historical stats stay for archival.
+// On join/promotion it registers the chat and tells admins which rights are
+// missing, instead of failing silently later.
 func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 	upd := update.MyChatMember
 	if upd == nil {
@@ -73,19 +93,89 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		"old", oldStatus, "new", newStatus)
 
 	if newStatus == "left" || newStatus == "kicked" {
+		for _, p := range b.store.TakeChat(upd.Chat.ID) {
+			p.Cancel()
+		}
+		if err := b.db.DeletePendingChat(b.runCtx, upd.Chat.ID); err != nil {
+			b.log.Warn("delete pending captchas on bot leave",
+				"err", err, "chat", upd.Chat.ID)
+		}
 		if err := b.db.DeleteChat(b.runCtx, upd.Chat.ID); err != nil {
 			b.log.Warn("delete chat on bot leave",
 				"err", err, "chat", upd.Chat.ID)
 		}
+		return nil
 	}
+
+	if upd.Chat.Type != "group" && upd.Chat.Type != "supergroup" {
+		return nil
+	}
+	if !b.chatAllowed(upd.Chat.ID) {
+		return nil
+	}
+	b.rememberChat(b.runCtx, storage.ChatInfo{
+		ChatID: upd.Chat.ID,
+		Title:  upd.Chat.Title,
+		Type:   upd.Chat.Type,
+	})
+	b.checkAdminRights(upd)
 	return nil
+}
+
+// checkAdminRights posts a setup hint into the chat when the bot was added
+// without the rights it needs (restrict + delete), and a confirmation once
+// the missing rights get granted. Quiet when nothing is wrong from the start.
+func (b *Bot) checkAdminRights(upd *telego.ChatMemberUpdated) {
+	missing := missingRights(upd.NewChatMember)
+	if len(missing) > 0 {
+		text := "⚠️ Мне не хватает прав, капча работать не будет.\nВыдай мне: " +
+			strings.Join(missing, ", ") + "."
+		if _, err := b.api.SendMessage(b.runCtx,
+			tu.Message(tu.ID(upd.Chat.ID), text)); err != nil {
+			b.log.Warn("send missing-rights hint", "err", err, "chat", upd.Chat.ID)
+		}
+		return
+	}
+	// Confirm only as a transition out of a broken state — not on every
+	// unrelated promotion/permission change.
+	if len(missingRights(upd.OldChatMember)) > 0 {
+		if _, err := b.api.SendMessage(b.runCtx,
+			tu.Message(tu.ID(upd.Chat.ID), "✅ Все нужные права на месте — я работаю.")); err != nil {
+			b.log.Warn("send rights-ok confirmation", "err", err, "chat", upd.Chat.ID)
+		}
+	}
+}
+
+// missingRights lists human-readable admin rights the bot lacks for the
+// captcha flow. A plain member lacks everything; an administrator may still
+// miss individual toggles.
+func missingRights(m telego.ChatMember) []string {
+	switch v := m.(type) {
+	case *telego.ChatMemberAdministrator:
+		var missing []string
+		if !v.CanRestrictMembers {
+			missing = append(missing, "«Блокировка пользователей»")
+		}
+		if !v.CanDeleteMessages {
+			missing = append(missing, "«Удаление сообщений»")
+		}
+		return missing
+	case *telego.ChatMemberOwner:
+		return nil
+	case *telego.ChatMemberMember:
+		return []string{"права администратора («Блокировка пользователей», «Удаление сообщений»)"}
+	default:
+		// restricted/left/banned states are handled elsewhere.
+		return nil
+	}
 }
 
 // onUserJoined is the common kickoff for both chat_member events and
 // message.new_chat_members service messages. Safe to call multiple times
 // for the same user — startCaptcha dedups via the in-memory store.
-func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User) {
-	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
+// threadID is the forum topic the join was seen in (0 = none/General).
+func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User, threadID int) {
+	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID: chatID,
 		Title:  chatTitle,
 		Type:   chatType,
@@ -93,7 +183,7 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now()); err != nil {
 		b.log.Warn("record join event", "err", err)
 	}
-	b.startCaptcha(chatID, user)
+	b.startCaptcha(chatID, user, threadID)
 }
 
 func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error {
@@ -135,6 +225,45 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 		if err := b.onFail(b.runCtx, p, "неверный ответ"); err != nil {
 			b.log.Error("on fail", "err", err, "chat", chatID, "user", query.From.ID)
 		}
+	}
+	return nil
+}
+
+// handleApproveCallback handles the "✅ Впустить" button on the captcha
+// keyboard (callback data "capok:<userID>"). Chat admins and bot owners can
+// approve a struggling human manually — same effect as a correct answer.
+func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery) error {
+	if query.Message == nil {
+		return nil
+	}
+	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "capok:"), 10, 64)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	chatID := query.Message.GetChat().ID
+
+	if !b.canManageChat(ctx, query.From.ID, chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Эта кнопка только для админов чата.").
+				WithShowAlert())
+		return nil
+	}
+	p, ok := b.store.Take(chatID, targetUserID)
+	if !ok {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Капча уже не активна."))
+		return nil
+	}
+	p.Cancel()
+	_ = b.db.DeletePending(b.runCtx, chatID, targetUserID)
+	_ = b.api.AnswerCallbackQuery(ctx,
+		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
+	b.log.Info("captcha approved by admin",
+		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
+	if err := b.onSuccess(b.runCtx, p); err != nil {
+		b.log.Error("on success (admin approve)", "err", err, "chat", chatID, "user", targetUserID)
 	}
 	return nil
 }
@@ -194,6 +323,12 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	// if chat_member also fires for the same user, only one captcha is shown.
 	if len(message.NewChatMembers) > 0 {
 		if b.chatAllowed(message.Chat.ID) {
+			// In forum supergroups the join service message lands in a topic;
+			// send the captcha to the same one so the user actually sees it.
+			threadID := 0
+			if message.IsTopicMessage {
+				threadID = message.MessageThreadID
+			}
 			hadHuman := false
 			for _, nm := range message.NewChatMembers {
 				if nm.IsBot {
@@ -205,7 +340,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 				hadHuman = true
 				b.log.Info("new_chat_members service message",
 					"chat", message.Chat.ID, "user", nm.ID)
-				b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm)
+				b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm, threadID)
 			}
 			// Remove Telegram's "X joined the chat" service message — clutters
 			// the chat and we're already showing the captcha.
@@ -255,20 +390,17 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
 
-	_ = b.db.RememberChat(b.runCtx, storage.ChatInfo{
+	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID: chatID,
 		Title:  message.Chat.Title,
 		Type:   message.Chat.Type,
 	})
-
-	if err := b.db.RememberUser(b.runCtx, storage.UserInfo{
+	b.rememberUser(b.runCtx, storage.UserInfo{
 		UserID:    user.ID,
 		FirstName: user.FirstName,
 		LastName:  user.LastName,
 		Username:  user.Username,
-	}); err != nil {
-		b.log.Warn("remember user", "err", err)
-	}
+	})
 
 	newcomer := b.isNewcomer(b.runCtx, chatID, user.ID, when)
 	if err := b.db.IncMessage(b.runCtx, chatID, when, newcomer); err != nil {
@@ -309,9 +441,13 @@ func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user 
 		text = fmt.Sprintf("✨ %s снова с нами после <b>%s</b> молчания.",
 			mention, humanDaysRU(days))
 	}
-	_, err := b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
+	params := tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
-		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}))
+		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID})
+	if message.IsTopicMessage {
+		params = params.WithMessageThreadID(message.MessageThreadID)
+	}
+	_, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Warn("announce return", "err", err, "chat", message.Chat.ID, "user", user.ID)
 	}
@@ -331,7 +467,7 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 	return when.Sub(joinedAt) < window
 }
 
-func (b *Bot) startCaptcha(chatID int64, user telego.User) {
+func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) {
 	// Race guard: chat_member events and message.new_chat_members can both
 	// fire for the same join. Without a kickoff lock they race through the
 	// pre-Put phase (restrict + send) and produce two captcha messages.
@@ -340,14 +476,14 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User) {
 			"chat", chatID, "user", user.ID)
 		return
 	}
-	// Run the captcha flow asynchronously — it sleeps for CaptchaDelay to let
-	// the user's Telegram client fully render the chat before the captcha
-	// arrives. During that window, handleGroupMessage deletes any messages
-	// they send (store.IsCaptchaActive returns true while inflight is held).
-	go b.runCaptcha(chatID, user)
+	// Run the captcha flow asynchronously — it restricts immediately, then
+	// sleeps for CaptchaDelay before sending the captcha message. During the
+	// whole window handleGroupMessage deletes anything the user sends
+	// (store.IsCaptchaActive returns true while inflight is held).
+	go b.runCaptcha(chatID, user, threadID)
 }
 
-func (b *Bot) runCaptcha(chatID int64, user telego.User) {
+func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	defer b.store.FinishKickoff(chatID, user.ID)
 
 	ctx := b.runCtx
@@ -355,17 +491,25 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 	// Cache display name now — we'll need it when sending the greeting after a
 	// successful pass (by then the user hasn't written anything, so user_info
 	// wouldn't be populated from message-handling path).
-	_ = b.db.RememberUser(ctx, storage.UserInfo{
+	b.rememberUser(ctx, storage.UserInfo{
 		UserID:    user.ID,
 		FirstName: user.FirstName,
 		LastName:  user.LastName,
 		Username:  user.Username,
 	})
 
-	// Sleep before the captcha flow so the user's client has time to fully
-	// open the chat. Without this, the captcha message + immediate restrict
-	// event sometimes don't merge into the user's already-rendered view and
-	// they only see the captcha after reopening the chat.
+	// Restrict FIRST — every second before this call is an open window for
+	// join-and-post spam bots: the message would get deleted, but push
+	// notifications have already gone out. The restriction itself is
+	// invisible to the user, so it doesn't need the render delay below.
+	if err := b.restrict(ctx, chatID, user.ID); err != nil {
+		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
+		return
+	}
+
+	// Now give the user's client time to fully open the chat. Without this,
+	// the captcha message sometimes doesn't merge into the user's
+	// already-rendered view and they only see it after reopening the chat.
 	if b.cfg.CaptchaDelay > 0 {
 		select {
 		case <-ctx.Done():
@@ -375,12 +519,6 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 	}
 
 	ch := captcha.New(b.effectiveCaptchaMode(ctx, chatID))
-
-	if err := b.restrict(ctx, chatID, user.ID); err != nil {
-		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
-		return
-	}
-
 	captchaTimeout := b.effectiveCaptchaTimeout(ctx, chatID)
 
 	correct := ch.Correct()
@@ -395,12 +533,20 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 			tu.InlineKeyboardButton(c.Emoji).
 				WithCallbackData(fmt.Sprintf("cap:%d:%d", user.ID, i)))
 	}
-	kb := tu.InlineKeyboard(tu.InlineKeyboardRow(buttons...))
+	kb := tu.InlineKeyboard(
+		tu.InlineKeyboardRow(buttons...),
+		tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("✅ Впустить (для админов)").
+				WithCallbackData(fmt.Sprintf("capok:%d", user.ID))),
+	)
 
-	msg, err := b.api.SendMessage(ctx,
-		tu.Message(tu.ID(chatID), text).
-			WithParseMode(telego.ModeHTML).
-			WithReplyMarkup(kb))
+	params := tu.Message(tu.ID(chatID), text).
+		WithParseMode(telego.ModeHTML).
+		WithReplyMarkup(kb)
+	if threadID != 0 {
+		params = params.WithMessageThreadID(threadID)
+	}
+	msg, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
 		_ = b.release(ctx, chatID, user.ID)
@@ -408,7 +554,7 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 	}
 
 	expires := time.Now().Add(captchaTimeout)
-	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires)
+	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires, threadID)
 
 	if err := b.db.PutPending(ctx, storage.PendingRow{
 		ChatID:     chatID,
@@ -416,6 +562,7 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User) {
 		MessageID:  msg.MessageID,
 		CorrectIdx: ch.CorrectIdx,
 		ExpiresAt:  expires,
+		ThreadID:   threadID,
 	}); err != nil {
 		b.log.Warn("persist pending", "err", err)
 	}
@@ -463,7 +610,7 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 	if err := b.release(ctx, p.ChatID, p.UserID); err != nil {
 		return err
 	}
-	b.maybeSendGreeting(ctx, p.ChatID, p.UserID)
+	b.maybeSendGreeting(ctx, p.ChatID, p.UserID, p.ThreadID)
 	return nil
 }
 

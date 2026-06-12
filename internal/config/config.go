@@ -18,7 +18,7 @@ type Config struct {
 	AllowedChats       map[int64]struct{} // nil = allow all
 	DBPath             string
 	NewcomerDays       int
-	SilentAnnounceDays int // 0 = disabled
+	SilentAnnounceDays int                // 0 = disabled
 	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
 	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
 	CaptchaDelay       time.Duration      // delay between join and sending captcha

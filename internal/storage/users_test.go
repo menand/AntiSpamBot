@@ -74,7 +74,7 @@ func TestTopWritersAndFailers(t *testing.T) {
 		}
 	}
 
-	top, err := db.TopWriters(ctx, 1, now.Add(-time.Hour), now.Add(time.Hour), 3)
+	top, err := db.TopWriters(ctx, 1, now.Add(-time.Hour), now.AddDate(0, 0, 1), 3)
 	if err != nil {
 		t.Fatal(err)
 	}

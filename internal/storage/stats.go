@@ -81,14 +81,14 @@ func (d *DB) IncMessage(ctx context.Context, chatID int64, when time.Time, newco
 }
 
 type Stats struct {
-	Joined         int
-	Passed         int
-	Kicked         int
-	Banned         int
-	MsgNewcomer    int
-	MsgOldtimer    int
-	PeriodFrom     time.Time
-	PeriodUntil    time.Time
+	Joined      int
+	Passed      int
+	Kicked      int
+	Banned      int
+	MsgNewcomer int
+	MsgOldtimer int
+	PeriodFrom  time.Time
+	PeriodUntil time.Time
 }
 
 func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time) (Stats, error) {
@@ -125,12 +125,15 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 		return s, fmt.Errorf("events rows: %w", err)
 	}
 
+	// Day-granular tables use [fromDay, untilDay) — exclusive upper bound, same
+	// as the events query above. Callers pass calendar-aligned ranges (see
+	// statsRange / sendDailyDigest), so a midnight `until` excludes that day.
 	fromDay := from.UTC().Format("2006-01-02")
 	untilDay := until.UTC().Format("2006-01-02")
 	err = d.sql.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(newcomer_count), 0), COALESCE(SUM(oldtimer_count), 0)
 		FROM message_counts
-		WHERE chat_id = ? AND day >= ? AND day <= ?
+		WHERE chat_id = ? AND day >= ? AND day < ?
 	`, chatID, fromDay, untilDay).Scan(&s.MsgNewcomer, &s.MsgOldtimer)
 	if err != nil {
 		return s, fmt.Errorf("query messages: %w", err)

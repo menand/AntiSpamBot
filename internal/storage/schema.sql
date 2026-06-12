@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS pending_captchas (
     message_id  INTEGER NOT NULL,
     correct_idx INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL,
+    thread_id   INTEGER NOT NULL DEFAULT 0, -- forum topic the user joined in; 0 = no topic
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -92,5 +93,6 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     daily_stats_enabled     INTEGER NOT NULL DEFAULT 0,
     daily_stats_utc_hour    INTEGER,
     last_daily_stats_day    TEXT,
-    captcha_mode            TEXT
+    captcha_mode            TEXT,
+    greeting_text           TEXT  -- NULL = built-in default greeting
 );

@@ -32,6 +32,24 @@ func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 	return nil
 }
 
+// GetChat returns the registry row for a single chat, if known.
+func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) {
+	var c ChatInfo
+	var title, ctype sql.NullString
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT chat_id, title, type FROM chats WHERE chat_id = ?`,
+		chatID).Scan(&c.ChatID, &title, &ctype)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ChatInfo{}, false, nil
+	}
+	if err != nil {
+		return ChatInfo{}, false, fmt.Errorf("get chat: %w", err)
+	}
+	c.Title = title.String
+	c.Type = ctype.String
+	return c, true, nil
+}
+
 // ChatSettings is the per-chat configuration row. Nullable fields mean
 // "use global default" — callers should fall back to b.cfg.* when the
 // field is not set.
@@ -44,6 +62,7 @@ type ChatSettings struct {
 	DailyStatsUTCHour     sql.NullInt64 // NULL = use global DAILY_STATS_UTC_HOUR
 	LastDailyStatsDay     sql.NullString
 	CaptchaMode           sql.NullString // NULL = default (circles)
+	GreetingText          sql.NullString // NULL = built-in default greeting
 }
 
 // GetChatSettings loads the full settings row for a chat, applying defaults
@@ -55,12 +74,12 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
-		       captcha_mode
+		       captcha_mode, greeting_text
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
-		&s.CaptchaMode)
+		&s.CaptchaMode, &s.GreetingText)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -147,6 +166,25 @@ func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) err
 	`, chatID, v)
 	if err != nil {
 		return fmt.Errorf("set captcha_mode: %w", err)
+	}
+	return nil
+}
+
+// SetGreetingText stores a custom greeting template for this chat. The
+// template may contain the {name} placeholder, replaced with the new member's
+// mention at send time. Pass nil to reset to the built-in default.
+func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text *string) error {
+	var v any
+	if text != nil {
+		v = *text
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, greeting_text)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET greeting_text = excluded.greeting_text
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set greeting_text: %w", err)
 	}
 	return nil
 }

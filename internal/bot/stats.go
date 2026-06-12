@@ -57,33 +57,25 @@ const (
 	periodAll   statsPeriod = "all"
 )
 
-func parseStatsPeriod(cmd string) statsPeriod {
-	fields := strings.Fields(cmd)
-	if len(fields) < 2 {
-		return periodWeek
-	}
-	switch strings.ToLower(fields[1]) {
-	case "day", "сутки", "день":
-		return periodDay
-	case "week", "неделя":
-		return periodWeek
-	case "month", "месяц":
-		return periodMonth
-	case "all", "все", "всё":
-		return periodAll
-	}
-	return periodWeek
-}
-
+// statsRange returns calendar-aligned UTC windows, [from, until). Events are
+// counted by unix time and messages by calendar day; aligning both bounds to
+// midnight keeps the two counts covering the same range (see QueryStats):
+//
+//	day   — today (since 00:00 UTC)
+//	week  — last 7 calendar days including today
+//	month — last 30 calendar days including today
+//	all   — since epoch
 func statsRange(p statsPeriod) (from, until time.Time) {
-	until = time.Now().Add(time.Minute) // exclusive upper bound, give a tiny buffer
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	until = midnight.AddDate(0, 0, 1) // exclusive: next midnight
 	switch p {
 	case periodDay:
-		from = until.Add(-24 * time.Hour)
+		from = midnight
 	case periodWeek:
-		from = until.Add(-7 * 24 * time.Hour)
+		from = midnight.AddDate(0, 0, -6)
 	case periodMonth:
-		from = until.Add(-30 * 24 * time.Hour)
+		from = midnight.AddDate(0, 0, -29)
 	case periodAll:
 		from = time.Unix(0, 0)
 	}
@@ -93,7 +85,7 @@ func statsRange(p statsPeriod) (from, until time.Time) {
 func periodLabel(p statsPeriod) string {
 	switch p {
 	case periodDay:
-		return "сутки"
+		return "сегодня"
 	case periodWeek:
 		return "неделю"
 	case periodMonth:
@@ -106,13 +98,14 @@ func periodLabel(p statsPeriod) string {
 
 func renderStats(
 	p statsPeriod,
+	label string,
 	s storage.Stats,
 	newcomerDays int,
 	topWriters, topFailers []storage.UserCount,
 	infos map[int64]storage.UserInfo,
 ) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "<b>📊 Статистика за %s</b>\n\n", periodLabel(p))
+	fmt.Fprintf(&sb, "<b>📊 Статистика за %s</b>\n\n", label)
 
 	fmt.Fprintf(&sb, "👋 <b>Новых участников:</b> %d\n", s.Joined)
 	if s.Joined > 0 {
