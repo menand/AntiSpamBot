@@ -20,8 +20,9 @@ func TestGlyphFile(t *testing.T) {
 }
 
 func TestAllEmojiGlyphsPresent(t *testing.T) {
-	// Every token in the emoji pool must have a vendored glyph — catches
-	// pool/assets drift when someone adds an emoji without its PNG.
+	// Every token in the emoji-mode pool must have a vendored glyph — catches
+	// pool/assets drift when someone adds an emoji to emojiCategories without
+	// its PNG. Circles are text-only and intentionally not covered here.
 	for ci, cat := range emojiCategories {
 		for _, tok := range cat {
 			if _, err := loadGlyph(tok.Emoji); err != nil {

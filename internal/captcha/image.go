@@ -30,6 +30,8 @@ func glyphFile(emoji string) string {
 	return "emoji_u" + strings.Join(parts, "_") + ".png"
 }
 
+// loadGlyph reads and decodes the Noto PNG for the given emoji from the
+// embedded FS.
 func loadGlyph(emoji string) (image.Image, error) {
 	data, err := glyphFS.ReadFile("assets/" + glyphFile(emoji))
 	if err != nil {
