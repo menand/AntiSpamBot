@@ -12,17 +12,19 @@ type PendingRow struct {
 	MessageID  int
 	CorrectIdx int
 	ExpiresAt  time.Time
+	ThreadID   int // forum topic the user joined in; 0 = no topic
 }
 
 func (d *DB) PutPending(ctx context.Context, p PendingRow) error {
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO pending_captchas (chat_id, user_id, message_id, correct_idx, expires_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO pending_captchas (chat_id, user_id, message_id, correct_idx, expires_at, thread_id)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, user_id) DO UPDATE SET
 			message_id = excluded.message_id,
 			correct_idx = excluded.correct_idx,
-			expires_at = excluded.expires_at
-	`, p.ChatID, p.UserID, p.MessageID, p.CorrectIdx, p.ExpiresAt.Unix())
+			expires_at = excluded.expires_at,
+			thread_id = excluded.thread_id
+	`, p.ChatID, p.UserID, p.MessageID, p.CorrectIdx, p.ExpiresAt.Unix(), p.ThreadID)
 	if err != nil {
 		return fmt.Errorf("put pending: %w", err)
 	}
@@ -39,9 +41,21 @@ func (d *DB) DeletePending(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
+// DeletePendingChat drops all pending captchas for a chat. Used when the bot
+// leaves (or is kicked from) a chat — the captcha messages are unreachable
+// there and timeouts would only produce failing kick/ban calls.
+func (d *DB) DeletePendingChat(ctx context.Context, chatID int64) error {
+	_, err := d.sql.ExecContext(ctx,
+		`DELETE FROM pending_captchas WHERE chat_id = ?`, chatID)
+	if err != nil {
+		return fmt.Errorf("delete pending by chat: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) LoadAllPending(ctx context.Context) ([]PendingRow, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT chat_id, user_id, message_id, correct_idx, expires_at FROM pending_captchas`)
+		`SELECT chat_id, user_id, message_id, correct_idx, expires_at, thread_id FROM pending_captchas`)
 	if err != nil {
 		return nil, fmt.Errorf("load pending: %w", err)
 	}
@@ -51,7 +65,7 @@ func (d *DB) LoadAllPending(ctx context.Context) ([]PendingRow, error) {
 	for rows.Next() {
 		var p PendingRow
 		var expiresUnix int64
-		if err := rows.Scan(&p.ChatID, &p.UserID, &p.MessageID, &p.CorrectIdx, &expiresUnix); err != nil {
+		if err := rows.Scan(&p.ChatID, &p.UserID, &p.MessageID, &p.CorrectIdx, &expiresUnix, &p.ThreadID); err != nil {
 			return nil, fmt.Errorf("scan pending: %w", err)
 		}
 		p.ExpiresAt = time.Unix(expiresUnix, 0)

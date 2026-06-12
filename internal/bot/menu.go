@@ -15,11 +15,12 @@ import (
 )
 
 // Callback data formats (all prefixed "menu:"):
-//   menu:main               — back to main menu
-//   menu:help               — help text
-//   menu:add                — "how to add me to a group" instructions
-//   menu:chats              — list of chats (owner only)
-//   menu:stats:<chat>:<p>   — stats for chat over period p ∈ {day,week,month,all}
+//
+//	menu:main               — back to main menu
+//	menu:help               — help text
+//	menu:add                — "how to add me to a group" instructions
+//	menu:chats              — list of chats (owner only)
+//	menu:stats:<chat>:<p>   — stats for chat over period p ∈ {day,week,month,all}
 const (
 	cbMain  = "menu:main"
 	cbHelp  = "menu:help"
@@ -106,6 +107,34 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "grtxt":
+		// Arm the "send me the new greeting text" flow: the next private
+		// message from this user becomes the chat's greeting template.
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		b.setGreetingInputPending(query.From.ID, chatID)
+		s, _ := b.db.GetChatSettings(ctx, chatID)
+		current := "стандартный"
+		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
+			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
+		}
+		text := fmt.Sprintf(
+			"✏️ Пришли мне текст приветствия для чата <b>%s</b> одним сообщением.\n\n"+
+				"Подстановка: <code>{name}</code> — имя новичка.\n"+
+				"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n\n"+
+				"Текущий текст: %s",
+			html.EscapeString(b.chatTitle(ctx, chatID)), current)
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
+			WithParseMode(telego.ModeHTML))
+		return nil
 	case "max":
 		if len(parts) != 4 {
 			return nil
@@ -233,17 +262,19 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 const helpText = `📖 <b>Справка</b>
 
 <b>Как работает капча</b>
-Когда в чат входит новый участник, я отправляю ему сообщение «выбери <i>красный</i> кружок» и 6 цветных кнопок. Правильный выбор — ограничения снимаются, сообщение удаляется. Неправильный или таймаут 30 сек — кик. 3 провала подряд за сутки — перманентный бан.
+Когда в чат входит новый участник, я ограничиваю его и отправляю сообщение «выбери <i>красный</i> кружок» с 6 кнопками. Правильный выбор — ограничения снимаются, сообщение удаляется. Неправильный ответ или таймаут — кик; несколько провалов подряд за сутки — перманентный бан. Время на ответ, число попыток и вид капчи (кружки/эмодзи) настраиваются per-chat в этом меню.
 
-<b>Команды в группах</b>
-/stats [day|week|month|all] — статистика чата за период (только для админов чата или владельцев бота)
+Админ чата может впустить человека вручную — кнопкой «✅ Впустить» под капчей.
+
+<b>Статистика и настройки</b>
+«📊 Мои чаты» → выбери чат — там статистика за периоды, ежедневная сводка в чат, приветствие (включая свой текст с подстановкой {name}) и параметры капчи.
 
 <b>Команды в личке</b>
 /start, /help — это меню
-/chats — список моих чатов (только для владельцев)
+/chats — список твоих чатов
 
 <b>«Молчаливые возвращенцы»</b>
-Если кто-то не писал 30+ дней и вдруг написал — я об этом сообщу в чат с шутливым комментарием.`
+Если кто-то долго не писал и вдруг написал — я сообщу об этом в чат с шутливым комментарием.`
 
 func (b *Bot) addInstructionsText() string {
 	username := b.Username()
@@ -272,12 +303,9 @@ func backKeyboard() *telego.InlineKeyboardMarkup {
 	}
 }
 
-func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error {
-	chats, err := b.userChats(ctx, query.From.ID)
-	if err != nil {
-		b.log.Warn("user chats", "err", err)
-		return nil
-	}
+// chatsListView builds the "Твои чаты" text + chat-picker keyboard shared by
+// the /chats command and the menu button. withBack appends the menu's back row.
+func chatsListView(chats []storage.ChatInfo, withBack bool) (string, *telego.InlineKeyboardMarkup) {
 	var sb strings.Builder
 	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
 	if len(chats) == 0 {
@@ -292,18 +320,38 @@ func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error
 		if label == "" {
 			label = fmt.Sprintf("Chat %d", c.ChatID)
 		}
-		if len(label) > 40 {
-			label = label[:37] + "…"
-		}
 		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, periodWeek)
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(label).WithCallbackData(cb),
+			tu.InlineKeyboardButton(truncateLabel(label, 40)).WithCallbackData(cb),
 		})
 	}
-	rows = append(rows, []telego.InlineKeyboardButton{
-		tu.InlineKeyboardButton("⬅️ Назад").WithCallbackData(cbMain),
-	})
-	return b.editWithMenu(ctx, query, sb.String(), &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+	if withBack {
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton("⬅️ Назад").WithCallbackData(cbMain),
+		})
+	}
+	return sb.String(), &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// truncateLabel shortens a button label to max runes. Slicing by bytes here
+// would cut a multi-byte rune in half — Telegram rejects the whole keyboard
+// on invalid UTF-8, which for Cyrillic titles means a broken chat list.
+func truncateLabel(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
+}
+
+func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error {
+	chats, err := b.userChats(ctx, query.From.ID)
+	if err != nil {
+		b.log.Warn("user chats", "err", err)
+		return nil
+	}
+	text, kb := chatsListView(chats, true)
+	return b.editWithMenu(ctx, query, text, kb)
 }
 
 func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatID int64, p statsPeriod) error {
@@ -323,11 +371,11 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf("<b>%s</b>\n\n%s",
 		html.EscapeString(title),
-		renderStats(p, s, b.cfg.NewcomerDays, topWriters, topFailers, infos))
+		renderStats(p, periodLabel(p), s, b.cfg.NewcomerDays, topWriters, topFailers, infos))
 
 	rows := [][]telego.InlineKeyboardButton{
 		{
-			periodButton(chatID, periodDay, p, "Сутки"),
+			periodButton(chatID, periodDay, p, "Сегодня"),
 			periodButton(chatID, periodWeek, p, "Неделя"),
 			periodButton(chatID, periodMonth, p, "Месяц"),
 			periodButton(chatID, periodAll, p, "Всё"),
@@ -367,18 +415,23 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		captchaMode = captcha.ModeEmoji
 	}
 
+	greetingText := "стандартный"
+	if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
+		greetingText = "свой"
+	}
+
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
 		"⚙️ <b>Настройки: %s</b>\n\n"+
 			"🧩 Капча: <b>%s</b>\n"+
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
-			"🎉 Приветствие: <b>%s</b>\n"+
+			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
-		onOffLabel(s.GreetingEnabled),
+		onOffLabel(s.GreetingEnabled), greetingText,
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 	)
@@ -390,6 +443,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		{
 			tu.InlineKeyboardButton(toggleLabel("🎉 Приветствие", s.GreetingEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
+			tu.InlineKeyboardButton("✏️ Текст").
+				WithCallbackData(fmt.Sprintf("menu:grtxt:%d", chatID)),
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
@@ -491,13 +546,9 @@ func periodButton(chatID int64, want, current statsPeriod, label string) telego.
 }
 
 func (b *Bot) chatTitle(ctx *th.Context, chatID int64) string {
-	chats, err := b.db.ListChats(ctx)
-	if err == nil {
-		for _, c := range chats {
-			if c.ChatID == chatID && c.Title != "" {
-				return c.Title
-			}
-		}
+	c, ok, err := b.db.GetChat(ctx, chatID)
+	if err == nil && ok && c.Title != "" {
+		return c.Title
 	}
 	return fmt.Sprintf("Chat %d", chatID)
 }
@@ -528,31 +579,9 @@ func (b *Bot) handleChatsCommand(ctx *th.Context, message telego.Message) error 
 		b.log.Warn("user chats", "err", err)
 		return nil
 	}
-
-	var sb strings.Builder
-	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
-	if len(chats) == 0 {
-		sb.WriteString("<i>У тебя нет чатов, которыми я управляю. Добавь меня в группу как администратора — и ты сможешь настраивать её отсюда.</i>")
-	} else {
-		fmt.Fprintf(&sb, "Найдено чатов: %d\nВыбери чат для настроек и статистики.", len(chats))
-	}
-
-	rows := make([][]telego.InlineKeyboardButton, 0, len(chats))
-	for _, c := range chats {
-		label := c.Title
-		if label == "" {
-			label = fmt.Sprintf("Chat %d", c.ChatID)
-		}
-		if len(label) > 40 {
-			label = label[:37] + "…"
-		}
-		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, periodWeek)
-		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(label).WithCallbackData(cb),
-		})
-	}
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), sb.String()).
+	text, kb := chatsListView(chats, false)
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(&telego.InlineKeyboardMarkup{InlineKeyboard: rows}))
+		WithReplyMarkup(kb))
 	return nil
 }

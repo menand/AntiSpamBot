@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -24,6 +26,9 @@ func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl tim
 		`SELECT count, updated_at FROM attempts WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID)
 	err = row.Scan(&existingCount, &existingUpdated)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("query attempt: %w", err)
+	}
 
 	newCount := 1
 	if err == nil && (now-existingUpdated) <= ttlSec {

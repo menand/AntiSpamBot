@@ -53,6 +53,79 @@ func TestPendingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPendingThreadIDAndDeleteChat(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	exp := time.Now().Add(30 * time.Second).Truncate(time.Second)
+	_ = db.PutPending(ctx, PendingRow{ChatID: 1, UserID: 2, MessageID: 10, CorrectIdx: 0, ExpiresAt: exp, ThreadID: 77})
+	_ = db.PutPending(ctx, PendingRow{ChatID: 1, UserID: 3, MessageID: 11, CorrectIdx: 1, ExpiresAt: exp})
+	_ = db.PutPending(ctx, PendingRow{ChatID: 2, UserID: 4, MessageID: 12, CorrectIdx: 2, ExpiresAt: exp})
+
+	loaded, err := db.LoadAllPending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byUser := map[int64]PendingRow{}
+	for _, p := range loaded {
+		byUser[p.UserID] = p
+	}
+	if byUser[2].ThreadID != 77 {
+		t.Errorf("thread_id lost in roundtrip: %+v", byUser[2])
+	}
+	if byUser[3].ThreadID != 0 {
+		t.Errorf("default thread_id should be 0: %+v", byUser[3])
+	}
+
+	// DeletePendingChat wipes chat 1 only.
+	if err := db.DeletePendingChat(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _ = db.LoadAllPending(ctx)
+	if len(loaded) != 1 || loaded[0].ChatID != 2 {
+		t.Fatalf("after DeletePendingChat: %+v", loaded)
+	}
+}
+
+func TestGetChat(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if _, ok, _ := db.GetChat(ctx, 5); ok {
+		t.Fatal("unknown chat should not be found")
+	}
+	_ = db.RememberChat(ctx, ChatInfo{ChatID: 5, Title: "Тестовый чат", Type: "supergroup"})
+	c, ok, err := db.GetChat(ctx, 5)
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if c.Title != "Тестовый чат" || c.Type != "supergroup" {
+		t.Errorf("unexpected chat: %+v", c)
+	}
+}
+
+func TestQueryStatsExcludesUntilDay(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	// Messages on two consecutive days; querying [day1, day2) must count
+	// only day1 — the digest's "yesterday" window relies on this.
+	day1 := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
+	day2 := time.Date(2026, 6, 11, 1, 0, 0, 0, time.UTC)
+	_ = db.IncMessage(ctx, 1, day1, false)
+	_ = db.IncMessage(ctx, 1, day2, false)
+
+	from := time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC)
+	s, err := db.QueryStats(ctx, 1, from, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.MsgOldtimer != 1 {
+		t.Errorf("got %d messages, want 1 (day2 must be excluded)", s.MsgOldtimer)
+	}
+}
+
 func TestAttempts(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
@@ -120,7 +193,7 @@ func TestStats(t *testing.T) {
 	_ = db.IncMessage(ctx, 100, now, true)
 	_ = db.IncMessage(ctx, 100, now, false)
 
-	s, err := db.QueryStats(ctx, 100, now.Add(-24*time.Hour), now.Add(time.Hour))
+	s, err := db.QueryStats(ctx, 100, now.Add(-24*time.Hour), now.AddDate(0, 0, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +217,7 @@ func TestStats(t *testing.T) {
 	}
 
 	// Different chat — isolation
-	s2, _ := db.QueryStats(ctx, 999, now.Add(-24*time.Hour), now.Add(time.Hour))
+	s2, _ := db.QueryStats(ctx, 999, now.Add(-24*time.Hour), now.AddDate(0, 0, 1))
 	if s2.Joined != 0 || s2.MsgNewcomer != 0 {
 		t.Errorf("chat isolation broken: %+v", s2)
 	}

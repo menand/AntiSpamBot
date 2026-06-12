@@ -114,6 +114,34 @@ func TestSettingsAreIndependent(t *testing.T) {
 	}
 }
 
+func TestSetGreetingText(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	s, _ := db.GetChatSettings(ctx, 1)
+	if s.GreetingText.Valid {
+		t.Error("default greeting_text should be NULL")
+	}
+
+	text := "Привет, {name}! Прочти правила."
+	if err := db.SetGreetingText(ctx, 1, &text); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.GreetingText.Valid || s.GreetingText.String != text {
+		t.Errorf("got %+v, want %q", s.GreetingText, text)
+	}
+
+	// Clear via nil → back to NULL (built-in default).
+	if err := db.SetGreetingText(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.GreetingText.Valid {
+		t.Errorf("expected NULL after clear, got %+v", s.GreetingText)
+	}
+}
+
 func TestChatsNeedingDailyStats(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

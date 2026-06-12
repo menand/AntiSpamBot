@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -27,6 +28,18 @@ type Bot struct {
 	me        *telego.User
 	runCtx    context.Context
 	startedAt time.Time
+
+	// Write-through caches over chats/user_info: skip the DB write when the
+	// value didn't change. Saves 2 of the 4 SQLite writes per group message.
+	cacheMu   sync.Mutex
+	chatCache map[int64]storage.ChatInfo
+	userCache map[int64]storage.UserInfo
+
+	// Pending "send me the new greeting text" prompts: userID → chatID.
+	// Set when an admin taps ✏️ in chat settings, consumed by the next
+	// private text message from that user.
+	greetMu    sync.Mutex
+	greetInput map[int64]int64
 }
 
 func New(cfg *config.Config, log *slog.Logger) (*Bot, error) {
@@ -35,10 +48,13 @@ func New(cfg *config.Config, log *slog.Logger) (*Bot, error) {
 		return nil, fmt.Errorf("create bot: %w", err)
 	}
 	return &Bot{
-		api:   api,
-		cfg:   cfg,
-		store: captcha.NewStore(),
-		log:   log,
+		api:        api,
+		cfg:        cfg,
+		store:      captcha.NewStore(),
+		log:        log,
+		chatCache:  make(map[int64]storage.ChatInfo),
+		userCache:  make(map[int64]storage.UserInfo),
+		greetInput: make(map[int64]int64),
 	}, nil
 }
 
@@ -104,6 +120,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
+	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
@@ -112,9 +129,16 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
-	bh.HandleMessage(b.handleGroupMessage) // fallback: count messages in groups
+	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // greeting-text input flow
+	bh.HandleMessage(b.handleGroupMessage)                         // fallback: count messages in groups
 
 	return bh.Start()
+}
+
+// privateMessagePredicate matches non-command private-chat messages that fell
+// through the command handlers above.
+func privateMessagePredicate(_ context.Context, update telego.Update) bool {
+	return update.Message != nil && update.Message.Chat.Type == telego.ChatTypePrivate
 }
 
 func (b *Bot) setCommands(ctx context.Context) error {
@@ -155,7 +179,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 			// Already expired while the bot was down — treat as timeout immediately.
 			expires = now.Add(1 * time.Second)
 		}
-		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires)
+		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID)
 		go b.waitTimeout(p)
 	}
 	b.log.Info("restored pending captchas", "count", len(rows))
