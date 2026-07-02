@@ -33,5 +33,6 @@ fi
 
 echo "=== $(date -Is) deploying ${LOCAL:0:7} -> ${REMOTE:0:7} ==="
 git pull --ff-only origin main
-docker compose up -d --build
+VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
+    docker compose up -d --build
 echo "=== $(date -Is) deploy done ==="

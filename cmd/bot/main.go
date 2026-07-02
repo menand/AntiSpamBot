@@ -16,6 +16,10 @@ import (
 	"github.com/menand/AntiSpamBot/internal/config"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=...".
+// "dev" means a plain `go run` / untagged build.
+var version = "dev"
+
 func main() {
 	// Auto-load .env for local development. In Docker compose the env comes
 	// from env_file/environment, and this call is a silent no-op when .env
@@ -42,7 +46,7 @@ func main() {
 		&slog.HandlerOptions{Level: cfg.LogLevel}))
 	slog.SetDefault(log)
 
-	b, err := bot.New(cfg, log)
+	b, err := bot.New(cfg, log, version)
 	if err != nil {
 		log.Error("init bot", "err", err)
 		os.Exit(1)

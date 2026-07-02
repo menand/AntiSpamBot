@@ -30,9 +30,11 @@ func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
 	text := fmt.Sprintf(
 		"🤖 <b>Информация о боте</b>\n\n"+
 			"Username: @%s\n"+
+			"Версия: <code>%s</code>\n"+
 			"Запущен: <code>%s</code>\n"+
 			"Работает: <b>%s</b>",
 		b.Username(),
+		b.version,
 		started,
 		formatUptimeRU(uptime),
 	)

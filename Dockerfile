@@ -1,9 +1,11 @@
 FROM golang:1.26-alpine AS build
+ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/bot ./cmd/bot
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION}" -o /out/bot ./cmd/bot
 
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates tzdata && \
