@@ -15,6 +15,8 @@ docker compose up -d --build
 docker compose logs -f
 ```
 
+Bot version is stamped via `-ldflags "-X main.version=$(git describe ...)"` — `make build`/`make docker-up` and `scripts/auto-deploy.sh` do it automatically; a bare `docker compose up -d --build` yields `dev`.
+
 Config is env-only — no config file. Required: `BOT_TOKEN`. Optional: `CAPTCHA_TIMEOUT_SECONDS` (30), `MAX_ATTEMPTS` (3), `NEWCOMER_DAYS` (7), `SILENT_ANNOUNCE_DAYS` (30, 0=off), `LOG_LEVEL` (info), `DB_PATH` (bot.db / /data/bot.db in Docker), `ALLOWED_CHATS` (none = all chats), `OWNER_IDS`, `LOG_FILE` (set in Docker to /data/bot.log), `CAPTCHA_DELAY_MS` (2000), `DAILY_STATS_UTC_HOUR` (6).
 
 ## Architecture
@@ -39,7 +41,7 @@ Handler registration order matters — telego runs the first matching predicate 
 ### Captcha lifecycle (`internal/bot/handlers.go`)
 
 1. `handleChatMember` detects `left|kicked → member|restricted`, filters bots/self/channels/disallowed-chats, records a `join` event, calls `startCaptcha`. `message.new_chat_members` is the fallback path (some group types) — it also carries the forum `threadID` (`IsTopicMessage`), so forum captchas land in the right topic.
-2. `startCaptcha` → `BeginKickoff` dedup lock → async `runCaptcha`: **restrict first** (immediately — every pre-restrict second is a spam window; the restriction is invisible to the user), then sleep `CaptchaDelay` (client render time), then send the keyboard (6 emoji + admin approve row), `store.Put` (in-memory, keyed `chatID:userID`), persist to `pending_captchas` (incl. `thread_id`), spawn `waitTimeout`.
+2. `startCaptcha` → `BeginKickoff` dedup lock → async `runCaptcha`: **restrict first** (immediately — every pre-restrict second is a spam window; the restriction is invisible to the user), then sleep `CaptchaDelay` (client render time), then send the keyboard (6 emoji + admin approve row), `store.Put` (in-memory, keyed `chatID:userID`), persist to `pending_captchas` (incl. `thread_id`), spawn `waitTimeout`. Modes (`captcha_mode`): `circles` (default) | `emoji` | `image`. `image` = emoji pool + `SendPhoto` of the correct glyph, mildly distorted (`internal/captcha/image.go`, vendored Noto PNGs via go:embed, pure-Go render); render errors fall back silently to the text emoji prompt — a captcha always goes out.
 3. Race resolution: timeout goroutine, `handleCallback`, `handleApproveCallback`, and the user-left branch all call `store.Take()` — whoever wins wraps up; losers are no-ops. `Pending.Cancel()` uses `sync.Once`.
 4. Success (correct answer or admin approve): `ResetAttempts`, `UpsertMember(joined_at=now)`, record `pass` event, delete captcha message, `release` — which applies the **chat's default permissions from getChat** (not blanket all-true; fallback to all-true only if getChat fails), then greeting (custom template or default, sent to the join topic).
 5. Fail: `IncrementAttempt` (TTL 24h), record `kick` or `ban` event, delete message, kick if `count < MaxAttempts` else permanent ban.
@@ -101,4 +103,5 @@ Button labels: always truncate with `truncateLabel` (rune-safe) — byte slicing
 - Admin-gated UI: reuse `canManageChat` (covers owner + chat admin).
 - Stats privacy: `message_counts` is aggregate-only by design. Per-user tables (`user_activity`, `user_message_counts`) exist for tops/silence — keep new per-user data behind the same "admins only" access.
 - Messages to forum supergroups: thread the `threadID` through (see `onUserJoined` → `runCaptcha` → `Pending.ThreadID` → greeting) or the message lands in General.
+- Adding an emoji to the pool → drop its glyph PNG into `internal/captcha/assets/` (`TestAllEmojiGlyphsPresent` catches pool/assets drift).
 - `gofmt -w .` before committing — CI/tests assume formatted code.
