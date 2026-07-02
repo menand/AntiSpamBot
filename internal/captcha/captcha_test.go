@@ -114,6 +114,20 @@ func TestEmojiShufflesCategoryOrder(t *testing.T) {
 		len(distinctFirstCats))
 }
 
+func TestNewImageMode(t *testing.T) {
+	ch := New(ModeImage)
+	if len(ch.Options) != len(emojiCategories) {
+		t.Fatalf("got %d options, want %d", len(ch.Options), len(emojiCategories))
+	}
+	if ch.CorrectIdx < 0 || ch.CorrectIdx >= len(ch.Options) {
+		t.Fatalf("CorrectIdx out of range: %d", ch.CorrectIdx)
+	}
+	// Image mode must draw from the emoji pool (glyphs exist only for it).
+	if _, err := loadGlyph(ch.Correct().Emoji); err != nil {
+		t.Fatalf("correct option has no glyph: %v", err)
+	}
+}
+
 func TestUnknownModeFallsBackToCircles(t *testing.T) {
 	c := New("")
 	if len(c.Options) != len(circles) {
