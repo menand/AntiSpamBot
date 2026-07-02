@@ -15,6 +15,7 @@ type Mode string
 const (
 	ModeCircles Mode = "circles" // default: 6 colored circles
 	ModeEmoji   Mode = "emoji"   // one emoji from each of 6 categories
+	ModeImage   Mode = "image"   // emoji options + distorted glyph photo as the prompt
 )
 
 // circles: the legacy "traffic-light" palette. All 6 are shown every time.
@@ -97,12 +98,16 @@ func (c Challenge) Correct() Token {
 }
 
 // New builds a fresh captcha challenge for the given mode. Unknown/empty
-// modes fall back to ModeCircles.
+// modes fall back to ModeCircles. ModeImage reuses the emoji pool — the
+// difference is only in presentation (the bot renders the correct glyph as
+// a distorted photo instead of naming it in text).
 func New(mode Mode) Challenge {
-	if mode == ModeEmoji {
+	switch mode {
+	case ModeEmoji, ModeImage:
 		return newEmoji()
+	default:
+		return newCircles()
 	}
-	return newCircles()
 }
 
 func newCircles() Challenge {
