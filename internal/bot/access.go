@@ -73,6 +73,8 @@ func (b *Bot) effectiveCaptchaMode(ctx context.Context, chatID int64) captcha.Mo
 	switch captcha.Mode(s.CaptchaMode.String) {
 	case captcha.ModeEmoji:
 		return captcha.ModeEmoji
+	case captcha.ModeImage:
+		return captcha.ModeImage
 	default:
 		return captcha.ModeCircles
 	}

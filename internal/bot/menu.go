@@ -220,7 +220,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		mode := parts[3]
-		if mode != string(captcha.ModeCircles) && mode != string(captcha.ModeEmoji) {
+		if mode != string(captcha.ModeCircles) && mode != string(captcha.ModeEmoji) &&
+			mode != string(captcha.ModeImage) {
 			return nil
 		}
 		if err := b.db.SetCaptchaMode(ctx, chatID, &mode); err != nil {
@@ -262,7 +263,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 const helpText = `📖 <b>Справка</b>
 
 <b>Как работает капча</b>
-Когда в чат входит новый участник, я ограничиваю его и отправляю сообщение «выбери <i>красный</i> кружок» с 6 кнопками. Правильный выбор — ограничения снимаются, сообщение удаляется. Неправильный ответ или таймаут — кик; несколько провалов подряд за сутки — перманентный бан. Время на ответ, число попыток и вид капчи (кружки/эмодзи) настраиваются per-chat в этом меню.
+Когда в чат входит новый участник, я ограничиваю его и отправляю сообщение «выбери <i>красный</i> кружок» с 6 кнопками. Правильный выбор — ограничения снимаются, сообщение удаляется. Неправильный ответ или таймаут — кик; несколько провалов подряд за сутки — перманентный бан. Время на ответ, число попыток и вид капчи (кружки/эмодзи/картинка) настраиваются per-chat в этом меню.
 
 Админ чата может впустить человека вручную — кнопкой «✅ Впустить» под капчей.
 
@@ -411,8 +412,13 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		digestHourUTC = int(s.DailyStatsUTCHour.Int64)
 	}
 	captchaMode := captcha.ModeCircles
-	if s.CaptchaMode.Valid && captcha.Mode(s.CaptchaMode.String) == captcha.ModeEmoji {
-		captchaMode = captcha.ModeEmoji
+	if s.CaptchaMode.Valid {
+		switch captcha.Mode(s.CaptchaMode.String) {
+		case captcha.ModeEmoji:
+			captchaMode = captcha.ModeEmoji
+		case captcha.ModeImage:
+			captchaMode = captcha.ModeImage
+		}
 	}
 
 	greetingText := "стандартный"
@@ -466,6 +472,7 @@ func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardB
 	}{
 		{captcha.ModeCircles, "🟢 Кружки"},
 		{captcha.ModeEmoji, "🦋 Эмодзи"},
+		{captcha.ModeImage, "🖼 Картинка"},
 	}
 	row := make([]telego.InlineKeyboardButton, 0, len(opts))
 	for _, o := range opts {
@@ -481,10 +488,14 @@ func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardB
 }
 
 func captchaModeLabel(m captcha.Mode) string {
-	if m == captcha.ModeEmoji {
+	switch m {
+	case captcha.ModeEmoji:
 		return "Эмодзи"
+	case captcha.ModeImage:
+		return "Картинка"
+	default:
+		return "Кружки"
 	}
-	return "Кружки"
 }
 
 // hourPresetRow renders a row of UTC hours as buttons, labelled in MSK
