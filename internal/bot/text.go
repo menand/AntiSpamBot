@@ -41,6 +41,24 @@ func humanDaysRU(days int) string {
 	}
 }
 
+// humanDaysGenRU is humanDaysRU in the genitive case, for "после N …"
+// phrases: "1 месяца", "2 месяцев", "1 года", "2 лет", "21 дня".
+func humanDaysGenRU(days int) string {
+	if days < 0 {
+		days = 0
+	}
+	switch {
+	case days >= 365:
+		y := days / 365
+		return fmt.Sprintf("%d %s", y, pluralRU(y, "года", "лет", "лет"))
+	case days >= 30:
+		m := days / 30
+		return fmt.Sprintf("%d %s", m, pluralRU(m, "месяца", "месяцев", "месяцев"))
+	default:
+		return fmt.Sprintf("%d %s", days, pluralRU(days, "дня", "дней", "дней"))
+	}
+}
+
 // mentionFromInfo renders a clickable HTML mention using cached user info.
 // Falls back to id if no name is known.
 func mentionFromInfo(info storage.UserInfo) string {
