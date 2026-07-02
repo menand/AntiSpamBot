@@ -28,6 +28,7 @@ type Bot struct {
 	me        *telego.User
 	runCtx    context.Context
 	startedAt time.Time
+	version   string
 
 	// Write-through caches over chats/user_info: skip the DB write when the
 	// value didn't change. Saves 2 of the 4 SQLite writes per group message.
@@ -42,16 +43,20 @@ type Bot struct {
 	greetInput map[int64]int64
 }
 
-func New(cfg *config.Config, log *slog.Logger) (*Bot, error) {
+func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 	api, err := telego.NewBot(cfg.Token)
 	if err != nil {
 		return nil, fmt.Errorf("create bot: %w", err)
+	}
+	if version == "" {
+		version = "dev"
 	}
 	return &Bot{
 		api:        api,
 		cfg:        cfg,
 		store:      captcha.NewStore(),
 		log:        log,
+		version:    version,
 		chatCache:  make(map[int64]storage.ChatInfo),
 		userCache:  make(map[int64]storage.UserInfo),
 		greetInput: make(map[int64]int64),
@@ -91,8 +96,8 @@ func (b *Bot) Run(ctx context.Context) error {
 	go b.dailyDigestLoop(ctx)
 
 	b.notifyOwners(ctx, fmt.Sprintf(
-		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВосстановлено капч: %d",
-		b.Username(), restored))
+		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
+		b.Username(), b.version, restored))
 
 	defer func() {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

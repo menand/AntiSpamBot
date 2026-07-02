@@ -158,6 +158,11 @@ SQLite-файл живёт в Docker volume `bot-data`, переживает `do
 git pull && docker compose up -d --build
 ```
 
+> Чтобы бот знал свою версию (`/info`, стартовое уведомление), собирай через
+> `make docker-up` — он сам подставит `git describe`. Голый
+> `docker compose up -d --build` покажет версию `dev`. Cron-скрипт
+> `scripts/auto-deploy.sh` подставляет версию сам.
+
 Автостарт при ребуте VDS — `restart: unless-stopped` в `docker-compose.yml`.
 
 ### 4. Авто-обновления из git

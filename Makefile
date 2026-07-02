@@ -1,7 +1,10 @@
 .PHONY: build run test vet tidy docker-up docker-down docker-logs clean
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 build:
-	go build -o bin/bot ./cmd/bot
+	go build -ldflags "$(LDFLAGS)" -o bin/bot ./cmd/bot
 
 run:
 	go run ./cmd/bot
@@ -16,7 +19,7 @@ tidy:
 	go mod tidy
 
 docker-up:
-	docker compose up -d --build
+	VERSION=$(VERSION) docker compose up -d --build
 
 docker-down:
 	docker compose down
