@@ -17,6 +17,10 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
+// telegramServiceUserID is the "Telegram" pseudo-user (not marked as a bot)
+// that authors linked-channel auto-forwards and other service posts.
+const telegramServiceUserID = 777000
+
 func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	upd := update.ChatMember
 	if upd == nil {
@@ -368,6 +372,13 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	}
 
 	if message.From == nil || message.From.IsBot {
+		return nil
+	}
+	// Auto-forwarded posts from a linked channel arrive from the service user
+	// 777000 ("Telegram", is_bot=false) — without this filter a rarely-posting
+	// channel earns "silent returner" announcements and pollutes top-writer
+	// stats.
+	if message.From.ID == telegramServiceUserID || message.IsAutomaticForward {
 		return nil
 	}
 	// Skip other service messages (title changes, pins, etc.)
