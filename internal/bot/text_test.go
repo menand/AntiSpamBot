@@ -98,3 +98,27 @@ func TestHumanDaysRU(t *testing.T) {
 		}
 	}
 }
+
+func TestHumanDaysGenRU(t *testing.T) {
+	// Genitive forms for "после N ..." phrases.
+	tests := []struct {
+		days int
+		want string
+	}{
+		{1, "1 дня"},
+		{2, "2 дней"},
+		{21, "21 дня"},
+		{29, "29 дней"},
+		{30, "1 месяца"},
+		{60, "2 месяцев"},
+		{150, "5 месяцев"},
+		{365, "1 года"},
+		{730, "2 лет"},
+		{2000, "5 лет"},
+	}
+	for _, tc := range tests {
+		if got := humanDaysGenRU(tc.days); got != tc.want {
+			t.Errorf("humanDaysGenRU(%d) = %q, want %q", tc.days, got, tc.want)
+		}
+	}
+}

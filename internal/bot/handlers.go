@@ -436,11 +436,11 @@ func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user 
 		text = fmt.Sprintf("🎊 Сенсация! %s молчал(а) <b>%s</b> и вот наконец-то написал(а)!",
 			mention, humanDaysRU(days))
 	case days >= 90:
-		text = fmt.Sprintf("👀 Ого! %s вернулся после <b>%s</b> тишины.",
-			mention, humanDaysRU(days))
+		text = fmt.Sprintf("👀 Ого! %s вернулся(ась) после <b>%s</b> тишины.",
+			mention, humanDaysGenRU(days))
 	default:
 		text = fmt.Sprintf("✨ %s снова с нами после <b>%s</b> молчания.",
-			mention, humanDaysRU(days))
+			mention, humanDaysGenRU(days))
 	}
 	params := tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
