@@ -21,7 +21,9 @@ if ! flock -n 9; then
     exit 0
 fi
 
-git fetch --quiet origin main
+# --tags: a branch-only fetch does not reliably bring tags along, and without
+# them `git describe` degrades to a bare commit hash in the stamped version.
+git fetch --quiet --tags origin main
 
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse origin/main)
