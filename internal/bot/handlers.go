@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"html"
@@ -518,14 +519,22 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		}
 	}
 
-	ch := captcha.New(b.effectiveCaptchaMode(ctx, chatID))
+	mode := b.effectiveCaptchaMode(ctx, chatID)
+	ch := captcha.New(mode)
 	captchaTimeout := b.effectiveCaptchaTimeout(ctx, chatID)
-
 	correct := ch.Correct()
-	text := fmt.Sprintf(
-		"Привет, %s!\nДля защиты от спама выбери <b>%s</b> за %d секунд.",
-		mentionHTML(user), correct.Prompt, int(captchaTimeout.Seconds()),
-	)
+
+	// Image mode: pre-render the photo. On any render failure fall back to
+	// the text prompt — a captcha must always go out.
+	var photo []byte
+	if mode == captcha.ModeImage {
+		var rerr error
+		photo, rerr = captcha.RenderImage(correct)
+		if rerr != nil {
+			b.log.Warn("render image captcha, falling back to text",
+				"err", rerr, "emoji", correct.Emoji)
+		}
+	}
 
 	buttons := make([]telego.InlineKeyboardButton, 0, len(ch.Options))
 	for i, c := range ch.Options {
@@ -540,13 +549,35 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 				WithCallbackData(fmt.Sprintf("capok:%d", user.ID))),
 	)
 
-	params := tu.Message(tu.ID(chatID), text).
-		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(kb)
-	if threadID != 0 {
-		params = params.WithMessageThreadID(threadID)
+	var msg *telego.Message
+	var err error
+	if photo != nil {
+		caption := fmt.Sprintf(
+			"Привет, %s!\nДля защиты от спама выбери эмодзи, наиболее похожую на картинку, за %d секунд.",
+			mentionHTML(user), int(captchaTimeout.Seconds()),
+		)
+		p := tu.Photo(tu.ID(chatID),
+			tu.File(tu.NameReader(bytes.NewReader(photo), "captcha.png"))).
+			WithCaption(caption).
+			WithParseMode(telego.ModeHTML).
+			WithReplyMarkup(kb)
+		if threadID != 0 {
+			p = p.WithMessageThreadID(threadID)
+		}
+		msg, err = b.api.SendPhoto(ctx, p)
+	} else {
+		text := fmt.Sprintf(
+			"Привет, %s!\nДля защиты от спама выбери <b>%s</b> за %d секунд.",
+			mentionHTML(user), correct.Prompt, int(captchaTimeout.Seconds()),
+		)
+		params := tu.Message(tu.ID(chatID), text).
+			WithParseMode(telego.ModeHTML).
+			WithReplyMarkup(kb)
+		if threadID != 0 {
+			params = params.WithMessageThreadID(threadID)
+		}
+		msg, err = b.api.SendMessage(ctx, params)
 	}
-	msg, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
 		_ = b.release(ctx, chatID, user.ID)
