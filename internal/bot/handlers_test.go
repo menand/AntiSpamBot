@@ -1,6 +1,12 @@
 package bot
 
-import "testing"
+import (
+	"errors"
+	"testing"
+
+	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
+)
 
 func TestParseCallback(t *testing.T) {
 	tests := []struct {
@@ -26,6 +32,36 @@ func TestParseCallback(t *testing.T) {
 			if ok != tc.wantOK || uid != tc.wantUID || idx != tc.wantIdx {
 				t.Fatalf("parseCallback(%q) = (%d, %d, %v), want (%d, %d, %v)",
 					tc.data, uid, idx, ok, tc.wantUID, tc.wantIdx, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestStaleChatReason(t *testing.T) {
+	tests := []struct {
+		name      string
+		m         telego.ChatMember
+		err       error
+		wantStale bool
+	}{
+		{"member", &telego.ChatMemberMember{}, nil, false},
+		{"admin", &telego.ChatMemberAdministrator{}, nil, false},
+		{"left", &telego.ChatMemberLeft{}, nil, true},
+		{"kicked", &telego.ChatMemberBanned{}, nil, true},
+		{"400 chat not found", nil, &telegoapi.Error{ErrorCode: 400, Description: "Bad Request: chat not found"}, true},
+		{"403 bot kicked", nil, &telegoapi.Error{ErrorCode: 403, Description: "Forbidden: bot was kicked"}, true},
+		{"429 flood", nil, &telegoapi.Error{ErrorCode: 429, Description: "Too Many Requests"}, false},
+		{"500 server error", nil, &telegoapi.Error{ErrorCode: 500, Description: "Internal Server Error"}, false},
+		{"network error", nil, errors.New("dial tcp: timeout"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reason, stale := staleChatReason(tc.m, tc.err)
+			if stale != tc.wantStale {
+				t.Fatalf("staleChatReason() = (%q, %v), want stale=%v", reason, stale, tc.wantStale)
+			}
+			if stale && reason == "" {
+				t.Fatal("stale chat must carry a non-empty reason for the log")
 			}
 		})
 	}
