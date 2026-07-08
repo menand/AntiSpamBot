@@ -152,6 +152,12 @@ func renderStats(
 
 	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
 		func(i int, uc storage.UserCount) string {
+			// Secs за пределами суток — мусор из битых исторических данных,
+			// показываем без времени.
+			if uc.Secs >= 0 && uc.Secs <= 86400 {
+				return fmt.Sprintf("%d. %s — за %d сек\n",
+					i+1, mentionOrID(infos, uc.UserID), uc.Secs)
+			}
 			return fmt.Sprintf("%d. %s\n", i+1, mentionOrID(infos, uc.UserID))
 		})
 

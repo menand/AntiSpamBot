@@ -381,7 +381,7 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 	topWriters, _ := b.db.TopWriters(ctx, chatID, from, until, 5)
 	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
 	topFailers, _ := b.db.TopFailers(ctx, chatID, from, until, -1)
-	newMembers, _ := b.db.EventUsers(ctx, chatID, storage.EventPass, from, until)
+	newMembers, _ := b.db.PassedUsers(ctx, chatID, from, until)
 	banned, _ := b.db.EventUsers(ctx, chatID, storage.EventBan, from, until)
 	infos, _ := b.db.GetUserInfos(ctx,
 		collectUserIDs(topWriters, topFailers, newMembers, banned))

@@ -144,6 +144,11 @@ func (d *DB) GetUserInfos(ctx context.Context, userIDs []int64) (map[int64]UserI
 type UserCount struct {
 	UserID int64
 	Count  int
+	// Secs — сколько секунд заняло прохождение капчи (join → pass).
+	// Заполняется только PassedUsers; -1 = неизвестно (join не записан).
+	// Остальные выборки (writers/failers/EventUsers) оставляют 0 — их
+	// рендеры это поле не читают.
+	Secs int
 }
 
 // TopFailers returns users with the most kick+ban events in [from, until), sorted desc.
@@ -160,6 +165,41 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 	}
 	defer rows.Close()
 	return scanUserCounts(rows)
+}
+
+// PassedUsers returns everyone who passed the captcha in [from, until), in
+// the order the first pass happened, with the captcha solve time in seconds
+// (best of the period when the user passed more than once). The join lookup
+// deliberately has no lower time bound — the join may precede the period
+// (joined at 23:59, passed at 00:00). Secs is -1 when no join was recorded
+// (old data). No limit — renderStats cuts the list.
+func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Time) ([]UserCount, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT user_id, COUNT(*) AS n, COALESCE(MIN(dur), -1) AS secs
+		FROM (
+			SELECT p.user_id, p.at,
+			       p.at - (SELECT MAX(j.at) FROM events j
+			               WHERE j.chat_id = p.chat_id AND j.user_id = p.user_id
+			                 AND j.kind = 'join' AND j.at <= p.at) AS dur
+			FROM events p
+			WHERE p.chat_id = ? AND p.kind = 'pass' AND p.at >= ? AND p.at < ?
+		)
+		GROUP BY user_id
+		ORDER BY MIN(at) ASC, user_id ASC
+	`, chatID, from.Unix(), until.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("query passed users: %w", err)
+	}
+	defer rows.Close()
+	var out []UserCount
+	for rows.Next() {
+		var uc UserCount
+		if err := rows.Scan(&uc.UserID, &uc.Count, &uc.Secs); err != nil {
+			return nil, fmt.Errorf("scan passed user: %w", err)
+		}
+		out = append(out, uc)
+	}
+	return out, rows.Err()
 }
 
 // EventUsers returns everyone with at least one event of the given kind in
