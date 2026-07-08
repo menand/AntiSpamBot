@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
@@ -96,6 +97,12 @@ func periodLabel(p statsPeriod) string {
 	return string(p)
 }
 
+// statsRuneBudget ограничивает длину списка провалов в renderStats. Лимит
+// Telegram — 4096 символов на сообщение, но снаружи к статистике дописывают
+// заголовок (тайтл чата в меню, «Сводка за сутки» в дайджесте, ≤ ~150 рун),
+// а после списка идёт футер (~100 рун) — отсюда запас.
+const statsRuneBudget = 3700
+
 func renderStats(
 	p statsPeriod,
 	label string,
@@ -135,11 +142,24 @@ func renderStats(
 	}
 
 	if len(topFailers) > 0 {
-		sb.WriteString("\n🚫 <b>Топ провалов капчи:</b>\n")
+		sb.WriteString("\n🚫 <b>Провалили капчу:</b>\n")
+		// Список полный (без топ-N), но Telegram не примет сообщение длиннее
+		// 4096 символов — не влезшие сворачиваются в «…и ещё N». Бюджет
+		// считаем по сырому HTML: он длиннее видимого текста, так что запас
+		// только растёт.
+		used := utf8.RuneCountInString(sb.String())
 		for i, uc := range topFailers {
-			fmt.Fprintf(&sb, "%d. %s — %d %s\n",
+			line := fmt.Sprintf("%d. %s — %d %s\n",
 				i+1, mentionOrID(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"))
+			used += utf8.RuneCountInString(line)
+			if used > statsRuneBudget {
+				rest := len(topFailers) - i
+				fmt.Fprintf(&sb, "…и ещё %d %s\n",
+					rest, pluralRU(rest, "человек", "человека", "человек"))
+				break
+			}
+			sb.WriteString(line)
 		}
 	}
 

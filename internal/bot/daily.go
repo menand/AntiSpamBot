@@ -65,7 +65,8 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	if err != nil {
 		b.log.Warn("daily digest: top writers", "err", err, "chat", chatID)
 	}
-	topFailers, err := b.db.TopFailers(ctx, chatID, from, until, 5)
+	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
+	topFailers, err := b.db.TopFailers(ctx, chatID, from, until, -1)
 	if err != nil {
 		b.log.Warn("daily digest: top failers", "err", err, "chat", chatID)
 	}
