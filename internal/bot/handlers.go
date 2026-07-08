@@ -177,7 +177,9 @@ func missingRights(m telego.ChatMember) []string {
 
 // onUserJoined is the common kickoff for both chat_member events and
 // message.new_chat_members service messages. Safe to call multiple times
-// for the same user — startCaptcha dedups via the in-memory store.
+// for the same user — startCaptcha dedups via the in-memory store, and the
+// join event is recorded only by the call that actually starts the captcha,
+// so a join delivered through both update types counts once in stats.
 // threadID is the forum topic the join was seen in (0 = none/General).
 func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User, threadID int) {
 	b.rememberChat(b.runCtx, storage.ChatInfo{
@@ -185,10 +187,13 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		Title:  chatTitle,
 		Type:   chatType,
 	})
+	if !b.startCaptcha(chatID, user, threadID) {
+		// Duplicate delivery (chat_member + new_chat_members) — already counted.
+		return
+	}
 	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now()); err != nil {
 		b.log.Warn("record join event", "err", err)
 	}
-	b.startCaptcha(chatID, user, threadID)
 }
 
 func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error {
@@ -484,20 +489,24 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 	return when.Sub(joinedAt) < window
 }
 
-func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) {
+// startCaptcha reports whether this call won the kickoff and actually started
+// a captcha flow; false means one is already active or being set up for this
+// user (duplicate join delivery) and the call was a no-op.
+func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
 	// Race guard: chat_member events and message.new_chat_members can both
 	// fire for the same join. Without a kickoff lock they race through the
 	// pre-Put phase (restrict + send) and produce two captcha messages.
 	if !b.store.BeginKickoff(chatID, user.ID) {
 		b.log.Debug("captcha already in progress, skipping duplicate kickoff",
 			"chat", chatID, "user", user.ID)
-		return
+		return false
 	}
 	// Run the captcha flow asynchronously — it restricts immediately, then
 	// sleeps for CaptchaDelay before sending the captcha message. During the
 	// whole window handleGroupMessage deletes anything the user sends
 	// (store.IsCaptchaActive returns true while inflight is held).
 	go b.runCaptcha(chatID, user, threadID)
+	return true
 }
 
 func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
