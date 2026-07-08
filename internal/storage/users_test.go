@@ -139,3 +139,44 @@ func TestGetUserInfos(t *testing.T) {
 		t.Errorf("empty: %v %v", empty, err)
 	}
 }
+
+func TestEventUsers(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	base := time.Now().Add(-time.Hour)
+	// Хронология: 300 прошёл первым, 100 — вторым (дважды), 200 забанен.
+	_ = db.RecordEvent(ctx, 1, 300, EventPass, base)
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute))
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute))
+	_ = db.RecordEvent(ctx, 1, 200, EventBan, base.Add(3*time.Minute))
+	_ = db.RecordEvent(ctx, 2, 999, EventPass, base) // другой чат — не должен попасть
+
+	passed, err := db.EventUsers(ctx, 1, EventPass, base.Add(-time.Minute), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(passed) != 2 || passed[0].UserID != 300 || passed[1].UserID != 100 {
+		t.Fatalf("expected [300 100] in join order, got %+v", passed)
+	}
+	if passed[1].Count != 2 {
+		t.Fatalf("user 100 passed twice, got count %d", passed[1].Count)
+	}
+
+	banned, err := db.EventUsers(ctx, 1, EventBan, base.Add(-time.Minute), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(banned) != 1 || banned[0].UserID != 200 {
+		t.Fatalf("expected [200], got %+v", banned)
+	}
+
+	// Верхняя граница экслюзивна и по диапазону ничего лишнего.
+	none, err := db.EventUsers(ctx, 1, EventPass, base.Add(-2*time.Hour), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("expected empty result before range, got %+v", none)
+	}
+}

@@ -8,33 +8,55 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-func TestRenderStatsFailersComplete(t *testing.T) {
+func fakeUsers(startID int64, n, count int) []storage.UserCount {
+	out := make([]storage.UserCount, n)
+	for i := range out {
+		out[i] = storage.UserCount{UserID: startID + int64(i), Count: count}
+	}
+	return out
+}
+
+func TestRenderStatsListsComplete(t *testing.T) {
 	s := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 2}
-	failers := []storage.UserCount{
-		{UserID: 1001, Count: 3},
-		{UserID: 1002, Count: 2},
-		{UserID: 1003, Count: 1},
-	}
-	out := renderStats(periodAll, "всё время", s, 7, nil, failers, map[int64]storage.UserInfo{})
+	newMembers := fakeUsers(2001, 2, 1)
+	failers := fakeUsers(1001, 3, 2)
+	banned := fakeUsers(3001, 2, 1)
+	out := renderStats(periodAll, "всё время", s, 7,
+		newMembers, nil, failers, banned, map[int64]storage.UserInfo{})
 	if strings.Contains(out, "…и ещё") {
-		t.Fatalf("short list must not be truncated:\n%s", out)
+		t.Fatalf("short lists must not be truncated:\n%s", out)
 	}
-	for _, id := range []string{"id1001", "id1002", "id1003"} {
+	for _, id := range []string{
+		"id1001", "id1002", "id1003", // провалы
+		"id2001", "id2002", // новые участники
+		"id3001", "id3002", // забаненые
+	} {
 		if !strings.Contains(out, id) {
 			t.Fatalf("missing %s in:\n%s", id, out)
 		}
 	}
+	for _, header := range []string{"Новые участники", "Провалили капчу", "Забанены"} {
+		if !strings.Contains(out, header) {
+			t.Fatalf("missing header %q in:\n%s", header, out)
+		}
+	}
 }
 
-func TestRenderStatsFailersTruncatedToMessageLimit(t *testing.T) {
-	s := storage.Stats{Joined: 500, Passed: 100, Kicked: 300, Banned: 100}
-	failers := make([]storage.UserCount, 200)
-	for i := range failers {
-		failers[i] = storage.UserCount{UserID: int64(100000000 + i), Count: 2}
-	}
-	out := renderStats(periodMonth, "месяц", s, 7, nil, failers, map[int64]storage.UserInfo{})
+func TestRenderStatsTruncatedToMessageLimit(t *testing.T) {
+	s := storage.Stats{Joined: 600, Passed: 200, Kicked: 300, Banned: 100}
+	out := renderStats(periodMonth, "месяц", s, 7,
+		fakeUsers(100000000, 200, 1), // новые участники
+		fakeUsers(500000000, 5, 40),  // топ писателей
+		fakeUsers(200000000, 200, 2), // провалы
+		fakeUsers(300000000, 100, 1), // забаненые
+		map[int64]storage.UserInfo{})
 	if !strings.Contains(out, "…и ещё") {
-		t.Fatal("long list must end with an «…и ещё N» tail")
+		t.Fatal("huge lists must end with «…и ещё N» tails")
+	}
+	for _, header := range []string{"Новые участники", "Провалили капчу", "Забанены"} {
+		if !strings.Contains(out, header) {
+			t.Fatalf("header %q must survive truncation:\n%s", header, out)
+		}
 	}
 	if n := utf8.RuneCountInString(out); n >= 4096 {
 		t.Fatalf("rendered stats must fit a Telegram message, got %d runes", n)
