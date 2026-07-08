@@ -11,9 +11,25 @@ import (
 func fakeUsers(startID int64, n, count int) []storage.UserCount {
 	out := make([]storage.UserCount, n)
 	for i := range out {
-		out[i] = storage.UserCount{UserID: startID + int64(i), Count: count}
+		out[i] = storage.UserCount{UserID: startID + int64(i), Count: count, Secs: -1}
 	}
 	return out
+}
+
+func TestRenderStatsNewMemberSeconds(t *testing.T) {
+	s := storage.Stats{Joined: 2, Passed: 2}
+	newMembers := []storage.UserCount{
+		{UserID: 2001, Count: 1, Secs: 12},
+		{UserID: 2002, Count: 1, Secs: -1},
+	}
+	out := renderStats(periodDay, "сегодня", s, 7,
+		newMembers, nil, nil, nil, map[int64]storage.UserInfo{})
+	if !strings.Contains(out, "id2001</a> — за 12 сек") {
+		t.Fatalf("expected solve time for 2001:\n%s", out)
+	}
+	if strings.Contains(out, "id2002</a> — за") {
+		t.Fatalf("2002 has no recorded join — must render without time:\n%s", out)
+	}
 }
 
 func TestRenderStatsListsComplete(t *testing.T) {

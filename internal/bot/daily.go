@@ -70,7 +70,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	if err != nil {
 		b.log.Warn("daily digest: top failers", "err", err, "chat", chatID)
 	}
-	newMembers, err := b.db.EventUsers(ctx, chatID, storage.EventPass, from, until)
+	newMembers, err := b.db.PassedUsers(ctx, chatID, from, until)
 	if err != nil {
 		b.log.Warn("daily digest: new members", "err", err, "chat", chatID)
 	}

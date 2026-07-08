@@ -180,3 +180,40 @@ func TestEventUsers(t *testing.T) {
 		t.Fatalf("expected empty result before range, got %+v", none)
 	}
 }
+
+func TestPassedUsers(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	// 300: join → pass за 12 сек.
+	_ = db.RecordEvent(ctx, 1, 300, EventJoin, base)
+	_ = db.RecordEvent(ctx, 1, 300, EventPass, base.Add(12*time.Second))
+	// 100: два прохождения (30 и 8 сек) — берётся лучшее.
+	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(time.Minute))
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute+30*time.Second))
+	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(2*time.Minute))
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute+8*time.Second))
+	// 200: pass без join (старые данные) — время неизвестно.
+	_ = db.RecordEvent(ctx, 1, 200, EventPass, base.Add(3*time.Minute))
+
+	got, err := db.PassedUsers(ctx, 1, base.Add(-time.Minute), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 users, got %+v", got)
+	}
+	if got[0].UserID != 300 || got[1].UserID != 100 || got[2].UserID != 200 {
+		t.Fatalf("wrong chronological order: %+v", got)
+	}
+	if got[0].Secs != 12 {
+		t.Fatalf("user 300: want 12 sec, got %d", got[0].Secs)
+	}
+	if got[1].Secs != 8 || got[1].Count != 2 {
+		t.Fatalf("user 100: want best 8 sec of 2 passes, got %+v", got[1])
+	}
+	if got[2].Secs != -1 {
+		t.Fatalf("user 200: want -1 (no join recorded), got %d", got[2].Secs)
+	}
+}
