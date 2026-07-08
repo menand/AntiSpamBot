@@ -379,7 +379,8 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		return nil
 	}
 	topWriters, _ := b.db.TopWriters(ctx, chatID, from, until, 5)
-	topFailers, _ := b.db.TopFailers(ctx, chatID, from, until, 5)
+	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
+	topFailers, _ := b.db.TopFailers(ctx, chatID, from, until, -1)
 	infos, _ := b.db.GetUserInfos(ctx, collectUserIDs(topWriters, topFailers))
 	if infos == nil {
 		infos = map[int64]storage.UserInfo{}
