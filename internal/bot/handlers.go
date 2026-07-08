@@ -3,6 +3,7 @@ package bot
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"strconv"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
@@ -98,17 +100,7 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		"old", oldStatus, "new", newStatus)
 
 	if newStatus == "left" || newStatus == "kicked" {
-		for _, p := range b.store.TakeChat(upd.Chat.ID) {
-			p.Cancel()
-		}
-		if err := b.db.DeletePendingChat(b.runCtx, upd.Chat.ID); err != nil {
-			b.log.Warn("delete pending captchas on bot leave",
-				"err", err, "chat", upd.Chat.ID)
-		}
-		if err := b.db.DeleteChat(b.runCtx, upd.Chat.ID); err != nil {
-			b.log.Warn("delete chat on bot leave",
-				"err", err, "chat", upd.Chat.ID)
-		}
+		b.dropChat(b.runCtx, upd.Chat.ID, "bot left/kicked")
 		return nil
 	}
 
@@ -116,6 +108,8 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 	if !b.chatAllowed(upd.Chat.ID) {
+		b.log.Info("chat not in ALLOWED_CHATS, ignoring",
+			"chat", upd.Chat.ID, "title", upd.Chat.Title)
 		return nil
 	}
 	b.rememberChat(b.runCtx, storage.ChatInfo{
@@ -125,6 +119,73 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 	})
 	b.checkAdminRights(upd)
 	return nil
+}
+
+// dropChat removes a chat from the DM-menu registry and cancels its pending
+// captchas. Historical stats stay for archival. Evicting the write-through
+// cache is essential: otherwise a later rememberChat with an unchanged title
+// skips the DB write and the chat never reappears in the registry.
+func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
+	b.log.Info("dropping chat from registry", "chat", chatID, "reason", why)
+	for _, p := range b.store.TakeChat(chatID) {
+		p.Cancel()
+	}
+	if err := b.db.DeletePendingChat(ctx, chatID); err != nil {
+		b.log.Warn("delete pending captchas", "err", err, "chat", chatID)
+	}
+	if err := b.db.DeleteChat(ctx, chatID); err != nil {
+		b.log.Warn("delete chat", "err", err, "chat", chatID)
+	}
+	b.cacheMu.Lock()
+	delete(b.chatCache, chatID)
+	b.cacheMu.Unlock()
+}
+
+// reconcileChats sweeps the chat registry once at startup and drops rows for
+// chats the bot is not actually in. Rows outlive membership when BOT_TOKEN is
+// switched to a different bot (the old bot's chats stay in the shared DB) or
+// when the bot was kicked while offline — my_chat_member never fires for
+// either, so the DM menu keeps showing dead chats forever.
+func (b *Bot) reconcileChats(ctx context.Context) {
+	chats, err := b.db.ListChats(ctx)
+	if err != nil {
+		b.log.Warn("reconcile chats: list", "err", err)
+		return
+	}
+	for _, c := range chats {
+		if !b.chatAllowed(c.ChatID) {
+			b.dropChat(ctx, c.ChatID, "not in ALLOWED_CHATS")
+			continue
+		}
+		m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
+			ChatID: tu.ID(c.ChatID),
+			UserID: b.me.ID,
+		})
+		if reason, stale := staleChatReason(m, err); stale {
+			b.dropChat(ctx, c.ChatID, reason)
+		} else if err != nil {
+			// Transient (network, 429, 5xx): keep the row, next restart retries.
+			b.log.Warn("reconcile chats: check membership", "err", err, "chat", c.ChatID)
+		}
+	}
+}
+
+// staleChatReason decides whether a getChatMember(self) result proves the bot
+// is not in the chat. Telegram answers 400 "chat not found" for chats this
+// bot has never seen and 403 "bot was kicked"/"not a member" for lost
+// membership — both definitive. Anything else must NOT drop the row.
+func staleChatReason(m telego.ChatMember, err error) (string, bool) {
+	if err != nil {
+		var apiErr *telegoapi.Error
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode == 400 || apiErr.ErrorCode == 403) {
+			return apiErr.Description, true
+		}
+		return "", false
+	}
+	if s := m.MemberStatus(); s == "left" || s == "kicked" {
+		return "status " + s, true
+	}
+	return "", false
 }
 
 // checkAdminRights posts a setup hint into the chat when the bot was added
