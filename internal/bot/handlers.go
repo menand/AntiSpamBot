@@ -436,6 +436,11 @@ func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user 
 	if rec.Silence < threshold {
 		return
 	}
+	// Per-chat toggle; checked after the threshold so the settings query only
+	// runs on the rare announce-worthy message, not on every message.
+	if s, err := b.db.GetChatSettings(b.runCtx, message.Chat.ID); err == nil && !s.SilentAnnounceEnabled {
+		return
+	}
 	days := int(rec.Silence / (24 * time.Hour))
 	mention := mentionHTML(user)
 	var text string

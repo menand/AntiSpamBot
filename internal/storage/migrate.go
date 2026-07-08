@@ -101,10 +101,10 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text)
+			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text
+			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {

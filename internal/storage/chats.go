@@ -63,23 +63,24 @@ type ChatSettings struct {
 	LastDailyStatsDay     sql.NullString
 	CaptchaMode           sql.NullString // NULL = default (circles)
 	GreetingText          sql.NullString // NULL = built-in default greeting
+	SilentAnnounceEnabled bool           // defaults to true when no row exists
 }
 
 // GetChatSettings loads the full settings row for a chat, applying defaults
 // when the row is absent.
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
-	s := ChatSettings{ChatID: chatID, GreetingEnabled: true}
+	s := ChatSettings{ChatID: chatID, GreetingEnabled: true, SilentAnnounceEnabled: true}
 
-	var greetingInt, dailyInt int
+	var greetingInt, dailyInt, silentInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
-		       captcha_mode, greeting_text
+		       captcha_mode, greeting_text, silent_announce_enabled
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
-		&s.CaptchaMode, &s.GreetingText)
+		&s.CaptchaMode, &s.GreetingText, &silentInt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -88,6 +89,7 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	}
 	s.GreetingEnabled = greetingInt != 0
 	s.DailyStatsEnabled = dailyInt != 0
+	s.SilentAnnounceEnabled = silentInt != 0
 	return s, nil
 }
 
@@ -110,6 +112,24 @@ func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool)
 	`, chatID, v)
 	if err != nil {
 		return fmt.Errorf("set greeting: %w", err)
+	}
+	return nil
+}
+
+// SetSilentAnnounceEnabled toggles the "returned after long silence"
+// announcements for this chat.
+func (d *DB) SetSilentAnnounceEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, silent_announce_enabled)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET silent_announce_enabled = excluded.silent_announce_enabled
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set silent_announce_enabled: %w", err)
 	}
 	return nil
 }

@@ -64,7 +64,7 @@ Tables:
 - `user_activity`, `user_message_counts` — silence detection / top writers.
 - `user_info(user_id, …)` — display-name cache for mentions.
 - `chats(chat_id, title, type)` — registry for the DM menu; row removed when the bot leaves.
-- `chat_settings(chat_id, greeting_enabled, max_attempts, captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day, captcha_mode, greeting_text)` — per-chat overrides; NULL = global default. Resolved via `effective*` helpers in `access.go`.
+- `chat_settings(chat_id, greeting_enabled, max_attempts, captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled)` — per-chat overrides; NULL = global default. Resolved via `effective*` helpers in `access.go`.
 
 Write-through caches (`internal/bot/cache.go`): `rememberChat`/`rememberUser` skip the DB write when the cached value is unchanged — use these instead of calling `db.RememberChat`/`db.RememberUser` directly from hot paths.
 
@@ -74,7 +74,7 @@ Events are counted by unix time (`at >= from AND at < until`), messages by calen
 
 ### DM menu (`internal/bot/menu.go`)
 
-Callback formats: `menu:main|help|add|chats|logs`, `menu:stats:<chat>:<period>`, `menu:settings:<chat>`, toggles `menu:gr|daily:<chat>`, presets `menu:max|tmo|hour:<chat>:<val>`, `menu:cmode:<chat>:<mode>`, `menu:grtxt:<chat>` (arms greeting-text input). Access via `canManageChat` (bot owner or chat admin via getChatMember).
+Callback formats: `menu:main|help|add|chats|logs`, `menu:stats:<chat>:<period>`, `menu:settings:<chat>`, toggles `menu:gr|daily|sil:<chat>`, presets `menu:max|tmo|hour:<chat>:<val>`, `menu:cmode:<chat>:<mode>`, `menu:grtxt:<chat>` (arms greeting-text input). Access via `canManageChat` (bot owner or chat admin via getChatMember).
 
 Greeting-text input flow: `menu:grtxt` stores `userID→chatID` in `Bot.greetInput`; the next private message (handled by `handlePrivateText`) becomes the template. `-` resets to default, any `/command` aborts, 500-rune cap. Templates are HTML-escaped at render time; `{name}` is replaced with the mention markup after escaping (`renderGreeting`).
 
