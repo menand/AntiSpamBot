@@ -94,5 +94,6 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     daily_stats_utc_hour    INTEGER,
     last_daily_stats_day    TEXT,
     captcha_mode            TEXT,
-    greeting_text           TEXT  -- NULL = built-in default greeting
+    greeting_text           TEXT, -- NULL = built-in default greeting
+    silent_announce_enabled INTEGER NOT NULL DEFAULT 1
 );

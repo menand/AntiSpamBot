@@ -47,6 +47,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		`ALTER TABLE chat_settings ADD COLUMN daily_stats_utc_hour INTEGER`,
 		`ALTER TABLE chat_settings ADD COLUMN captcha_mode TEXT`,
 		`ALTER TABLE chat_settings ADD COLUMN greeting_text TEXT`,
+		`ALTER TABLE chat_settings ADD COLUMN silent_announce_enabled INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE pending_captchas ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {

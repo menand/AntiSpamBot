@@ -189,6 +189,22 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set daily stats", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "sil":
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		s, _ := b.db.GetChatSettings(ctx, chatID)
+		if err := b.db.SetSilentAnnounceEnabled(ctx, chatID, !s.SilentAnnounceEnabled); err != nil {
+			b.log.Warn("set silent announce", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "hour":
 		if len(parts) != 4 {
 			return nil
@@ -433,13 +449,15 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
 			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
-			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>",
+			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
+			"😴 Анонс вернувшихся молчунов: <b>%s</b>",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
 		onOffLabel(s.GreetingEnabled), greetingText,
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
+		onOffLabel(s.SilentAnnounceEnabled),
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -457,6 +475,10 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		// UTC hours chosen to display as 00/04/08/12/16/20 MSK after the
 		// MSK = UTC+3 shift applied by mskHourLabel.
 		hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}),
+		{
+			tu.InlineKeyboardButton(toggleLabel("😴 Анонс молчунов", s.SilentAnnounceEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:sil:%d", chatID)),
+		},
 		{
 			tu.InlineKeyboardButton("⬅️ К статистике").
 				WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
