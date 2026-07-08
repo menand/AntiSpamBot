@@ -97,18 +97,43 @@ func periodLabel(p statsPeriod) string {
 	return string(p)
 }
 
-// statsRuneBudget ограничивает длину списка провалов в renderStats. Лимит
-// Telegram — 4096 символов на сообщение, но снаружи к статистике дописывают
-// заголовок (тайтл чата в меню, «Сводка за сутки» в дайджесте, ≤ ~150 рун),
-// а после списка идёт футер (~100 рун) — отсюда запас.
-const statsRuneBudget = 3700
+// statsRuneBudget ограничивает суммарную длину пофамильных списков в
+// renderStats. Лимит Telegram — 4096 символов на сообщение, но снаружи к
+// статистике дописывают заголовок (тайтл чата в меню, «Сводка за сутки» в
+// дайджесте, ≤ ~150 рун), а после списков идёт футер (~100 рун) плюс хвосты
+// «…и ещё N» у обрезанных блоков — отсюда запас.
+const statsRuneBudget = 3600
+
+// appendUserList выводит заголовок и пронумерованный список юзеров, обрезая
+// его по statsRuneBudget: не влезшие сворачиваются в «…и ещё N человек».
+// Бюджет общий на всё сообщение и жадный — при огромных списках (рейд)
+// блоки, идущие позже, сворачиваются первыми.
+func appendUserList(sb *strings.Builder, header string, list []storage.UserCount,
+	line func(i int, uc storage.UserCount) string) {
+	if len(list) == 0 {
+		return
+	}
+	sb.WriteString(header)
+	used := utf8.RuneCountInString(sb.String())
+	for i, uc := range list {
+		l := line(i, uc)
+		used += utf8.RuneCountInString(l)
+		if used > statsRuneBudget {
+			rest := len(list) - i
+			fmt.Fprintf(sb, "…и ещё %d %s\n",
+				rest, pluralRU(rest, "человек", "человека", "человек"))
+			return
+		}
+		sb.WriteString(l)
+	}
+}
 
 func renderStats(
 	p statsPeriod,
 	label string,
 	s storage.Stats,
 	newcomerDays int,
-	topWriters, topFailers []storage.UserCount,
+	newMembers, topWriters, topFailers, banned []storage.UserCount,
 	infos map[int64]storage.UserInfo,
 ) string {
 	var sb strings.Builder
@@ -125,6 +150,11 @@ func renderStats(
 		}
 	}
 
+	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
+		func(i int, uc storage.UserCount) string {
+			return fmt.Sprintf("%d. %s\n", i+1, mentionOrID(infos, uc.UserID))
+		})
+
 	total := s.MsgNewcomer + s.MsgOldtimer
 	fmt.Fprintf(&sb, "\n💬 <b>Сообщений:</b> %d\n", total)
 	if total > 0 {
@@ -132,36 +162,24 @@ func renderStats(
 		fmt.Fprintf(&sb, "• Старички: %d (%s)\n", s.MsgOldtimer, pct(s.MsgOldtimer, total))
 	}
 
-	if len(topWriters) > 0 {
-		sb.WriteString("\n🔝 <b>Топ писателей:</b>\n")
-		for i, uc := range topWriters {
-			fmt.Fprintf(&sb, "%d. %s — %d %s\n",
+	appendUserList(&sb, "\n🔝 <b>Топ писателей:</b>\n", topWriters,
+		func(i int, uc storage.UserCount) string {
+			return fmt.Sprintf("%d. %s — %d %s\n",
 				i+1, mentionOrID(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
-		}
-	}
+		})
 
-	if len(topFailers) > 0 {
-		sb.WriteString("\n🚫 <b>Провалили капчу:</b>\n")
-		// Список полный (без топ-N), но Telegram не примет сообщение длиннее
-		// 4096 символов — не влезшие сворачиваются в «…и ещё N». Бюджет
-		// считаем по сырому HTML: он длиннее видимого текста, так что запас
-		// только растёт.
-		used := utf8.RuneCountInString(sb.String())
-		for i, uc := range topFailers {
-			line := fmt.Sprintf("%d. %s — %d %s\n",
+	appendUserList(&sb, "\n🚫 <b>Провалили капчу:</b>\n", topFailers,
+		func(i int, uc storage.UserCount) string {
+			return fmt.Sprintf("%d. %s — %d %s\n",
 				i+1, mentionOrID(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"))
-			used += utf8.RuneCountInString(line)
-			if used > statsRuneBudget {
-				rest := len(topFailers) - i
-				fmt.Fprintf(&sb, "…и ещё %d %s\n",
-					rest, pluralRU(rest, "человек", "человека", "человек"))
-				break
-			}
-			sb.WriteString(line)
-		}
-	}
+		})
+
+	appendUserList(&sb, "\n⛔️ <b>Забанены:</b>\n", banned,
+		func(i int, uc storage.UserCount) string {
+			return fmt.Sprintf("%d. %s\n", i+1, mentionOrID(infos, uc.UserID))
+		})
 
 	if p != periodAll {
 		fmt.Fprintf(&sb, "\n<i>Новичок — тот, кто прошёл капчу за последние %d дн.</i>", newcomerDays)

@@ -70,6 +70,14 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	if err != nil {
 		b.log.Warn("daily digest: top failers", "err", err, "chat", chatID)
 	}
+	newMembers, err := b.db.EventUsers(ctx, chatID, storage.EventPass, from, until)
+	if err != nil {
+		b.log.Warn("daily digest: new members", "err", err, "chat", chatID)
+	}
+	banned, err := b.db.EventUsers(ctx, chatID, storage.EventBan, from, until)
+	if err != nil {
+		b.log.Warn("daily digest: banned users", "err", err, "chat", chatID)
+	}
 
 	// Skip entirely if nothing to report — chat went quiet, don't spam.
 	total := s.Joined + s.MsgNewcomer + s.MsgOldtimer + len(topFailers)
@@ -79,14 +87,16 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 		return
 	}
 
-	infos, err := b.db.GetUserInfos(ctx, collectUserIDs(topWriters, topFailers))
+	infos, err := b.db.GetUserInfos(ctx,
+		collectUserIDs(topWriters, topFailers, newMembers, banned))
 	if err != nil {
 		b.log.Warn("daily digest: user infos", "err", err, "chat", chatID)
 		infos = map[int64]storage.UserInfo{}
 	}
 
 	header := "🌅 <b>Сводка за сутки</b>\n\n"
-	body := renderStats(periodDay, "вчера", s, b.cfg.NewcomerDays, topWriters, topFailers, infos)
+	body := renderStats(periodDay, "вчера", s, b.cfg.NewcomerDays,
+		newMembers, topWriters, topFailers, banned, infos)
 
 	_, err = b.api.SendMessage(ctx,
 		tu.Message(tu.ID(chatID), header+body).

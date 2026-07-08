@@ -162,6 +162,23 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 	return scanUserCounts(rows)
 }
 
+// EventUsers returns everyone with at least one event of the given kind in
+// [from, until), in the order the first event happened. No limit — the caller
+// (renderStats) cuts the list to fit Telegram's message length.
+func (d *DB) EventUsers(ctx context.Context, chatID int64, kind EventKind, from, until time.Time) ([]UserCount, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT user_id, COUNT(*) AS n FROM events
+		WHERE chat_id = ? AND kind = ? AND at >= ? AND at < ?
+		GROUP BY user_id
+		ORDER BY MIN(at) ASC, user_id ASC
+	`, chatID, string(kind), from.Unix(), until.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("query event users: %w", err)
+	}
+	defer rows.Close()
+	return scanUserCounts(rows)
+}
+
 // TopWriters returns users with the most messages in [from, until) (by day,
 // exclusive upper bound — same semantics as QueryStats), sorted desc.
 func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
