@@ -40,6 +40,10 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		"old", oldStatus,
 		"new", newStatus)
 
+	// Любая смена статуса могла дать или отнять админку — кэш для белого
+	// списка антиспама и золотого голоса не должен пережить это событие.
+	b.invalidateAdminCache(upd.Chat.ID, user.ID)
+
 	if upd.Chat.Type != "group" && upd.Chat.Type != "supergroup" {
 		return nil
 	}
@@ -491,6 +495,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 	b.maybeAnnounceReturn(ctx, message, user, rec)
+	b.maybeSpamCheck(message)
 	return nil
 }
 

@@ -28,6 +28,11 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetDailyStatsHour(ctx, old, &hour)
 	_ = db.SetCaptchaMode(ctx, old, &mode)
 	_ = db.SetGreetingText(ctx, old, &greet)
+	_ = db.SetSilentAnnounceEnabled(ctx, old, false)
+	sthr, swl := 75, 10
+	_ = db.SetSpamCheckEnabled(ctx, old, true)
+	_ = db.SetSpamThreshold(ctx, old, &sthr)
+	_ = db.SetSpamWhitelistMsgs(ctx, old, &swl)
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -85,6 +90,18 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.GreetingText.Valid || ms.GreetingText.String != "Привет, {name}!" {
 		t.Errorf("greeting_text did not migrate: %+v", ms.GreetingText)
+	}
+	if ms.SilentAnnounceEnabled {
+		t.Error("silent_announce_enabled=false did not migrate (still shows true default)")
+	}
+	if !ms.SpamCheckEnabled {
+		t.Error("spam_check_enabled did not migrate")
+	}
+	if !ms.SpamThreshold.Valid || ms.SpamThreshold.Int64 != 75 {
+		t.Errorf("spam_threshold did not migrate: %+v", ms.SpamThreshold)
+	}
+	if !ms.SpamWhitelistMsgs.Valid || ms.SpamWhitelistMsgs.Int64 != 10 {
+		t.Errorf("spam_whitelist_msgs did not migrate: %+v", ms.SpamWhitelistMsgs)
 	}
 }
 

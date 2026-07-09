@@ -101,10 +101,12 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled)
+			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled,
+			spam_check_enabled, spam_threshold, spam_whitelist_msgs)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled
+			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled,
+			spam_check_enabled, spam_threshold, spam_whitelist_msgs
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {
@@ -120,6 +122,17 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pending_captchas WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old pending_captchas: %w", err)
+	}
+
+	// spam_votes / spam_ballots — same reasoning: message IDs died with the
+	// old chat, nothing to carry over.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_votes WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old spam_votes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_ballots WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old spam_ballots: %w", err)
 	}
 
 	// attempts — (chat_id, user_id) PK. Take max count + latest update time.

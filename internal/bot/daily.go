@@ -74,7 +74,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	if err != nil {
 		b.log.Warn("daily digest: new members", "err", err, "chat", chatID)
 	}
-	banned, err := b.db.EventUsers(ctx, chatID, storage.EventBan, from, until)
+	banned, err := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
 	if err != nil {
 		b.log.Warn("daily digest: banned users", "err", err, "chat", chatID)
 	}

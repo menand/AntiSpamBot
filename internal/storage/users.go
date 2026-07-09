@@ -202,16 +202,26 @@ func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Tim
 	return out, rows.Err()
 }
 
-// EventUsers returns everyone with at least one event of the given kind in
+// EventUsers returns everyone with at least one event of the given kinds in
 // [from, until), in the order the first event happened. No limit — the caller
 // (renderStats) cuts the list to fit Telegram's message length.
-func (d *DB) EventUsers(ctx context.Context, chatID int64, kind EventKind, from, until time.Time) ([]UserCount, error) {
-	rows, err := d.sql.QueryContext(ctx, `
+func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time, kinds ...EventKind) ([]UserCount, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	placeholders := strings.Repeat("?,", len(kinds))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := []any{chatID}
+	for _, k := range kinds {
+		args = append(args, string(k))
+	}
+	args = append(args, from.Unix(), until.Unix())
+	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`
 		SELECT user_id, COUNT(*) AS n FROM events
-		WHERE chat_id = ? AND kind = ? AND at >= ? AND at < ?
+		WHERE chat_id = ? AND kind IN (%s) AND at >= ? AND at < ?
 		GROUP BY user_id
 		ORDER BY MIN(at) ASC, user_id ASC
-	`, chatID, string(kind), from.Unix(), until.Unix())
+	`, placeholders), args...)
 	if err != nil {
 		return nil, fmt.Errorf("query event users: %w", err)
 	}

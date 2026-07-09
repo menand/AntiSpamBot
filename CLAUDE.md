@@ -17,7 +17,7 @@ docker compose logs -f
 
 Bot version is stamped via `-ldflags "-X main.version=$(git describe ...)"` — `make build`/`make docker-up` and `scripts/auto-deploy.sh` do it automatically; a bare `docker compose up -d --build` yields `dev`.
 
-Config is env-only — no config file. Required: `BOT_TOKEN`. Optional: `CAPTCHA_TIMEOUT_SECONDS` (30), `MAX_ATTEMPTS` (3), `NEWCOMER_DAYS` (7), `SILENT_ANNOUNCE_DAYS` (30, 0=off), `LOG_LEVEL` (info), `DB_PATH` (bot.db / /data/bot.db in Docker), `ALLOWED_CHATS` (none = all chats), `OWNER_IDS`, `LOG_FILE` (set in Docker to /data/bot.log), `CAPTCHA_DELAY_MS` (2000), `DAILY_STATS_UTC_HOUR` (6).
+Config is env-only — no config file. Required: `BOT_TOKEN`. Optional: `CAPTCHA_TIMEOUT_SECONDS` (30), `MAX_ATTEMPTS` (3), `NEWCOMER_DAYS` (7), `SILENT_ANNOUNCE_DAYS` (30, 0=off), `LOG_LEVEL` (info), `DB_PATH` (bot.db / /data/bot.db in Docker), `ALLOWED_CHATS` (none = all chats), `OWNER_IDS`, `LOG_FILE` (set in Docker to /data/bot.log), `CAPTCHA_DELAY_MS` (2000), `DAILY_STATS_UTC_HOUR` (6), `GROQ_API_KEY` (none = AI spam analysis off), `GROQ_MODEL` (llama-3.1-8b-instant).
 
 ## Architecture
 
@@ -31,6 +31,7 @@ Long-polling via telego → `th.BotHandler`:
 - `cap:` callbacks → `handleCallback` — captcha answer
 - `capok:` callbacks → `handleApproveCallback` — admin "✅ Впустить" button (manual approve, same path as success)
 - `menu:` callbacks → `handleMenuCallback` — DM menu (stats, settings)
+- `sv:` callbacks → `handleSpamVoteCallback` — «спам/не спам» voting buttons (AI spam analysis)
 - `/stats`, `/greeting` — registered as no-op handlers so the commands are swallowed silently in groups (all management is via the DM menu)
 - `/chats`, `/logs`, `/info`, `/start`, `/help` — DM commands
 - `privateMessagePredicate` → `handlePrivateText` — greeting-text input flow (see below)
@@ -47,6 +48,12 @@ Handler registration order matters — telego runs the first matching predicate 
 5. Fail: `IncrementAttempt` (TTL 24h), record `kick` or `ban` event, delete message, kick if `count < MaxAttempts` else permanent ban.
 6. User left mid-captcha: captcha cancelled + message deleted, **no kick event** (stats stay honest); our own post-fail kick is unaffected because `onFail` Takes the pending before kicking.
 
+### AI spam analysis (`internal/bot/spamcheck.go`, `internal/groq`)
+
+Per-chat opt-in (`spam_check_enabled`, default off; needs `GROQ_API_KEY`). Hook at the tail of `handleGroupMessage`: messages from non-whitelisted users go to Groq (text/caption + FACTS about media — the files themselves never leave; forward origin; author name, membership age, message total) → spam probability 0–100. Whitelist skips analysis: `UserMessageTotal > spam_whitelist_msgs` (default 5), owners, chat admins (cached 6h in `adminCache`, invalidated on every `chat_member` event). Probability ≥ `spam_threshold` (default 90) → reply with «мне кажется, это спам» + «Да, спам»/«Нет, не спам» buttons, persisted to `spam_votes`.
+
+Voting: one ballot per voter (re-press switches), author excluded, margin of `spamVoteMargin`=3 decides; an admin/owner vote decides instantly («золотой голос»). Verdict executor starts with `TakeSpamVote` (atomic DELETE, first caller wins — double-click/race safe). Spam → `banRevoke` (BanChatMember with `RevokeMessages:true`, wipes ALL author's messages) + `spamban` event; not-spam → delete only the bot's message. `spamVoteSweepLoop` (hourly + at startup) closes votes older than 24h — past 48h Telegram refuses bot deletions entirely, so never let them age. Groq errors/timeouts are fail-open (message stays, Warn logged). Groq call runs in a goroutine on `runCtx`; in-flight dedup per chat:user + one pending vote per author max. Live prompt check: `GROQ_API_KEY=... go test -run TestLive ./internal/groq -v`.
+
 ### Flood control (`internal/bot/actions.go`)
 
 `restrict` retries with backoff and honors Telegram's `retry_after` on 429 (mass-join scenario). `kick` = ban + retried unban (also 429-aware) so transient errors don't turn kicks into permabans. `ban` omits the unban.
@@ -58,13 +65,14 @@ Single SQLite file, pure Go driver (`modernc.org/sqlite`, no CGO). `SetMaxOpenCo
 Tables:
 - `pending_captchas(chat_id, user_id, message_id, correct_idx, expires_at, thread_id)` — active captchas. Deleted on take/timeout/user-left/bot-left.
 - `attempts(chat_id, user_id, count, updated_at)` — failure counter, 24h TTL, swept by `attemptsSweepLoop`.
-- `events(id, chat_id, user_id, kind, at)` — append-only, `kind ∈ {join,pass,kick,ban}`.
+- `events(id, chat_id, user_id, kind, at)` — append-only, `kind ∈ {join,pass,kick,ban,spamban}` (`spamban` — AI-antispam verdict, kept out of the captcha funnel percentages; the «Забанены» stats list merges `ban`+`spamban`).
 - `members(chat_id, user_id, joined_at)` — upserted on captcha pass; drives newcomer classification + silence baseline.
 - `message_counts(chat_id, day, newcomer_count, oldtimer_count)` — daily aggregates.
 - `user_activity`, `user_message_counts` — silence detection / top writers.
 - `user_info(user_id, …)` — display-name cache for mentions.
 - `chats(chat_id, title, type)` — registry for the DM menu; row removed when the bot leaves.
-- `chat_settings(chat_id, greeting_enabled, max_attempts, captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled)` — per-chat overrides; NULL = global default. Resolved via `effective*` helpers in `access.go`.
+- `chat_settings(chat_id, greeting_enabled, max_attempts, captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled, spam_check_enabled, spam_threshold, spam_whitelist_msgs)` — per-chat overrides; NULL = global default. Resolved via `effective*` helpers in `access.go` (spam ones are pure funcs in `spamcheck.go` over a loaded `ChatSettings`).
+- `spam_votes(chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at)` + `spam_ballots(chat_id, bot_msg_id, voter_id, is_spam)` — active «спам/не спам» votes; all state in SQLite (restart-safe), rows removed by `TakeSpamVote`.
 
 Write-through caches (`internal/bot/cache.go`): `rememberChat`/`rememberUser` skip the DB write when the cached value is unchanged — use these instead of calling `db.RememberChat`/`db.RememberUser` directly from hot paths.
 
@@ -97,7 +105,7 @@ Button labels: always truncate with `truncateLabel` (rune-safe) — byte slicing
 ## When making changes
 
 - New update types → add to `AllowedUpdates` in `Bot.Run`, otherwise Telegram doesn't deliver them.
-- Callback data formats: captcha `cap:<userID>:<optIdx>`, approve `capok:<userID>`, menu `menu:...` — update both formatter and parser sides. Note `th.CallbackDataPrefix("cap:")` does NOT match `capok:` (prefix includes the colon).
+- Callback data formats: captcha `cap:<userID>:<optIdx>`, approve `capok:<userID>`, menu `menu:...`, spam vote `sv:<1|0>` (chat/msg come from the callback's message) — update both formatter and parser sides. Note `th.CallbackDataPrefix("cap:")` does NOT match `capok:` (prefix includes the colon).
 - Schema changes: `CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... ADD COLUMN` in **both** `schema.sql` and `db.go` migrations, **plus** `MigrateChat` if the table is per-chat keyed.
 - New event kinds: `EventKind` const block + `QueryStats` switch.
 - Admin-gated UI: reuse `canManageChat` (covers owner + chat admin).

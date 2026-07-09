@@ -152,7 +152,7 @@ func TestEventUsers(t *testing.T) {
 	_ = db.RecordEvent(ctx, 1, 200, EventBan, base.Add(3*time.Minute))
 	_ = db.RecordEvent(ctx, 2, 999, EventPass, base) // другой чат — не должен попасть
 
-	passed, err := db.EventUsers(ctx, 1, EventPass, base.Add(-time.Minute), time.Now())
+	passed, err := db.EventUsers(ctx, 1, base.Add(-time.Minute), time.Now(), EventPass)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestEventUsers(t *testing.T) {
 		t.Fatalf("user 100 passed twice, got count %d", passed[1].Count)
 	}
 
-	banned, err := db.EventUsers(ctx, 1, EventBan, base.Add(-time.Minute), time.Now())
+	banned, err := db.EventUsers(ctx, 1, base.Add(-time.Minute), time.Now(), EventBan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +172,7 @@ func TestEventUsers(t *testing.T) {
 	}
 
 	// Верхняя граница экслюзивна и по диапазону ничего лишнего.
-	none, err := db.EventUsers(ctx, 1, EventPass, base.Add(-2*time.Hour), base)
+	none, err := db.EventUsers(ctx, 1, base.Add(-2*time.Hour), base, EventPass)
 	if err != nil {
 		t.Fatal(err)
 	}

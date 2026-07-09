@@ -205,6 +205,66 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set silent announce", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "spam":
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		s, _ := b.db.GetChatSettings(ctx, chatID)
+		if !s.SpamCheckEnabled && !b.groqc.Enabled() {
+			_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+				WithText("GROQ_API_KEY не задан на сервере — включить нельзя.").
+				WithShowAlert())
+			return nil
+		}
+		if err := b.db.SetSpamCheckEnabled(ctx, chatID, !s.SpamCheckEnabled); err != nil {
+			b.log.Warn("set spam_check_enabled", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "sthr":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 50 || v > 99 {
+			return nil
+		}
+		if err := b.db.SetSpamThreshold(ctx, chatID, &v); err != nil {
+			b.log.Warn("set spam_threshold", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "swl":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 1 || v > 1000 {
+			return nil
+		}
+		if err := b.db.SetSpamWhitelistMsgs(ctx, chatID, &v); err != nil {
+			b.log.Warn("set spam_whitelist_msgs", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "hour":
 		if len(parts) != 4 {
 			return nil
@@ -382,7 +442,7 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
 	topFailers, _ := b.db.TopFailers(ctx, chatID, from, until, -1)
 	newMembers, _ := b.db.PassedUsers(ctx, chatID, from, until)
-	banned, _ := b.db.EventUsers(ctx, chatID, storage.EventBan, from, until)
+	banned, _ := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
 	infos, _ := b.db.GetUserInfos(ctx,
 		collectUserIDs(topWriters, topFailers, newMembers, banned))
 	if infos == nil {
@@ -447,6 +507,13 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		greetingText = "свой"
 	}
 
+	spamThreshold := effectiveSpamThreshold(s)
+	spamWhitelist := effectiveSpamWhitelist(s)
+	spamLabel := onOffLabel(s.SpamCheckEnabled)
+	if !b.groqc.Enabled() {
+		spamLabel = "нет ключа 🔑"
+	}
+
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
 		"⚙️ <b>Настройки: %s</b>\n\n"+
@@ -455,7 +522,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
 			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
-			"😴 Анонс вернувшихся молчунов: <b>%s</b>",
+			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
+			"🤖 ИИ-антиспам: <b>%s</b> (порог %d%%, белый список после %d сообщ.)",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
@@ -463,6 +531,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
+		spamLabel, spamThreshold, spamWhitelist,
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -483,12 +552,21 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		{
 			tu.InlineKeyboardButton(toggleLabel("😴 Анонс молчунов", s.SilentAnnounceEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:sil:%d", chatID)),
-		},
-		{
-			tu.InlineKeyboardButton("⬅️ К статистике").
-				WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
+			tu.InlineKeyboardButton(toggleLabel("🤖 ИИ-антиспам", s.SpamCheckEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:spam:%d", chatID)),
 		},
 	}
+	// Пресеты антиспама показываем только при включённой фиче — экран и так
+	// плотный.
+	if s.SpamCheckEnabled {
+		rows = append(rows,
+			intPresetRow(chatID, "sthr", spamThreshold, []int{70, 80, 90}, "%"),
+			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"))
+	}
+	rows = append(rows, []telego.InlineKeyboardButton{
+		tu.InlineKeyboardButton("⬅️ К статистике").
+			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
+	})
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
