@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
 func TestTruncateLabel(t *testing.T) {
@@ -120,5 +122,26 @@ func TestHumanDaysGenRU(t *testing.T) {
 		if got := humanDaysGenRU(tc.days); got != tc.want {
 			t.Errorf("humanDaysGenRU(%d) = %q, want %q", tc.days, got, tc.want)
 		}
+	}
+}
+
+func TestMentionWithUsername(t *testing.T) {
+	infos := map[int64]storage.UserInfo{
+		1: {UserID: 1, FirstName: "Andrey", LastName: "Menshov", Username: "menshovandrey"},
+		2: {UserID: 2, FirstName: "Вася"},
+		3: {UserID: 3, Username: "onlynick"},
+	}
+	if got := mentionWithUsername(infos, 1); !strings.Contains(got, "</a> - @menshovandrey") {
+		t.Fatalf("want username tail after the mention, got %q", got)
+	}
+	if got := mentionWithUsername(infos, 2); strings.Contains(got, " - @") {
+		t.Fatalf("user without username must have no tail, got %q", got)
+	}
+	// Имени нет — меншен уже показывает @username, хвост бы его дублировал.
+	if got := mentionWithUsername(infos, 3); strings.Count(got, "@onlynick") != 1 {
+		t.Fatalf("username-only user must not duplicate the nick, got %q", got)
+	}
+	if got := mentionWithUsername(infos, 99); strings.Contains(got, " - @") {
+		t.Fatalf("unknown user must have no tail, got %q", got)
 	}
 }

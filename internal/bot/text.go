@@ -79,3 +79,18 @@ func mentionOrID(infos map[int64]storage.UserInfo, userID int64) string {
 	}
 	return fmt.Sprintf(`<a href="tg://user?id=%d">id%d</a>`, userID, userID)
 }
+
+// mentionWithUsername is mentionOrID plus a " - @username" tail when the
+// username is known. Stats lists use it: the tg://user link silently degrades
+// to plain text for deleted or privacy-restricted accounts, while a literal
+// @username stays clickable on its own. No tail when the display name IS the
+// username (no first/last name) — it would just duplicate.
+func mentionWithUsername(infos map[int64]storage.UserInfo, userID int64) string {
+	m := mentionOrID(infos, userID)
+	info, ok := infos[userID]
+	if ok && info.Username != "" &&
+		strings.TrimSpace(info.FirstName+" "+info.LastName) != "" {
+		m += " - @" + info.Username
+	}
+	return m
+}
