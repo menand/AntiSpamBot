@@ -156,9 +156,9 @@ func renderStats(
 			// показываем без времени.
 			if uc.Secs >= 0 && uc.Secs <= 86400 {
 				return fmt.Sprintf("%d. %s — за %d сек\n",
-					i+1, mentionOrID(infos, uc.UserID), uc.Secs)
+					i+1, mentionWithUsername(infos, uc.UserID), uc.Secs)
 			}
-			return fmt.Sprintf("%d. %s\n", i+1, mentionOrID(infos, uc.UserID))
+			return fmt.Sprintf("%d. %s\n", i+1, mentionWithUsername(infos, uc.UserID))
 		})
 
 	total := s.MsgNewcomer + s.MsgOldtimer
@@ -171,20 +171,20 @@ func renderStats(
 	appendUserList(&sb, "\n🔝 <b>Топ писателей:</b>\n", topWriters,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s — %d %s\n",
-				i+1, mentionOrID(infos, uc.UserID),
+				i+1, mentionWithUsername(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
 		})
 
 	appendUserList(&sb, "\n🚫 <b>Провалили капчу:</b>\n", topFailers,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s — %d %s\n",
-				i+1, mentionOrID(infos, uc.UserID),
+				i+1, mentionWithUsername(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"))
 		})
 
 	appendUserList(&sb, "\n⛔️ <b>Забанены:</b>\n", banned,
 		func(i int, uc storage.UserCount) string {
-			return fmt.Sprintf("%d. %s\n", i+1, mentionOrID(infos, uc.UserID))
+			return fmt.Sprintf("%d. %s\n", i+1, mentionWithUsername(infos, uc.UserID))
 		})
 
 	if p != periodAll {
