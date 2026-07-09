@@ -99,7 +99,20 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
     spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
     spam_threshold          INTEGER, -- NULL = 90; порог вероятности спама (%)
-    spam_whitelist_msgs     INTEGER  -- NULL = 5; сообщений до белого списка
+    spam_whitelist_msgs     INTEGER, -- NULL = 5; сообщений до белого списка
+    spam_vote_margin        INTEGER  -- NULL = 3; перевес голосов для вердикта
+);
+
+-- Приветствия бота по (chat, user): помним message_id, чтобы при спам-бане
+-- снести и «Добро пожаловать, X!» — revoke стирает только сообщения юзера.
+-- Повторный вход перезаписывает строку; старше 48 ч чистятся свипером
+-- (Telegram всё равно не даёт боту удалять сообщения старше 48 ч).
+CREATE TABLE IF NOT EXISTS greetings (
+    chat_id    INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    sent_at    INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
 );
 
 -- Активные голосования «спам/не спам»: плашка бота под подозрительным

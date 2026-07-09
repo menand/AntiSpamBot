@@ -67,6 +67,7 @@ type ChatSettings struct {
 	SpamCheckEnabled      bool           // defaults to false when no row exists
 	SpamThreshold         sql.NullInt64  // NULL = 90 (%)
 	SpamWhitelistMsgs     sql.NullInt64  // NULL = 5 сообщений до белого списка
+	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
 }
 
 // GetChatSettings loads the full settings row for a chat, applying defaults
@@ -79,13 +80,15 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
 		       captcha_mode, greeting_text, silent_announce_enabled,
-		       spam_check_enabled, spam_threshold, spam_whitelist_msgs
+		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
+		       spam_vote_margin
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
 		&s.CaptchaMode, &s.GreetingText, &silentInt,
-		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs)
+		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
+		&s.SpamVoteMargin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -188,6 +191,23 @@ func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int)
 	`, chatID, v)
 	if err != nil {
 		return fmt.Errorf("set spam_whitelist_msgs: %w", err)
+	}
+	return nil
+}
+
+// SetSpamVoteMargin overrides the vote margin deciding a spam verdict. Nil clears.
+func (d *DB) SetSpamVoteMargin(ctx context.Context, chatID int64, value *int) error {
+	var v any
+	if value != nil {
+		v = int64(*value)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, spam_vote_margin)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET spam_vote_margin = excluded.spam_vote_margin
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set spam_vote_margin: %w", err)
 	}
 	return nil
 }

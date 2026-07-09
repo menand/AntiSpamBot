@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
@@ -35,8 +36,15 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
 	}
-	if _, err = b.api.SendMessage(ctx, params); err != nil {
+	sent, err := b.api.SendMessage(ctx, params)
+	if err != nil {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
+		return
+	}
+	// Помним id приветствия: при спам-бане юзера revoke стирает только его
+	// сообщения, «Добро пожаловать» бота сносим сами по этой записи.
+	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
+		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
 }
 

@@ -150,3 +150,48 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+// PutGreeting запоминает message_id приветствия для (chat, user), чтобы при
+// спам-бане снести и его. Повторный вход перезаписывает.
+func (d *DB) PutGreeting(ctx context.Context, chatID, userID int64, messageID int, at time.Time) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO greetings (chat_id, user_id, message_id, sent_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(chat_id, user_id) DO UPDATE SET
+			message_id = excluded.message_id, sent_at = excluded.sent_at
+	`, chatID, userID, messageID, at.Unix())
+	if err != nil {
+		return fmt.Errorf("put greeting: %w", err)
+	}
+	return nil
+}
+
+// TakeGreetingMsg возвращает и удаляет запомненное приветствие юзера.
+func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bool, error) {
+	var msgID int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT message_id FROM greetings WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID).Scan(&msgID)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("take greeting: %w", err)
+	}
+	if _, err := d.sql.ExecContext(ctx,
+		`DELETE FROM greetings WHERE chat_id = ? AND user_id = ?`, chatID, userID); err != nil {
+		return 0, false, fmt.Errorf("delete greeting row: %w", err)
+	}
+	return msgID, true, nil
+}
+
+// PruneGreetings выкидывает записи старше olderThan — сообщения старше 48 ч
+// Telegram боту удалять не даёт, хранить их id незачем.
+func (d *DB) PruneGreetings(ctx context.Context, olderThan time.Time) error {
+	_, err := d.sql.ExecContext(ctx,
+		`DELETE FROM greetings WHERE sent_at < ?`, olderThan.Unix())
+	if err != nil {
+		return fmt.Errorf("prune greetings: %w", err)
+	}
+	return nil
+}

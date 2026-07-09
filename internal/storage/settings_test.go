@@ -196,11 +196,11 @@ func TestSetSpamSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.SpamCheckEnabled || s.SpamThreshold.Valid || s.SpamWhitelistMsgs.Valid {
-		t.Fatalf("defaults must be off/NULL/NULL, got %+v", s)
+	if s.SpamCheckEnabled || s.SpamThreshold.Valid || s.SpamWhitelistMsgs.Valid || s.SpamVoteMargin.Valid {
+		t.Fatalf("defaults must be off/NULL/NULL/NULL, got %+v", s)
 	}
 
-	thr, wl := 70, 20
+	thr, wl, vm := 70, 20, 5
 	if err := db.SetSpamCheckEnabled(ctx, 1, true); err != nil {
 		t.Fatal(err)
 	}
@@ -210,9 +210,13 @@ func TestSetSpamSettings(t *testing.T) {
 	if err := db.SetSpamWhitelistMsgs(ctx, 1, &wl); err != nil {
 		t.Fatal(err)
 	}
+	if err := db.SetSpamVoteMargin(ctx, 1, &vm); err != nil {
+		t.Fatal(err)
+	}
 
 	s, _ = db.GetChatSettings(ctx, 1)
-	if !s.SpamCheckEnabled || s.SpamThreshold.Int64 != 70 || s.SpamWhitelistMsgs.Int64 != 20 {
+	if !s.SpamCheckEnabled || s.SpamThreshold.Int64 != 70 ||
+		s.SpamWhitelistMsgs.Int64 != 20 || s.SpamVoteMargin.Int64 != 5 {
 		t.Fatalf("round-trip mismatch: %+v", s)
 	}
 
