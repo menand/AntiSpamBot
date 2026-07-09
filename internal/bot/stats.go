@@ -149,6 +149,11 @@ func renderStats(
 			fmt.Fprintf(&sb, "• В процессе: %d\n", pending)
 		}
 	}
+	// Спам-баны — вне воронки капчи (банят уже вошедших), поэтому отдельной
+	// строкой и без процента от Joined.
+	if s.SpamBanned > 0 {
+		fmt.Fprintf(&sb, "🤖 <b>Забанено ИИ-антиспамом:</b> %d\n", s.SpamBanned)
+	}
 
 	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
 		func(i int, uc storage.UserCount) string {

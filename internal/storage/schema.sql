@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS user_message_counts (
     PRIMARY KEY (chat_id, user_id, day)
 );
 CREATE INDEX IF NOT EXISTS idx_umc_chat_day ON user_message_counts(chat_id, day);
+CREATE INDEX IF NOT EXISTS idx_umc_chat_user ON user_message_counts(chat_id, user_id);
 
 -- Cache of display names so we can render mentions without calling Telegram on every /stats.
 CREATE TABLE IF NOT EXISTS user_info (
@@ -95,5 +96,28 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     last_daily_stats_day    TEXT,
     captcha_mode            TEXT,
     greeting_text           TEXT, -- NULL = built-in default greeting
-    silent_announce_enabled INTEGER NOT NULL DEFAULT 1
+    silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
+    spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
+    spam_threshold          INTEGER, -- NULL = 90; порог вероятности спама (%)
+    spam_whitelist_msgs     INTEGER  -- NULL = 5; сообщений до белого списка
+);
+
+-- Активные голосования «спам/не спам»: плашка бота под подозрительным
+-- сообщением. Всё состояние в БД — переживает рестарты без таймеров.
+CREATE TABLE IF NOT EXISTS spam_votes (
+    chat_id       INTEGER NOT NULL,
+    bot_msg_id    INTEGER NOT NULL, -- сообщение-плашка с кнопками
+    target_msg_id INTEGER NOT NULL, -- подозрительное сообщение
+    author_id     INTEGER NOT NULL,
+    prob          INTEGER NOT NULL, -- вердикт Groq (%)
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, bot_msg_id)
+);
+
+CREATE TABLE IF NOT EXISTS spam_ballots (
+    chat_id    INTEGER NOT NULL,
+    bot_msg_id INTEGER NOT NULL,
+    voter_id   INTEGER NOT NULL,
+    is_spam    INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, bot_msg_id, voter_id)
 );

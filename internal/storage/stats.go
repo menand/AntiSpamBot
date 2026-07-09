@@ -11,10 +11,11 @@ import (
 type EventKind string
 
 const (
-	EventJoin EventKind = "join"
-	EventPass EventKind = "pass"
-	EventKick EventKind = "kick"
-	EventBan  EventKind = "ban"
+	EventJoin    EventKind = "join"
+	EventPass    EventKind = "pass"
+	EventKick    EventKind = "kick"
+	EventBan     EventKind = "ban"
+	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
 )
 
 func (d *DB) RecordEvent(ctx context.Context, chatID, userID int64, kind EventKind, at time.Time) error {
@@ -85,6 +86,7 @@ type Stats struct {
 	Passed      int
 	Kicked      int
 	Banned      int
+	SpamBanned  int // баны ИИ-антиспама; отдельно от воронки капчи
 	MsgNewcomer int
 	MsgOldtimer int
 	PeriodFrom  time.Time
@@ -118,6 +120,8 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 			s.Kicked = n
 		case EventBan:
 			s.Banned = n
+		case EventSpamBan:
+			s.SpamBanned = n
 		}
 	}
 	rows.Close()

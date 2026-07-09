@@ -64,6 +64,9 @@ type ChatSettings struct {
 	CaptchaMode           sql.NullString // NULL = default (circles)
 	GreetingText          sql.NullString // NULL = built-in default greeting
 	SilentAnnounceEnabled bool           // defaults to true when no row exists
+	SpamCheckEnabled      bool           // defaults to false when no row exists
+	SpamThreshold         sql.NullInt64  // NULL = 90 (%)
+	SpamWhitelistMsgs     sql.NullInt64  // NULL = 5 сообщений до белого списка
 }
 
 // GetChatSettings loads the full settings row for a chat, applying defaults
@@ -71,16 +74,18 @@ type ChatSettings struct {
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
 	s := ChatSettings{ChatID: chatID, GreetingEnabled: true, SilentAnnounceEnabled: true}
 
-	var greetingInt, dailyInt, silentInt int
+	var greetingInt, dailyInt, silentInt, spamInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
-		       captcha_mode, greeting_text, silent_announce_enabled
+		       captcha_mode, greeting_text, silent_announce_enabled,
+		       spam_check_enabled, spam_threshold, spam_whitelist_msgs
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
-		&s.CaptchaMode, &s.GreetingText, &silentInt)
+		&s.CaptchaMode, &s.GreetingText, &silentInt,
+		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -90,6 +95,7 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	s.GreetingEnabled = greetingInt != 0
 	s.DailyStatsEnabled = dailyInt != 0
 	s.SilentAnnounceEnabled = silentInt != 0
+	s.SpamCheckEnabled = spamInt != 0
 	return s, nil
 }
 
@@ -130,6 +136,58 @@ func (d *DB) SetSilentAnnounceEnabled(ctx context.Context, chatID int64, enabled
 	`, chatID, v)
 	if err != nil {
 		return fmt.Errorf("set silent_announce_enabled: %w", err)
+	}
+	return nil
+}
+
+// SetSpamCheckEnabled toggles the AI spam analysis for this chat.
+func (d *DB) SetSpamCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, spam_check_enabled)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET spam_check_enabled = excluded.spam_check_enabled
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set spam_check_enabled: %w", err)
+	}
+	return nil
+}
+
+// SetSpamThreshold overrides the spam probability threshold (%). Nil clears.
+func (d *DB) SetSpamThreshold(ctx context.Context, chatID int64, value *int) error {
+	var v any
+	if value != nil {
+		v = int64(*value)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, spam_threshold)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET spam_threshold = excluded.spam_threshold
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set spam_threshold: %w", err)
+	}
+	return nil
+}
+
+// SetSpamWhitelistMsgs overrides how many total messages whitelist a user
+// from spam analysis. Nil clears.
+func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int) error {
+	var v any
+	if value != nil {
+		v = int64(*value)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, spam_whitelist_msgs)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET spam_whitelist_msgs = excluded.spam_whitelist_msgs
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set spam_whitelist_msgs: %w", err)
 	}
 	return nil
 }

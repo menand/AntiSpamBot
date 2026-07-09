@@ -13,6 +13,7 @@ import (
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/config"
+	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -41,6 +42,14 @@ type Bot struct {
 	// private text message from that user.
 	greetMu    sync.Mutex
 	greetInput map[int64]int64
+
+	// ИИ-антиспам: Groq-клиент, дедуп запущенных проверок (chat:user) и кэш
+	// «этот юзер — админ чата» (для белого списка и золотого голоса).
+	groqc        *groq.Client
+	spamMu       sync.Mutex
+	spamInflight map[string]struct{}
+	adminMu      sync.Mutex
+	adminCache   map[string]adminCacheEntry
 }
 
 func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
@@ -52,14 +61,17 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		version = "dev"
 	}
 	return &Bot{
-		api:        api,
-		cfg:        cfg,
-		store:      captcha.NewStore(),
-		log:        log,
-		version:    version,
-		chatCache:  make(map[int64]storage.ChatInfo),
-		userCache:  make(map[int64]storage.UserInfo),
-		greetInput: make(map[int64]int64),
+		api:          api,
+		cfg:          cfg,
+		store:        captcha.NewStore(),
+		log:          log,
+		version:      version,
+		chatCache:    make(map[int64]storage.ChatInfo),
+		userCache:    make(map[int64]storage.UserInfo),
+		greetInput:   make(map[int64]int64),
+		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
+		spamInflight: make(map[string]struct{}),
+		adminCache:   make(map[string]adminCacheEntry),
 	}, nil
 }
 
@@ -95,6 +107,12 @@ func (b *Bot) Run(ctx context.Context) error {
 	go b.attemptsSweepLoop(ctx)
 	go b.dailyDigestLoop(ctx)
 	go b.reconcileChats(ctx)
+	go b.spamVoteSweepLoop(ctx)
+	if b.groqc.Enabled() {
+		b.log.Info("AI spam analysis available", "model", b.groqc.Model())
+	} else {
+		b.log.Info("AI spam analysis unavailable: GROQ_API_KEY is not set")
+	}
 
 	b.notifyOwners(ctx, fmt.Sprintf(
 		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
@@ -128,6 +146,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
 	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
+	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))

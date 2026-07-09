@@ -187,3 +187,41 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 		t.Errorf("new day at 22 UTC: got %v, want 2 chats", ids)
 	}
 }
+
+func TestSetSpamSettings(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	s, err := db.GetChatSettings(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.SpamCheckEnabled || s.SpamThreshold.Valid || s.SpamWhitelistMsgs.Valid {
+		t.Fatalf("defaults must be off/NULL/NULL, got %+v", s)
+	}
+
+	thr, wl := 70, 20
+	if err := db.SetSpamCheckEnabled(ctx, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSpamThreshold(ctx, 1, &thr); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSpamWhitelistMsgs(ctx, 1, &wl); err != nil {
+		t.Fatal(err)
+	}
+
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.SpamCheckEnabled || s.SpamThreshold.Int64 != 70 || s.SpamWhitelistMsgs.Int64 != 20 {
+		t.Fatalf("round-trip mismatch: %+v", s)
+	}
+
+	// nil сбрасывает override на NULL.
+	if err := db.SetSpamThreshold(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.SpamThreshold.Valid {
+		t.Fatalf("nil must clear the threshold override: %+v", s.SpamThreshold)
+	}
+}

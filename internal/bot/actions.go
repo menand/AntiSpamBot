@@ -144,6 +144,21 @@ func (b *Bot) ban(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
+// banRevoke — перманентный бан со стиранием ВСЕХ сообщений юзера в чате.
+// Используется только вердиктом ИИ-антиспама: у спамера сносится и то, что
+// не попало под плашку. Капча-бан остаётся обычным ban — там сообщений нет.
+func (b *Bot) banRevoke(ctx context.Context, chatID, userID int64) error {
+	err := b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
+		ChatID:         tu.ID(chatID),
+		UserID:         userID,
+		RevokeMessages: true,
+	})
+	if err != nil {
+		return fmt.Errorf("ban with revoke: %w", err)
+	}
+	return nil
+}
+
 func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) error {
 	err := b.api.DeleteMessage(ctx, &telego.DeleteMessageParams{
 		ChatID:    tu.ID(chatID),

@@ -49,6 +49,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		`ALTER TABLE chat_settings ADD COLUMN greeting_text TEXT`,
 		`ALTER TABLE chat_settings ADD COLUMN silent_announce_enabled INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE pending_captchas ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE chat_settings ADD COLUMN spam_check_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE chat_settings ADD COLUMN spam_threshold INTEGER`,
+		`ALTER TABLE chat_settings ADD COLUMN spam_whitelist_msgs INTEGER`,
+		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
+		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}
 	for _, stmt := range migrations {
 		if _, err := raw.ExecContext(ctx, stmt); err != nil {

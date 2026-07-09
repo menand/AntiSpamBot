@@ -23,6 +23,8 @@ type Config struct {
 	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
 	CaptchaDelay       time.Duration      // delay between join and sending captcha
 	DailyStatsUTCHour  int                // hour of day (UTC) at/after which daily digests are posted
+	GroqAPIKey         string             // empty = AI spam analysis unavailable
+	GroqModel          string             // empty = groq.DefaultModel
 }
 
 func Load() (*Config, error) {
@@ -112,6 +114,8 @@ func Load() (*Config, error) {
 		LogFile:            os.Getenv("LOG_FILE"),
 		CaptchaDelay:       captchaDelay,
 		DailyStatsUTCHour:  digestHour,
+		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
+		GroqModel:          os.Getenv("GROQ_MODEL"),
 	}, nil
 }
 
