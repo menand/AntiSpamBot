@@ -13,23 +13,44 @@ import (
 
 func TestVoteVerdict(t *testing.T) {
 	tests := []struct {
-		yes, no     int
-		wantSpam    bool
-		wantDecided bool
+		yes, no, margin int
+		wantSpam        bool
+		wantDecided     bool
 	}{
-		{0, 0, false, false},
-		{2, 0, false, false},
-		{3, 0, true, true},
-		{5, 2, true, true},
-		{0, 3, false, true},
-		{2, 5, false, true},
-		{4, 2, false, false}, // перевес 2 — мало
+		{0, 0, 3, false, false},
+		{2, 0, 3, false, false},
+		{3, 0, 3, true, true},
+		{5, 2, 3, true, true},
+		{0, 3, 3, false, true},
+		{2, 5, 3, false, true},
+		{4, 2, 3, false, false}, // перевес 2 при пороге 3 — мало
+		{12, 9, 3, true, true},  // пример юзера: 12-9 → бан
+		{8, 11, 3, false, true}, // пример юзера: 8-11 → оправдание
+		{2, 0, 2, true, true},   // порог 2 срабатывает раньше
+		{4, 0, 5, false, false}, // порог 5 — 4:0 ещё мало
+		{5, 0, 5, true, true},
 	}
 	for _, tc := range tests {
-		spam, decided := voteVerdict(tc.yes, tc.no)
+		spam, decided := voteVerdict(tc.yes, tc.no, tc.margin)
 		if spam != tc.wantSpam || decided != tc.wantDecided {
-			t.Errorf("voteVerdict(%d, %d) = (%v, %v), want (%v, %v)",
-				tc.yes, tc.no, spam, decided, tc.wantSpam, tc.wantDecided)
+			t.Errorf("voteVerdict(%d, %d, %d) = (%v, %v), want (%v, %v)",
+				tc.yes, tc.no, tc.margin, spam, decided, tc.wantSpam, tc.wantDecided)
+		}
+	}
+}
+
+func TestUserLabel(t *testing.T) {
+	tests := []struct {
+		u    telego.User
+		want string
+	}{
+		{telego.User{ID: 1, FirstName: "Вася", LastName: "Пупкин", Username: "vasya"}, "Вася Пупкин (@vasya, id1)"},
+		{telego.User{ID: 2, FirstName: "Аня"}, "Аня (id2)"},
+		{telego.User{ID: 3, Username: "ghost"}, "(без имени) (@ghost, id3)"},
+	}
+	for _, tc := range tests {
+		if got := userLabel(tc.u); got != tc.want {
+			t.Errorf("userLabel(%+v) = %q, want %q", tc.u, got, tc.want)
 		}
 	}
 }
@@ -55,6 +76,19 @@ func TestEffectiveSpamSettings(t *testing.T) {
 	}
 	if effectiveSpamWhitelist(s) != defaultSpamWhitelist {
 		t.Error("non-positive whitelist must fall back")
+	}
+
+	var m storage.ChatSettings
+	if effectiveSpamVoteMargin(m) != defaultSpamVoteMargin {
+		t.Errorf("NULL margin must fall back to %d", defaultSpamVoteMargin)
+	}
+	m.SpamVoteMargin = sql.NullInt64{Int64: 5, Valid: true}
+	if effectiveSpamVoteMargin(m) != 5 {
+		t.Error("valid margin override must win")
+	}
+	m.SpamVoteMargin = sql.NullInt64{Int64: 99, Valid: true}
+	if effectiveSpamVoteMargin(m) != defaultSpamVoteMargin {
+		t.Error("out-of-range margin must fall back")
 	}
 }
 

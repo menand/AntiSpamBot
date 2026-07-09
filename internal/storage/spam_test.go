@@ -102,3 +102,40 @@ func TestUserMessageTotal(t *testing.T) {
 		t.Fatalf("unknown user must have 0, got %d", n)
 	}
 }
+
+func TestGreetingsLifecycle(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	_ = db.PutGreeting(ctx, -1, 42, 500, time.Now())
+	_ = db.PutGreeting(ctx, -1, 42, 501, time.Now()) // перевход перезаписывает
+
+	msgID, ok, err := db.TakeGreetingMsg(ctx, -1, 42)
+	if err != nil || !ok || msgID != 501 {
+		t.Fatalf("want latest greeting 501, got %d ok=%v err=%v", msgID, ok, err)
+	}
+	if _, ok, _ := db.TakeGreetingMsg(ctx, -1, 42); ok {
+		t.Fatal("second take must find nothing")
+	}
+	if _, ok, _ := db.TakeGreetingMsg(ctx, -1, 999); ok {
+		t.Fatal("unknown user must have no greeting")
+	}
+}
+
+func TestPruneGreetings(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	_ = db.PutGreeting(ctx, -1, 1, 10, time.Now().Add(-49*time.Hour))
+	_ = db.PutGreeting(ctx, -1, 2, 20, time.Now())
+
+	if err := db.PruneGreetings(ctx, time.Now().Add(-48*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := db.TakeGreetingMsg(ctx, -1, 1); ok {
+		t.Fatal("stale greeting must be pruned")
+	}
+	if _, ok, _ := db.TakeGreetingMsg(ctx, -1, 2); !ok {
+		t.Fatal("fresh greeting must survive prune")
+	}
+}

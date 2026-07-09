@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	// spamVoteMargin — перевес голосов, решающий вердикт.
-	spamVoteMargin = 3
+	// defaultSpamVoteMargin — перевес голосов, решающий вердикт (настройка чата).
+	defaultSpamVoteMargin = 3
 	// spamVoteTTL — сколько живёт плашка без кворума. Держим сильно меньше
 	// 48 ч: дольше Telegram вообще не даст боту удалить своё сообщение.
 	spamVoteTTL = 24 * time.Hour
@@ -47,6 +47,27 @@ func effectiveSpamWhitelist(s storage.ChatSettings) int {
 		return int(s.SpamWhitelistMsgs.Int64)
 	}
 	return defaultSpamWhitelist
+}
+
+func effectiveSpamVoteMargin(s storage.ChatSettings) int {
+	if s.SpamVoteMargin.Valid {
+		if v := int(s.SpamVoteMargin.Int64); v >= 1 && v <= 10 {
+			return v
+		}
+	}
+	return defaultSpamVoteMargin
+}
+
+// userLabel — человекочитаемая подпись юзера для логов: «Имя Фамилия (@ник, id123)».
+func userLabel(u telego.User) string {
+	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
+	if name == "" {
+		name = "(без имени)"
+	}
+	if u.Username != "" {
+		return fmt.Sprintf("%s (@%s, id%d)", name, u.Username, u.ID)
+	}
+	return fmt.Sprintf("%s (id%d)", name, u.ID)
 }
 
 type adminCacheEntry struct {
@@ -157,14 +178,17 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 		return
 	}
 	threshold := effectiveSpamThreshold(s)
+	// facts — ровно то, что ушло в Groq (автор, вложения, текст): владельцы
+	// бота видят по логу, за что сообщению выставили оценку.
 	b.log.Info("spam check verdict", "chat", chatID, "user", user.ID,
-		"prob", prob, "threshold", threshold, "msg_total", msgTotal)
+		"prob", prob, "threshold", threshold, "msg_total", msgTotal,
+		"facts", facts)
 	if prob < threshold {
 		return
 	}
 
 	sent, err := b.api.SendMessage(b.runCtx,
-		tu.Message(tu.ID(chatID), spamVoteText(prob, 0, 0)).
+		tu.Message(tu.ID(chatID), spamVoteText(prob, 0, 0, effectiveSpamVoteMargin(s))).
 			WithParseMode(telego.ModeHTML).
 			WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}).
 			WithReplyMarkup(spamVoteKeyboard()))
@@ -272,12 +296,12 @@ func humanDurationRU(d time.Duration) string {
 	}
 }
 
-func spamVoteText(prob, yes, no int) string {
+func spamVoteText(prob, yes, no, margin int) string {
 	return fmt.Sprintf(
 		"🤖 Мне кажется, это спам (уверенность %d%%).\n\n"+
-			"Голосуйте кнопками — перевес в %d голоса решает. Голос админа решает сразу.\n\n"+
+			"Голосуйте кнопками — перевес в %d %s решает. Голос админа решает сразу.\n\n"+
 			"🚫 Спам: <b>%d</b> · ✅ Не спам: <b>%d</b>",
-		prob, spamVoteMargin, yes, no)
+		prob, margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)
 }
 
 func spamVoteKeyboard() *telego.InlineKeyboardMarkup {
@@ -313,11 +337,18 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		return nil
 	}
 
+	voteWord := "не спам"
+	if isSpamVote {
+		voteWord = "спам"
+	}
+
 	// Золотой голос: админ или владелец бота решает единолично.
 	if b.isOwner(voter) || b.isChatAdminCached(b.runCtx, chatID, voter) {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Решено голосом админа."))
-		b.resolveSpamVote(v, isSpamVote, fmt.Sprintf("админ %d", voter))
+		b.log.Info("spam vote ballot", "chat", chatID, "bot_msg", botMsgID,
+			"voter", userLabel(query.From), "vote", voteWord, "golden", true)
+		b.resolveSpamVote(v, isSpamVote, "админ "+userLabel(query.From))
 		return nil
 	}
 
@@ -331,8 +362,15 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		return nil
 	}
 	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).WithText("Голос учтён."))
+	b.log.Info("spam vote ballot", "chat", chatID, "bot_msg", botMsgID,
+		"voter", userLabel(query.From), "vote", voteWord,
+		"tally", fmt.Sprintf("%d:%d", yes, no))
 
-	switch verdict, decided := voteVerdict(yes, no); {
+	margin := defaultSpamVoteMargin
+	if s, err := b.db.GetChatSettings(b.runCtx, chatID); err == nil {
+		margin = effectiveSpamVoteMargin(s)
+	}
+	switch verdict, decided := voteVerdict(yes, no, margin); {
 	case decided:
 		b.resolveSpamVote(v, verdict, fmt.Sprintf("голоса %d:%d", yes, no))
 	default:
@@ -340,7 +378,7 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
 			ChatID:      tu.ID(chatID),
 			MessageID:   botMsgID,
-			Text:        spamVoteText(v.Prob, yes, no),
+			Text:        spamVoteText(v.Prob, yes, no, margin),
 			ParseMode:   telego.ModeHTML,
 			ReplyMarkup: spamVoteKeyboard(),
 		}); err != nil {
@@ -350,12 +388,12 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	return nil
 }
 
-// voteVerdict — чистая логика кворума: перевес spamVoteMargin решает.
-func voteVerdict(yes, no int) (isSpam, decided bool) {
+// voteVerdict — чистая логика кворума: |за − против| ≥ margin решает.
+func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 	switch {
-	case yes-no >= spamVoteMargin:
+	case yes-no >= margin:
 		return true, true
-	case no-yes >= spamVoteMargin:
+	case no-yes >= margin:
 		return false, true
 	}
 	return false, false
@@ -382,6 +420,12 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
 			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
 		}
+		// Приветствие бота для этого юзера revoke не трогает — сносим сами.
+		if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
+			if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
+				b.log.Debug("delete greeting of banned user", "err", err, "chat", v.ChatID)
+			}
+		}
 		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
 			"prob", v.Prob, "why", why)
 	} else {
@@ -397,6 +441,11 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 // старте — рестарт мог проспать дедлайны) снимает плашки старше spamVoteTTL.
 func (b *Bot) spamVoteSweepLoop(ctx context.Context) {
 	sweep := func() {
+		// Заодно чистим устаревшие записи приветствий: сообщения старше 48 ч
+		// Telegram боту удалять не даёт, их id бесполезны.
+		if err := b.db.PruneGreetings(ctx, time.Now().Add(-48*time.Hour)); err != nil {
+			b.log.Warn("prune greetings", "err", err)
+		}
 		expired, err := b.db.ExpiredSpamVotes(ctx, time.Now().Add(-spamVoteTTL))
 		if err != nil {
 			b.log.Warn("expired spam votes", "err", err)

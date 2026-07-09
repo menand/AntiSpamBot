@@ -265,6 +265,25 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set spam_whitelist_msgs", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "svm":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		if err != nil || v < 1 || v > 10 {
+			return nil
+		}
+		if err := b.db.SetSpamVoteMargin(ctx, chatID, &v); err != nil {
+			b.log.Warn("set spam_vote_margin", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "hour":
 		if len(parts) != 4 {
 			return nil
@@ -509,6 +528,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 
 	spamThreshold := effectiveSpamThreshold(s)
 	spamWhitelist := effectiveSpamWhitelist(s)
+	spamMargin := effectiveSpamVoteMargin(s)
 	spamLabel := onOffLabel(s.SpamCheckEnabled)
 	if !b.groqc.Enabled() {
 		spamLabel = "нет ключа 🔑"
@@ -523,7 +543,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
-			"🤖 ИИ-антиспам: <b>%s</b> (порог %d%%, белый список после %d сообщ.)",
+			"🤖 ИИ-антиспам: <b>%s</b> (порог %d%%, белый список после %d сообщ., перевес %d)",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
@@ -531,7 +551,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
-		spamLabel, spamThreshold, spamWhitelist,
+		spamLabel, spamThreshold, spamWhitelist, spamMargin,
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -561,7 +581,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	if s.SpamCheckEnabled {
 		rows = append(rows,
 			intPresetRow(chatID, "sthr", spamThreshold, []int{70, 80, 90}, "%"),
-			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"))
+			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"),
+			intPresetRow(chatID, "svm", spamMargin, []int{2, 3, 5}, " гол."))
 	}
 	rows = append(rows, []telego.InlineKeyboardButton{
 		tu.InlineKeyboardButton("⬅️ К статистике").

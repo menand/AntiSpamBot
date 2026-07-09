@@ -29,10 +29,12 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetCaptchaMode(ctx, old, &mode)
 	_ = db.SetGreetingText(ctx, old, &greet)
 	_ = db.SetSilentAnnounceEnabled(ctx, old, false)
-	sthr, swl := 75, 10
+	sthr, swl, svm := 75, 10, 2
 	_ = db.SetSpamCheckEnabled(ctx, old, true)
 	_ = db.SetSpamThreshold(ctx, old, &sthr)
 	_ = db.SetSpamWhitelistMsgs(ctx, old, &swl)
+	_ = db.SetSpamVoteMargin(ctx, old, &svm)
+	_ = db.PutGreeting(ctx, old, 1, 777, now)
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -102,6 +104,13 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.SpamWhitelistMsgs.Valid || ms.SpamWhitelistMsgs.Int64 != 10 {
 		t.Errorf("spam_whitelist_msgs did not migrate: %+v", ms.SpamWhitelistMsgs)
+	}
+	if !ms.SpamVoteMargin.Valid || ms.SpamVoteMargin.Int64 != 2 {
+		t.Errorf("spam_vote_margin did not migrate: %+v", ms.SpamVoteMargin)
+	}
+	// greetings старого чата чистятся: message id мертвы вместе с чатом.
+	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {
+		t.Error("old-chat greeting must be dropped on migration")
 	}
 }
 
