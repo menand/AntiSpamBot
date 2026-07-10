@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,17 +119,18 @@ func (b *Bot) Run(ctx context.Context) error {
 	go b.dailyDigestLoop(ctx)
 	go b.reconcileChats(ctx)
 	go b.spamVoteSweepLoop(ctx)
-	switch {
-	case b.groqc.Enabled() && b.gigac.Enabled():
-		b.log.Info("AI spam analysis available",
-			"provider", "groq", "model", b.groqc.Model(),
-			"fallback", "gigachat", "fallback_model", b.gigac.Model())
-	case b.groqc.Enabled():
-		b.log.Info("AI spam analysis available", "provider", "groq", "model", b.groqc.Model())
-	case b.gigac.Enabled():
-		b.log.Info("AI spam analysis available", "provider", "gigachat", "model", b.gigac.Model())
-	default:
+	var providers []string
+	if b.groqc.Enabled() {
+		providers = append(providers, "groq:"+b.groqc.Model())
+	}
+	if b.gigac.Enabled() {
+		providers = append(providers, "gigachat:"+b.gigac.Model())
+	}
+	if len(providers) == 0 {
 		b.log.Info("AI spam analysis unavailable: neither GROQ_API_KEY nor GIGACHAT_AUTH_KEY is set")
+	} else {
+		// Порядок в списке = порядок цепочки classifySpam.
+		b.log.Info("AI spam analysis available", "providers", strings.Join(providers, ", "))
 	}
 
 	b.notifyOwners(ctx, fmt.Sprintf(
