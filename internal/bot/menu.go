@@ -48,6 +48,20 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return b.editWithMenu(ctx, query, b.addInstructionsText(), backKeyboard())
 	case "chats":
 		return b.renderChatsMenu(ctx, query)
+	case "aicheck":
+		// Диагностика LLM-провайдеров: реальный тестовый запрос каждому.
+		// Ключи глобальные (env сервера), поэтому кнопка только владельцам.
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		sent, err := b.api.SendMessage(ctx, tu.Message(
+			tu.ID(query.Message.GetChat().ID), "⏳ Проверяю ИИ-провайдеров…"))
+		if err != nil {
+			b.log.Warn("send ai check placeholder", "err", err)
+			return nil
+		}
+		go b.runAICheck(sent.Chat.ID, sent.MessageID)
+		return nil
 	case "logs":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -375,6 +389,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 	if b.isOwner(userID) {
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton("📄 Прислать лог").WithCallbackData("menu:logs"),
+			tu.InlineKeyboardButton("🔌 Проверить ИИ").WithCallbackData("menu:aicheck"),
 		})
 	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}

@@ -83,7 +83,7 @@ Events are counted by unix time (`at >= from AND at < until`), messages by calen
 
 ### DM menu (`internal/bot/menu.go`)
 
-Callback formats: `menu:main|help|add|chats|logs`, `menu:stats:<chat>:<period>`, `menu:settings:<chat>`, toggles `menu:gr|daily|sil:<chat>`, presets `menu:max|tmo|hour:<chat>:<val>`, `menu:cmode:<chat>:<mode>`, `menu:grtxt:<chat>` (arms greeting-text input). Access via `canManageChat` (bot owner or chat admin via getChatMember).
+Callback formats: `menu:main|help|add|chats|logs`, `menu:aicheck` (owner-only LLM connectivity check — real test request to each provider separately, result edits the «⏳…» message; `internal/bot/aicheck.go`), `menu:stats:<chat>:<period>`, `menu:settings:<chat>`, toggles `menu:gr|daily|sil:<chat>`, presets `menu:max|tmo|hour:<chat>:<val>`, `menu:cmode:<chat>:<mode>`, `menu:grtxt:<chat>` (arms greeting-text input). Access via `canManageChat` (bot owner or chat admin via getChatMember).
 
 Greeting-text input flow: `menu:grtxt` stores `userID→chatID` in `Bot.greetInput`; the next private message (handled by `handlePrivateText`) becomes the template. `-` resets to default, any `/command` aborts, 500-rune cap. Templates are HTML-escaped at render time; `{name}` is replaced with the mention markup after escaping (`renderGreeting`).
 
