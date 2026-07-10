@@ -13,6 +13,7 @@ import (
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/config"
+	"github.com/menand/AntiSpamBot/internal/gigachat"
 	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -43,9 +44,11 @@ type Bot struct {
 	greetMu    sync.Mutex
 	greetInput map[int64]greetInputState
 
-	// ИИ-антиспам: Groq-клиент, дедуп запущенных проверок (chat:user) и кэш
-	// «этот юзер — админ чата» (для белого списка и золотого голоса).
+	// ИИ-антиспам: Groq-клиент (первичный), GigaChat (фолбек при ошибках и
+	// лимитах Groq), дедуп запущенных проверок (chat:user) и кэш «этот юзер —
+	// админ чата» (для белого списка и золотого голоса).
 	groqc        *groq.Client
+	gigac        *gigachat.Client
 	spamMu       sync.Mutex
 	spamInflight map[chatUser]struct{}
 	adminMu      sync.Mutex
@@ -76,6 +79,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		userCache:    make(map[int64]storage.UserInfo),
 		greetInput:   make(map[int64]greetInputState),
 		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
+		gigac:        gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
 		spamInflight: make(map[chatUser]struct{}),
 		adminCache:   make(map[chatUser]adminCacheEntry),
 	}, nil
@@ -114,10 +118,17 @@ func (b *Bot) Run(ctx context.Context) error {
 	go b.dailyDigestLoop(ctx)
 	go b.reconcileChats(ctx)
 	go b.spamVoteSweepLoop(ctx)
-	if b.groqc.Enabled() {
-		b.log.Info("AI spam analysis available", "model", b.groqc.Model())
-	} else {
-		b.log.Info("AI spam analysis unavailable: GROQ_API_KEY is not set")
+	switch {
+	case b.groqc.Enabled() && b.gigac.Enabled():
+		b.log.Info("AI spam analysis available",
+			"provider", "groq", "model", b.groqc.Model(),
+			"fallback", "gigachat", "fallback_model", b.gigac.Model())
+	case b.groqc.Enabled():
+		b.log.Info("AI spam analysis available", "provider", "groq", "model", b.groqc.Model())
+	case b.gigac.Enabled():
+		b.log.Info("AI spam analysis available", "provider", "gigachat", "model", b.gigac.Model())
+	default:
+		b.log.Info("AI spam analysis unavailable: neither GROQ_API_KEY nor GIGACHAT_AUTH_KEY is set")
 	}
 
 	b.notifyOwners(ctx, fmt.Sprintf(

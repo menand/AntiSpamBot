@@ -19,9 +19,10 @@ const (
 	DefaultModel = "llama-3.1-8b-instant"
 )
 
-// systemPrompt — инструкция классификатора. temperature=0 + json_object
-// дают детерминированный машиночитаемый ответ.
-const systemPrompt = `Ты — антиспам-фильтр русскоязычного Telegram-чата (обычные люди: бег, район, бытовое общение).
+// SystemPrompt — инструкция классификатора спама. Экспортирована, потому что
+// провайдеро-независима: тот же промпт получает фолбек-клиент internal/gigachat.
+// Здесь temperature=0 + json_object дают детерминированный машиночитаемый ответ.
+const SystemPrompt = `Ты — антиспам-фильтр русскоязычного Telegram-чата (обычные люди: бег, район, бытовое общение).
 Оцени вероятность того, что сообщение — спам, целым числом от 0 до 100.
 
 Спам (высокая вероятность): реклама товаров/услуг, крипта и трейдинг, «заработок»/«доход»/«удалёнка с доходом от…», приглашения в другие каналы/боты/чаты, эскорт и «знакомства», розыгрыши/раздачи/халява, накрутки, казино/ставки, мошеннические схемы, массовые рассылки, нерелевантные ссылки с завлекающим текстом.
@@ -95,7 +96,7 @@ func (c *Client) SpamProbability(ctx context.Context, facts string) (int, error)
 		MaxTokens:      64,
 		ResponseFormat: respFormat{Type: "json_object"},
 		Messages: []chatMessage{
-			{Role: "system", Content: systemPrompt},
+			{Role: "system", Content: SystemPrompt},
 			{Role: "user", Content: facts},
 		},
 	})

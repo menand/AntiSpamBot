@@ -113,11 +113,16 @@ func (b *Bot) invalidateAdminCache(chatID, userID int64) {
 	b.adminMu.Unlock()
 }
 
+// spamAIEnabled — доступен ли хоть один LLM-провайдер для спам-анализа.
+func (b *Bot) spamAIEnabled() bool {
+	return b.groqc.Enabled() || b.gigac.Enabled()
+}
+
 // maybeSpamCheck — хук в конце handleGroupMessage. Решает, надо ли гнать
-// сообщение в Groq, и если да — делает это асинхронно (LLM-запрос в хендлере
+// сообщение в LLM, и если да — делает это асинхронно (запрос в хендлере
 // заблокировал бы обработку апдейтов).
 func (b *Bot) maybeSpamCheck(message telego.Message) {
-	if !b.groqc.Enabled() || message.From == nil {
+	if !b.spamAIEnabled() || message.From == nil {
 		return
 	}
 	chatID := message.Chat.ID
@@ -175,20 +180,23 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	}
 	facts := buildSpamFacts(message, memberFor, msgTotal)
 
-	ctx, cancel := context.WithTimeout(b.runCtx, 20*time.Second)
+	// Бюджет на всю цепочку провайдеров; Groq внутри ограничен отдельно,
+	// чтобы его зависший вызов не съел время фолбека.
+	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
 	defer cancel()
-	prob, err := b.groqc.SpamProbability(ctx, facts)
+	prob, provider, err := b.classifySpam(ctx, facts)
 	if err != nil {
-		// Fail-open: сбой Groq не трогает сообщение.
-		b.log.Warn("groq spam check failed (fail-open)", "err", err, "chat", chatID, "user", user.ID)
+		// Fail-open: сбой всех провайдеров не трогает сообщение.
+		b.log.Warn("spam check failed (fail-open)", "err", err,
+			"provider", provider, "chat", chatID, "user", user.ID)
 		return
 	}
 	threshold := effectiveSpamThreshold(s)
-	// facts — ровно то, что ушло в Groq (автор, вложения, текст): владельцы
+	// facts — ровно то, что ушло в LLM (автор, вложения, текст): владельцы
 	// бота видят по логу, за что сообщению выставили оценку.
 	b.log.Info("spam check verdict", "chat", chatID, "user", user.ID,
-		"prob", prob, "threshold", threshold, "msg_total", msgTotal,
-		"facts", facts)
+		"prob", prob, "threshold", threshold, "provider", provider,
+		"msg_total", msgTotal, "facts", facts)
 	if prob < threshold {
 		return
 	}
@@ -216,7 +224,28 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	}
 }
 
-// buildSpamFacts собирает то, что уходит в Groq: контекст автора, факт
+// classifySpam гоняет факты по цепочке провайдеров: Groq первичен (быстрее и
+// с бо́льшим лимитом), GigaChat подхватывает при ЛЮБОЙ его ошибке — чаще всего
+// это минутный rate-limit Groq (суточный запас ещё есть, но ждать минуту
+// нельзя). Ошибка возвращается только когда упали все доступные провайдеры.
+func (b *Bot) classifySpam(ctx context.Context, facts string) (prob int, provider string, err error) {
+	if b.groqc.Enabled() {
+		gctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		prob, err = b.groqc.SpamProbability(gctx, facts)
+		cancel()
+		if err == nil {
+			return prob, "groq", nil
+		}
+		if !b.gigac.Enabled() {
+			return 0, "groq", err
+		}
+		b.log.Warn("groq spam check failed, falling back to gigachat", "err", err)
+	}
+	prob, err = b.gigac.SpamProbability(ctx, facts)
+	return prob, "gigachat", err
+}
+
+// buildSpamFacts собирает то, что уходит в LLM: контекст автора, факт
 // вложения (сам файл — никогда), пометка о форварде и текст/подпись.
 func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
 	var sb strings.Builder
