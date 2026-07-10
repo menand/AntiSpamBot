@@ -8,6 +8,21 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
+func TestParsePeriod(t *testing.T) {
+	for _, p := range []statsPeriod{periodDay, periodWeek, periodMonth, periodAll} {
+		if got := parsePeriod(string(p)); got != p {
+			t.Errorf("parsePeriod(%q) = %q, want %q", p, got, p)
+		}
+	}
+	// Мусор из подделанного/устаревшего callback data не должен дойти ни до
+	// statsRange, ни до HTML.
+	for _, junk := range []string{"", "year", "<b>xss</b>", "day "} {
+		if got := parsePeriod(junk); got != periodWeek {
+			t.Errorf("parsePeriod(%q) = %q, want fallback %q", junk, got, periodWeek)
+		}
+	}
+}
+
 func fakeUsers(startID int64, n, count int) []storage.UserCount {
 	out := make([]storage.UserCount, n)
 	for i := range out {

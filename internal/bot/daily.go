@@ -37,24 +37,24 @@ func (b *Bot) dailyDigestLoop(ctx context.Context) {
 func (b *Bot) maybeSendDigests(ctx context.Context) {
 	now := time.Now().UTC()
 	today := now.Format("2006-01-02")
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	chatIDs, err := b.db.ChatsNeedingDailyStats(ctx, now.Hour(), b.cfg.DailyStatsUTCHour, today)
 	if err != nil {
 		b.log.Warn("daily digest: query chats", "err", err)
 		return
 	}
 	for _, chatID := range chatIDs {
-		b.sendDailyDigest(ctx, chatID, today)
+		b.sendDailyDigest(ctx, chatID, midnight)
 	}
 }
 
-func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
-	// Yesterday's calendar day in UTC: from midnight yesterday to midnight
-	// today. Makes the digest report a stable "yesterday" regardless of
-	// what hour the chat chose to receive it.
-	now := time.Now().UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	from := midnight.Add(-24 * time.Hour)
-	until := midnight
+// sendDailyDigest posts the digest for the calendar day before `until`
+// (today's UTC midnight, computed ONCE in maybeSendDigests from the same
+// clock reading as the gating `today` marker — recomputing time.Now() here
+// used to send the same day twice when the 5-min tick crossed midnight).
+func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time) {
+	today := until.Format("2006-01-02")
+	from := until.Add(-24 * time.Hour)
 
 	s, err := b.db.QueryStats(ctx, chatID, from, until)
 	if err != nil {
@@ -80,8 +80,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 	}
 
 	// Skip entirely if nothing to report — chat went quiet, don't spam.
-	total := s.Joined + s.MsgNewcomer + s.MsgOldtimer + len(topFailers)
-	if total == 0 {
+	if !digestHasContent(s, topWriters, topFailers, newMembers, banned) {
 		// Still mark as sent so we don't re-check dozens of times today.
 		_ = b.db.MarkDailyStatsSent(ctx, chatID, today)
 		return
@@ -114,4 +113,14 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, today string) {
 		"chat", chatID,
 		"messages", s.MsgNewcomer+s.MsgOldtimer,
 		"joined", s.Joined)
+}
+
+// digestHasContent reports whether the digest would show anything at all.
+// It must cover every counter and list renderStats prints — a day whose only
+// activity was a captcha pass or a spam ban still deserves a digest (the
+// join may sit just outside the window: joined 23:59, passed 00:01).
+func digestHasContent(s storage.Stats, topWriters, topFailers, newMembers, banned []storage.UserCount) bool {
+	return s.Joined+s.Passed+s.Kicked+s.Banned+s.SpamBanned+
+		s.MsgNewcomer+s.MsgOldtimer+
+		len(topWriters)+len(topFailers)+len(newMembers)+len(banned) > 0
 }

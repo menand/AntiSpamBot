@@ -48,9 +48,16 @@ func (d *DB) GetSpamVote(ctx context.Context, chatID int64, botMsgID int) (SpamV
 
 // TakeSpamVote атомарно забирает голосование: первый успешный вызов получает
 // true и право исполнить вердикт, все последующие — false (гонки коллбэков и
-// двойные клики отсекаются здесь). Бюллетени чистятся заодно.
+// двойные клики отсекаются здесь). Бюллетени чистятся в той же транзакции —
+// крэш между DELETE'ами не оставляет бюллетеней-сирот.
 func (d *DB) TakeSpamVote(ctx context.Context, chatID int64, botMsgID int) (bool, error) {
-	res, err := d.sql.ExecContext(ctx,
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("take spam vote: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	res, err := tx.ExecContext(ctx,
 		`DELETE FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?`, chatID, botMsgID)
 	if err != nil {
 		return false, fmt.Errorf("take spam vote: %w", err)
@@ -59,9 +66,12 @@ func (d *DB) TakeSpamVote(ctx context.Context, chatID int64, botMsgID int) (bool
 	if err != nil {
 		return false, fmt.Errorf("take spam vote rows: %w", err)
 	}
-	if _, err := d.sql.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM spam_ballots WHERE chat_id = ? AND bot_msg_id = ?`, chatID, botMsgID); err != nil {
 		return false, fmt.Errorf("clear spam ballots: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("take spam vote: commit: %w", err)
 	}
 	return n > 0, nil
 }

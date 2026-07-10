@@ -29,7 +29,6 @@ func (d *DB) RecordEvent(ctx context.Context, chatID, userID int64, kind EventKi
 }
 
 // UpsertMember records (or refreshes) the join timestamp for a passed user.
-// Returns the stored joined_at — which is the existing one if present, else new.
 func (d *DB) UpsertMember(ctx context.Context, chatID, userID int64, joinedAt time.Time) error {
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO members (chat_id, user_id, joined_at)
