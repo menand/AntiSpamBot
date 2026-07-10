@@ -2,11 +2,14 @@ package gigachat
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,16 +18,15 @@ import (
 var rqUIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
 // testServer поднимает мок обоих эндпоинтов. oauthCalls/chatCalls — счётчики
-// для проверки кэширования токена; chatStatus управляет ответом chat.
+// для проверки кэширования токена; failNextChat — статус одного следующего
+// chat-ответа (0 = 200).
 type testServer struct {
 	*httptest.Server
-	oauthCalls  atomic.Int32
-	chatCalls   atomic.Int32
-	tokenTTL    time.Duration
-	chatContent string
-	// перед каждым chat-ответом снимается верхний статус из очереди; пустая
-	// очередь = 200.
-	chatStatuses []int
+	oauthCalls   atomic.Int32
+	chatCalls    atomic.Int32
+	tokenTTL     time.Duration
+	chatContent  string
+	failNextChat atomic.Int32
 }
 
 func newTestServer(t *testing.T) *testServer {
@@ -49,16 +51,18 @@ func newTestServer(t *testing.T) *testServer {
 	})
 	mux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		ts.chatCalls.Add(1)
-		if len(ts.chatStatuses) > 0 {
-			status := ts.chatStatuses[0]
-			ts.chatStatuses = ts.chatStatuses[1:]
-			if status != http.StatusOK {
-				w.WriteHeader(status)
-				return
-			}
+		if status := ts.failNextChat.Swap(0); status != 0 {
+			w.WriteHeader(int(status))
+			return
 		}
 		if got := r.Header.Get("Authorization"); got == "Bearer " || got == "" {
 			t.Errorf("chat has no bearer token: %q", got)
+		}
+		var req struct {
+			Temperature *float64 `json:"temperature"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Temperature == nil || *req.Temperature != 0 {
+			t.Errorf("chat request must pin temperature=0 (err=%v, got %v)", err, req.Temperature)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{{"message": map[string]any{"content": ts.chatContent}}},
@@ -118,7 +122,7 @@ func TestTokenRefetchedWhenExpired(t *testing.T) {
 
 func TestTokenRefreshOn401(t *testing.T) {
 	ts := newTestServer(t)
-	ts.chatStatuses = []int{http.StatusUnauthorized} // первый chat — 401
+	ts.failNextChat.Store(http.StatusUnauthorized) // первый chat — 401
 	c := newTestClient(ts)
 	p, err := c.SpamProbability(context.Background(), "x")
 	if err != nil || p != 93 {
@@ -141,10 +145,15 @@ func TestOAuthErrorPropagates(t *testing.T) {
 
 func TestChatErrorPropagates(t *testing.T) {
 	ts := newTestServer(t)
-	ts.chatStatuses = []int{http.StatusTooManyRequests}
+	ts.failNextChat.Store(http.StatusTooManyRequests)
 	c := newTestClient(ts)
 	if _, err := c.SpamProbability(context.Background(), "x"); err == nil {
 		t.Fatal("chat 429 must surface as error")
+	}
+	// 429 не должен трактоваться как протухший токен: рефреша не было.
+	if ts.oauthCalls.Load() != 1 || ts.chatCalls.Load() != 1 {
+		t.Fatalf("oauth=%d chat=%d, want 1/1 (no refresh on non-401)",
+			ts.oauthCalls.Load(), ts.chatCalls.Load())
 	}
 }
 
@@ -158,17 +167,32 @@ func TestParseProbability(t *testing.T) {
 		{"clean json", `{"spam_probability": 85}`, 85, false},
 		{"json in code block", "```json\n{\"spam_probability\": 42}\n```", 42, false},
 		{"json inside text", `Вот ответ: {"spam_probability": 7}.`, 7, false},
+		{"json zero is a verdict", `{"spam_probability": 0}`, 0, false},
+		{"json 0..1 scale", `{"spam_probability": 0.95}`, 95, false},
+		// Ровно 1 — это 1% (промпт просит целые 0..100), НЕ шкала 0..1.
+		{"one stays one percent", `{"spam_probability": 1}`, 1, false},
+		{"leading-dot decimal", `.5`, 50, false},
+		{"comma decimal", `0,95`, 95, false},
 		{"bare number", `85`, 85, false},
 		{"number in text", `Вероятность спама: 61%`, 61, false},
 		{"clamp high", `{"spam_probability": 250}`, 100, false},
 		{"clamp negative", `{"spam_probability": -5}`, 0, false},
 		{"garbage", `не могу оценить`, 0, true},
+		// Валидный JSON БЕЗ нужного ключа не должен тихо становиться нулём.
+		{"json wrong key", `{"probability": 95}`, 95, false}, // спасает число-фолбек
+		{"empty object", `{}`, 0, true},
+		{"null", `null`, 0, true},
+		// Несколько чисел — неоднозначно: fail-open честнее догадки.
+		{"ambiguous prose", `По шкале от 0 до 100 я оцениваю это как 95`, 0, true},
+		{"two numbers", `В чате 2 минуты, вероятность спама 5`, 0, true},
+		// Единственное число, но не вероятность.
+		{"single huge number", `1500`, 0, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := parseProbability(tc.content)
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+				t.Fatalf("err = %v, wantErr %v (p=%d)", err, tc.wantErr, p)
 			}
 			if !tc.wantErr && p != tc.want {
 				t.Errorf("got %d, want %d", p, tc.want)
@@ -200,13 +224,29 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
-func TestEmbeddedCertLoads(t *testing.T) {
-	// Вшитый корень НУЦ Минцифры обязан парситься — иначе TLS к Сберу мёртв.
-	c := New("k", "", "", "p")
-	if c.http == nil || c.http.Transport == nil {
-		t.Fatal("client transport not configured")
+func TestEmbeddedCertParses(t *testing.T) {
+	// Вшитый корень НУЦ Минцифры обязан быть валидным PEM-сертификатом —
+	// AppendCertsFromPEM молча вернёт false для мусора (например, если файл
+	// обновили DER-версией с госуслуг), и TLS к Сберу умрёт только в проде.
+	block, _ := pem.Decode(trustedRootCA)
+	if block == nil {
+		t.Fatal("embedded CA is not PEM")
 	}
-	if len(trustedRootCA) < 1000 {
-		t.Fatalf("embedded CA suspiciously small: %d bytes", len(trustedRootCA))
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("embedded CA does not parse: %v", err)
+	}
+	if !strings.Contains(cert.Subject.String(), "Russian Trusted Root CA") {
+		t.Errorf("unexpected cert subject: %s", cert.Subject)
+	}
+	if cert.NotAfter.Before(time.Now().AddDate(0, 3, 0)) {
+		t.Errorf("embedded CA expires soon (%s) — refresh it from gosuslugi.ru/crt", cert.NotAfter)
+	}
+	tr, ok := New("k", "", "", "p").http.Transport.(*http.Transport)
+	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("client transport has no root CA pool configured")
+	}
+	if tr.Proxy == nil {
+		t.Fatal("transport must keep DefaultTransport's Proxy (HTTPS_PROXY support)")
 	}
 }

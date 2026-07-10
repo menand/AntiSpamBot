@@ -51,8 +51,9 @@ func New(apiKey, model string) *Client {
 		model:    model,
 		endpoint: defaultEndpoint,
 		// Страховочный транспортный таймаут на случай вызова без дедлайна в
-		// ctx. Обязан быть больше бюджета ЛЮБОГО вызывающего (прод — 20 с,
-		// live-тест — 60 с), иначе он молча режет чужие бюджеты.
+		// ctx. Обязан быть больше бюджета ЛЮБОГО вызывающего (прод — 12 с
+		// суб-бюджет / 30 с цепочка в classifySpam, live-тест — 60 с), иначе
+		// он молча режет чужие бюджеты.
 		http: &http.Client{Timeout: 90 * time.Second},
 	}
 }
@@ -136,12 +137,5 @@ func (c *Client) SpamProbability(ctx context.Context, facts string) (int, error)
 	if err := json.Unmarshal([]byte(cr.Choices[0].Message.Content), &verdict); err != nil {
 		return 0, fmt.Errorf("parse groq verdict %q: %w", cr.Choices[0].Message.Content, err)
 	}
-	p := int(verdict.SpamProbability)
-	if p < 0 {
-		p = 0
-	}
-	if p > 100 {
-		p = 100
-	}
-	return p, nil
+	return min(100, max(0, int(verdict.SpamProbability))), nil
 }

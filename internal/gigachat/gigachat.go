@@ -7,11 +7,11 @@ package gigachat
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -87,20 +89,27 @@ func newHTTPClient() *http.Client {
 	if err != nil || pool == nil {
 		pool = x509.NewCertPool()
 	}
+	// Валидность вшитого PEM сторожит TestEmbeddedCertParses — здесь bool
+	// некому репортить (у клиента нет логгера).
 	pool.AppendCertsFromPEM(trustedRootCA)
+	// Clone, а не пустой &http.Transport{}: иначе теряются дефолты —
+	// Proxy из окружения (HTTPS_PROXY), таймауты dial/TLS-handshake, HTTP/2.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.TLSClientConfig = &tls.Config{RootCAs: pool}
 	return &http.Client{
 		// Страховочный транспортный таймаут на случай вызова без дедлайна в
 		// ctx; реальный бюджет задаёт вызывающий.
-		Timeout: 90 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{RootCAs: pool},
-		},
+		Timeout:   90 * time.Second,
+		Transport: tr,
 	}
 }
 
 func (c *Client) Enabled() bool { return c != nil && c.authKey != "" }
 
 func (c *Client) Model() string { return c.model }
+
+// errUnauthorized — chat ответил 401: токен отозван раньше expires_at.
+var errUnauthorized = errors.New("gigachat: unauthorized")
 
 // SpamProbability шлёт факты о сообщении и возвращает 0..100. На 401 от
 // chat-эндпоинта делает один принудительный рефреш токена и повторяет.
@@ -109,14 +118,13 @@ func (c *Client) SpamProbability(ctx context.Context, facts string) (int, error)
 	if err != nil {
 		return 0, err
 	}
-	prob, status, err := c.chat(ctx, token, facts)
-	if status == http.StatusUnauthorized {
-		// Токен мог быть отозван раньше expires_at.
+	prob, err := c.chat(ctx, token, facts)
+	if errors.Is(err, errUnauthorized) {
 		token, err = c.getToken(ctx, true)
 		if err != nil {
 			return 0, err
 		}
-		prob, _, err = c.chat(ctx, token, facts)
+		prob, err = c.chat(ctx, token, facts)
 	}
 	return prob, err
 }
@@ -138,7 +146,7 @@ func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Basic "+c.authKey)
-	req.Header.Set("RqUID", newRqUID())
+	req.Header.Set("RqUID", uuid.NewString())
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -164,14 +172,24 @@ func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
 		return "", fmt.Errorf("gigachat oauth: empty access_token")
 	}
 	c.token = tr.AccessToken
-	c.expiresAt = time.UnixMilli(tr.ExpiresAt).Add(-tokenSafetyMargin)
+	if tr.ExpiresAt > 0 {
+		c.expiresAt = time.UnixMilli(tr.ExpiresAt).Add(-tokenSafetyMargin)
+	} else {
+		// expires_at не пришёл (изменение API?) — не считать свежий токен
+		// протухшим, иначе каждый вызов делает полный OAuth. Док обещает
+		// 30 минут жизни; берём с запасом.
+		c.expiresAt = time.Now().Add(25 * time.Minute)
+	}
 	return c.token, nil
 }
 
 type chatRequest struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
-	Messages  []chatMessage `json:"messages"`
+	Model string `json:"model"`
+	// Temperature 0 — как у Groq-клиента: классификатору нужен
+	// воспроизводимый вердикт, а не «сбалансированный ответ».
+	Temperature float64       `json:"temperature"`
+	MaxTokens   int           `json:"max_tokens"`
+	Messages    []chatMessage `json:"messages"`
 }
 
 type chatMessage struct {
@@ -187,23 +205,24 @@ type chatResponse struct {
 	} `json:"choices"`
 }
 
-// chat выполняет один запрос к chat/completions. Возвращает HTTP-статус
-// отдельно, чтобы вызывающий мог отличить 401 (протухший токен) от прочего.
-func (c *Client) chat(ctx context.Context, token, facts string) (int, int, error) {
+// chat выполняет один запрос к chat/completions. 401 возвращается как
+// errUnauthorized, чтобы вызывающий мог сделать рефреш токена.
+func (c *Client) chat(ctx context.Context, token, facts string) (int, error) {
 	body, err := json.Marshal(chatRequest{
-		Model:     c.model,
-		MaxTokens: 64,
+		Model:       c.model,
+		Temperature: 0,
+		MaxTokens:   64,
 		Messages: []chatMessage{
 			{Role: "system", Content: c.systemPrompt},
 			{Role: "user", Content: facts},
 		},
 	})
 	if err != nil {
-		return 0, 0, fmt.Errorf("marshal gigachat request: %w", err)
+		return 0, fmt.Errorf("marshal gigachat request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatEndpoint, bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, fmt.Errorf("build gigachat request: %w", err)
+		return 0, fmt.Errorf("build gigachat request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -211,85 +230,72 @@ func (c *Client) chat(ctx context.Context, token, facts string) (int, int, error
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, 0, fmt.Errorf("gigachat request: %w", err)
+		return 0, fmt.Errorf("gigachat request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return 0, resp.StatusCode, fmt.Errorf("read gigachat response: %w", err)
+		return 0, fmt.Errorf("read gigachat response: %w", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return 0, fmt.Errorf("%w: %.200s", errUnauthorized, raw)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, resp.StatusCode, fmt.Errorf("gigachat status %d: %.200s", resp.StatusCode, raw)
+		return 0, fmt.Errorf("gigachat status %d: %.200s", resp.StatusCode, raw)
 	}
 
 	var cr chatResponse
 	if err := json.Unmarshal(raw, &cr); err != nil {
-		return 0, resp.StatusCode, fmt.Errorf("parse gigachat envelope: %w", err)
+		return 0, fmt.Errorf("parse gigachat envelope: %w", err)
 	}
 	if len(cr.Choices) == 0 {
-		return 0, resp.StatusCode, fmt.Errorf("gigachat: empty choices")
+		return 0, fmt.Errorf("gigachat: empty choices")
 	}
-	p, err := parseProbability(cr.Choices[0].Message.Content)
-	if err != nil {
-		return 0, resp.StatusCode, err
-	}
-	return p, resp.StatusCode, nil
+	return parseProbability(cr.Choices[0].Message.Content)
 }
 
 var (
 	probObjRe = regexp.MustCompile(`\{[^{}]*"spam_probability"[^{}]*\}`)
-	probNumRe = regexp.MustCompile(`\d{1,3}`)
+	probNumRe = regexp.MustCompile(`\d+(?:[.,]\d+)?|[.,]\d+`)
 )
 
 // parseProbability достаёт spam_probability из ответа модели. В отличие от
 // Groq, GigaChat не гарантирует json-режим: модель может обернуть объект в
-// код-блок или текст. Ступени: чистый JSON → JSON-объект внутри текста →
-// первое число в строке.
+// код-блок или текст. Ступени: JSON-объект с ключом (в том числе весь ответ
+// целиком) → единственное однозначное число в тексте. Неоднозначность — это
+// ошибка, а не догадка: fail-open с Warn честнее ложного вердикта.
 func parseProbability(content string) (int, error) {
-	try := func(s string) (int, bool) {
-		var v struct {
-			SpamProbability float64 `json:"spam_probability"`
-		}
-		if json.Unmarshal([]byte(s), &v) == nil {
-			return clamp(int(v.SpamProbability)), true
-		}
-		return 0, false
-	}
-	if p, ok := try(content); ok {
-		return p, nil
-	}
 	if obj := probObjRe.FindString(content); obj != "" {
-		if p, ok := try(obj); ok {
-			return p, nil
+		// Указатель, чтобы отличить {"spam_probability": 0} от объекта без
+		// ключа/с опечаткой — второй не должен тихо стать нулём.
+		var v struct {
+			SpamProbability *float64 `json:"spam_probability"`
+		}
+		if json.Unmarshal([]byte(obj), &v) == nil && v.SpamProbability != nil {
+			return clampScale(*v.SpamProbability), nil
 		}
 	}
-	if m := probNumRe.FindString(content); m != "" {
-		if n, err := strconv.Atoi(m); err == nil {
-			return clamp(n), nil
+	// Фолбек: во всём ответе ровно одно число, и оно похоже на вероятность.
+	// «Вероятность спама: 61%» → 61; «по шкале от 0 до 100 даю 95» — три
+	// числа, угадывать нельзя.
+	nums := probNumRe.FindAllString(content, -1)
+	if len(nums) == 1 {
+		if f, err := strconv.ParseFloat(strings.Replace("0"+nums[0], ",", ".", 1), 64); err == nil && f <= 100 {
+			return clampScale(f), nil
 		}
 	}
-	return 0, fmt.Errorf("gigachat: no spam probability in %q", content)
+	return 0, fmt.Errorf("gigachat: no unambiguous spam probability in %q", content)
 }
 
-func clamp(p int) int {
-	if p < 0 {
-		return 0
+// clampScale нормализует значение вероятности: дробь 0..1 (модель ответила
+// «0.95») переводится в проценты, результат зажимается в 0..100. Ровно 1 НЕ
+// масштабируется: промпт требует целое 0..100, и «1» — это честный 1%;
+// трактовка его как 100% давала бы ложную плашку на каждом безобидном
+// сообщении. Аномальная «максимальная уверенность» на шкале 0..1 при этом
+// прочтётся как 1% — осознанный проигрыш редкого кейса частому.
+func clampScale(v float64) int {
+	if v > 0 && v < 1 {
+		v *= 100
 	}
-	if p > 100 {
-		return 100
-	}
-	return p
-}
-
-// newRqUID генерирует UUIDv4 для обязательного заголовка RqUID OAuth-запроса.
-func newRqUID() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand на практике не падает; фиксированный валидный UUID —
-		// достаточный запасной выход для необязательного к уникальности поля.
-		return "00000000-0000-4000-8000-000000000000"
-	}
-	b[6] = (b[6] & 0x0f) | 0x40 // версия 4
-	b[8] = (b[8] & 0x3f) | 0x80 // вариант RFC 4122
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return min(100, max(0, int(v)))
 }

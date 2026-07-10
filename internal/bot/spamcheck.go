@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -184,7 +185,7 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	// чтобы его зависший вызов не съел время фолбека.
 	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
 	defer cancel()
-	prob, provider, err := b.classifySpam(ctx, facts)
+	prob, provider, err := b.classifySpam(ctx, chatID, user.ID, facts)
 	if err != nil {
 		// Fail-open: сбой всех провайдеров не трогает сообщение.
 		b.log.Warn("spam check failed (fail-open)", "err", err,
@@ -228,18 +229,31 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 // с бо́льшим лимитом), GigaChat подхватывает при ЛЮБОЙ его ошибке — чаще всего
 // это минутный rate-limit Groq (суточный запас ещё есть, но ждать минуту
 // нельзя). Ошибка возвращается только когда упали все доступные провайдеры.
-func (b *Bot) classifySpam(ctx context.Context, facts string) (prob int, provider string, err error) {
+// chatID/userID — только для логов.
+func (b *Bot) classifySpam(ctx context.Context, chatID, userID int64, facts string) (prob int, provider string, err error) {
 	if b.groqc.Enabled() {
-		gctx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		gctx := ctx
+		if b.gigac.Enabled() {
+			// Суб-бюджет нужен только чтобы зависший Groq оставил время
+			// фолбеку; без фолбека Groq получает весь бюджет проверки.
+			var cancel context.CancelFunc
+			gctx, cancel = context.WithTimeout(ctx, 12*time.Second)
+			defer cancel()
+		}
 		prob, err = b.groqc.SpamProbability(gctx, facts)
-		cancel()
 		if err == nil {
 			return prob, "groq", nil
 		}
 		if !b.gigac.Enabled() {
 			return 0, "groq", err
 		}
-		b.log.Warn("groq spam check failed, falling back to gigachat", "err", err)
+		b.log.Warn("groq spam check failed, falling back to gigachat",
+			"err", err, "chat", chatID, "user", userID)
+	}
+	if !b.gigac.Enabled() {
+		// Недостижимо при гейте spamAIEnabled в maybeSpamCheck; страховка от
+		// будущих прямых вызовов.
+		return 0, "none", errors.New("no spam providers enabled")
 	}
 	prob, err = b.gigac.SpamProbability(ctx, facts)
 	return prob, "gigachat", err
