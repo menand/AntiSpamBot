@@ -23,7 +23,12 @@ const (
 	defaultSpamThreshold = 90
 	defaultSpamWhitelist = 5
 
-	adminCacheTTL = 6 * time.Hour
+	// adminCacheTTL — кэш «юзер — админ». Позитивные ответы живут долго:
+	// разжалование бот увидит по chat_member и инвалидирует. Негативные —
+	// коротко: в чате, где бот сам не админ, Telegram не шлёт chat_member
+	// вообще, и свежеповышенный админ иначе ждал бы до 6 часов.
+	adminCacheTTL    = 6 * time.Hour
+	adminCacheNegTTL = 10 * time.Minute
 
 	// spamFactsTextLimit — сколько рун текста уходит в Groq. Спам-простыни
 	// длиннее не делают вердикт лучше, а токены жгут.
@@ -77,9 +82,10 @@ type adminCacheEntry struct {
 
 // isChatAdminCached — isChatAdmin с кэшем (TTL 6 ч + инвалидация из
 // handleChatMember при смене статуса). Используется на каждом сообщении
-// не-вайтлистнутых юзеров и на каждом голосе — без кэша это API-вызов.
+// не-вайтлистнутых юзеров, на каждом голосе и во всём DM-меню — без кэша
+// каждая такая проверка была бы API-вызовом.
 func (b *Bot) isChatAdminCached(ctx context.Context, chatID, userID int64) bool {
-	k := chatUserKey(chatID, userID)
+	k := chatUser{chatID, userID}
 	b.adminMu.Lock()
 	e, ok := b.adminCache[k]
 	b.adminMu.Unlock()
@@ -91,20 +97,20 @@ func (b *Bot) isChatAdminCached(ctx context.Context, chatID, userID int64) bool 
 		// Ошибку не кэшируем: следующий вызов попробует снова.
 		return false
 	}
+	ttl := adminCacheTTL
+	if !isAdmin {
+		ttl = adminCacheNegTTL
+	}
 	b.adminMu.Lock()
-	b.adminCache[k] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(adminCacheTTL)}
+	b.adminCache[k] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(ttl)}
 	b.adminMu.Unlock()
 	return isAdmin
 }
 
 func (b *Bot) invalidateAdminCache(chatID, userID int64) {
 	b.adminMu.Lock()
-	delete(b.adminCache, chatUserKey(chatID, userID))
+	delete(b.adminCache, chatUser{chatID, userID})
 	b.adminMu.Unlock()
-}
-
-func chatUserKey(chatID, userID int64) string {
-	return fmt.Sprintf("%d:%d", chatID, userID)
 }
 
 // maybeSpamCheck — хук в конце handleGroupMessage. Решает, надо ли гнать
@@ -117,8 +123,8 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 	chatID := message.Chat.ID
 	user := *message.From
 
-	s, err := b.db.GetChatSettings(b.runCtx, chatID)
-	if err != nil || !s.SpamCheckEnabled {
+	s := b.chatSettings(b.runCtx, chatID)
+	if !s.SpamCheckEnabled {
 		return
 	}
 	// Белый список, от дешёвого к дорогому. total уже включает текущее
@@ -140,7 +146,7 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 		return
 	}
 	// Дедуп параллельных сообщений того же автора, пока Groq думает.
-	k := chatUserKey(chatID, user.ID)
+	k := chatUser{chatID, user.ID}
 	b.spamMu.Lock()
 	if _, busy := b.spamInflight[k]; busy {
 		b.spamMu.Unlock()
@@ -366,22 +372,21 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		"voter", userLabel(query.From), "vote", voteWord,
 		"tally", fmt.Sprintf("%d:%d", yes, no))
 
-	margin := defaultSpamVoteMargin
-	if s, err := b.db.GetChatSettings(b.runCtx, chatID); err == nil {
-		margin = effectiveSpamVoteMargin(s)
-	}
+	margin := effectiveSpamVoteMargin(b.chatSettings(b.runCtx, chatID))
 	switch verdict, decided := voteVerdict(yes, no, margin); {
 	case decided:
 		b.resolveSpamVote(v, verdict, fmt.Sprintf("голоса %d:%d", yes, no))
 	default:
 		// Обновляем счёт на плашке; клавиатура остаётся той же.
+		// Повторный тап того же голоса даёт байт-в-байт тот же текст —
+		// «message is not modified» здесь ожидаем, не предупреждение.
 		if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
 			ChatID:      tu.ID(chatID),
 			MessageID:   botMsgID,
 			Text:        spamVoteText(v.Prob, yes, no, margin),
 			ParseMode:   telego.ModeHTML,
 			ReplyMarkup: spamVoteKeyboard(),
-		}); err != nil {
+		}); err != nil && !isNotModified(err) {
 			b.log.Warn("edit spam vote tally", "err", err, "chat", chatID)
 		}
 	}
@@ -412,19 +417,22 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 	}
 	if spam {
 		if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
+			// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
+			// событие spamban не пишем и его приветствие не трогаем.
 			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
+		} else {
+			_ = b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan, time.Now())
+			// Приветствие бота для этого юзера revoke не трогает — сносим сами.
+			if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
+				if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
+					b.log.Debug("delete greeting of banned user", "err", err, "chat", v.ChatID)
+				}
+			}
 		}
-		_ = b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan, time.Now())
 		// revoke обычно уже стёр сообщение; ручное удаление — страховка на
 		// случай неудавшегося бана (нет прав), поэтому ошибку глушим тихо.
 		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
 			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
-		}
-		// Приветствие бота для этого юзера revoke не трогает — сносим сами.
-		if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
-			if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
-				b.log.Debug("delete greeting of banned user", "err", err, "chat", v.ChatID)
-			}
 		}
 		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
 			"prob", v.Prob, "why", why)

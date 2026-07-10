@@ -58,6 +58,17 @@ const (
 	periodAll   statsPeriod = "all"
 )
 
+// parsePeriod validates a period token coming from callback data. Anything
+// unknown (stale buttons, forged data) falls back to periodWeek — the raw
+// string must never reach statsRange or the rendered HTML.
+func parsePeriod(s string) statsPeriod {
+	switch p := statsPeriod(s); p {
+	case periodDay, periodWeek, periodMonth, periodAll:
+		return p
+	}
+	return periodWeek
+}
+
 // statsRange returns calendar-aligned UTC windows, [from, until). Events are
 // counted by unix time and messages by calendar day; aligning both bounds to
 // midnight keeps the two counts covering the same range (see QueryStats):
@@ -87,14 +98,14 @@ func periodLabel(p statsPeriod) string {
 	switch p {
 	case periodDay:
 		return "сегодня"
-	case periodWeek:
-		return "неделю"
 	case periodMonth:
 		return "месяц"
 	case periodAll:
 		return "всё время"
 	}
-	return string(p)
+	// periodWeek — и он же для неожиданных значений: parsePeriod гарантирует,
+	// что сырая строка из callback data сюда не доходит.
+	return "неделю"
 }
 
 // statsRuneBudget ограничивает суммарную длину пофамильных списков в

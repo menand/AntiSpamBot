@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban'
+    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban'
     at      INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat_at ON events(chat_id, at);

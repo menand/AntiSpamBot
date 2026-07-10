@@ -23,8 +23,9 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// Serialize writes; SQLite has a single writer and this avoids "database is locked"
-	// churn at low traffic. Raise + use WAL if traffic ever grows.
+	// Serialize writes; SQLite has a single writer and this avoids "database
+	// is locked" churn at low traffic. WAL (set in the DSN above) keeps reads
+	// from blocking behind them. Raise the pool if traffic ever grows.
 	raw.SetMaxOpenConns(1)
 	if err := raw.PingContext(ctx); err != nil {
 		_ = raw.Close()

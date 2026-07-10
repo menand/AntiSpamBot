@@ -16,12 +16,20 @@ import (
 // message limit so the rendered text (template + mention markup) always fits.
 const maxGreetingRunes = 500
 
+// greetInputTTL bounds how long an armed "send me the greeting text" prompt
+// stays live. Without it, an admin who tapped ✏️ and walked away would have
+// an unrelated private message days later silently become the greeting.
+const greetInputTTL = 15 * time.Minute
+
+// greetInputState is the armed prompt: which chat the text is for and when
+// the admin armed it.
+type greetInputState struct {
+	chatID  int64
+	armedAt time.Time
+}
+
 func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threadID int) {
-	s, err := b.db.GetChatSettings(ctx, chatID)
-	if err != nil {
-		b.log.Warn("get chat settings for greeting", "err", err, "chat", chatID)
-		return
-	}
+	s := b.chatSettings(ctx, chatID)
 	if !s.GreetingEnabled {
 		return
 	}
@@ -72,18 +80,24 @@ func (b *Bot) handleGreetingCommand(_ *th.Context, _ telego.Message) error {
 func (b *Bot) setGreetingInputPending(userID, chatID int64) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
-	b.greetInput[userID] = chatID
+	b.greetInput[userID] = greetInputState{chatID: chatID, armedAt: time.Now()}
 }
 
-// takeGreetingInput consumes the pending greeting-input state, if armed.
-func (b *Bot) takeGreetingInput(userID int64) (int64, bool) {
+// takeGreetingInput consumes the pending greeting-input state. expired=true
+// means the prompt existed but sat armed longer than greetInputTTL — the
+// caller should tell the admin their text was NOT saved, not stay silent.
+func (b *Bot) takeGreetingInput(userID int64) (chatID int64, ok, expired bool) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
-	chatID, ok := b.greetInput[userID]
-	if ok {
-		delete(b.greetInput, userID)
+	st, found := b.greetInput[userID]
+	if !found {
+		return 0, false, false
 	}
-	return chatID, ok
+	delete(b.greetInput, userID)
+	if time.Since(st.armedAt) > greetInputTTL {
+		return 0, false, true
+	}
+	return st.chatID, true, false
 }
 
 // handlePrivateText receives non-command private messages. Its only job is
@@ -93,14 +107,21 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if message.From == nil {
 		return nil
 	}
-	chatID, ok := b.takeGreetingInput(message.From.ID)
-	if !ok {
-		return nil
-	}
+	chatID, ok, expired := b.takeGreetingInput(message.From.ID)
 
 	reply := func(text string) {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 			WithParseMode(telego.ModeHTML))
+	}
+
+	if expired {
+		// Единственный abort-путь без ответа был бы здесь — а именно тут
+		// админ мог 20 минут сочинять текст. Честно скажем, что не сохранили.
+		reply("⌛ Запрос на текст приветствия устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.")
+		return nil
+	}
+	if !ok {
+		return nil
 	}
 
 	// Re-check: rights could have been revoked between the button tap and

@@ -1,7 +1,6 @@
 package captcha
 
 import (
-	"fmt"
 	"sync"
 	"time"
 )
@@ -26,16 +25,22 @@ func (p *Pending) Done() <-chan struct{} {
 	return p.cancelCh
 }
 
+// capKey identifies a captcha by (chat, user).
+type capKey struct {
+	chatID int64
+	userID int64
+}
+
 type Store struct {
 	mu       sync.Mutex
-	items    map[string]*Pending
-	inflight map[string]bool // kickoffs currently in setup (pre-Put)
+	items    map[capKey]*Pending
+	inflight map[capKey]bool // kickoffs currently in setup (pre-Put)
 }
 
 func NewStore() *Store {
 	return &Store{
-		items:    make(map[string]*Pending),
-		inflight: make(map[string]bool),
+		items:    make(map[capKey]*Pending),
+		inflight: make(map[capKey]bool),
 	}
 }
 
@@ -47,7 +52,7 @@ func NewStore() *Store {
 func (s *Store) BeginKickoff(chatID, userID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(chatID, userID)
+	k := capKey{chatID, userID}
 	if _, ok := s.items[k]; ok {
 		return false
 	}
@@ -63,18 +68,14 @@ func (s *Store) BeginKickoff(chatID, userID int64) bool {
 func (s *Store) FinishKickoff(chatID, userID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.inflight, key(chatID, userID))
-}
-
-func key(chatID, userID int64) string {
-	return fmt.Sprintf("%d:%d", chatID, userID)
+	delete(s.inflight, capKey{chatID, userID})
 }
 
 func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID int) *Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	k := key(chatID, userID)
+	k := capKey{chatID, userID}
 	if old, ok := s.items[k]; ok {
 		old.Cancel()
 	}
@@ -97,7 +98,7 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(chatID, userID)
+	k := capKey{chatID, userID}
 	if _, ok := s.items[k]; ok {
 		return true
 	}
@@ -107,7 +108,7 @@ func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
 func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k := key(chatID, userID)
+	k := capKey{chatID, userID}
 	p, ok := s.items[k]
 	if ok {
 		delete(s.items, k)
@@ -124,7 +125,7 @@ func (s *Store) TakeChat(chatID int64) []*Pending {
 	defer s.mu.Unlock()
 	var out []*Pending
 	for k, p := range s.items {
-		if p.ChatID == chatID {
+		if k.chatID == chatID {
 			delete(s.items, k)
 			out = append(out, p)
 		}

@@ -49,7 +49,10 @@ func New(apiKey, model string) *Client {
 		apiKey:   apiKey,
 		model:    model,
 		endpoint: defaultEndpoint,
-		http:     &http.Client{Timeout: 15 * time.Second},
+		// Страховочный транспортный таймаут на случай вызова без дедлайна в
+		// ctx. Обязан быть больше бюджета ЛЮБОГО вызывающего (прод — 20 с,
+		// live-тест — 60 с), иначе он молча режет чужие бюджеты.
+		http: &http.Client{Timeout: 90 * time.Second},
 	}
 }
 

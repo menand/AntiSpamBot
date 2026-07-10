@@ -37,19 +37,25 @@ type Bot struct {
 	chatCache map[int64]storage.ChatInfo
 	userCache map[int64]storage.UserInfo
 
-	// Pending "send me the new greeting text" prompts: userID → chatID.
+	// Pending "send me the new greeting text" prompts: userID → armed state.
 	// Set when an admin taps ✏️ in chat settings, consumed by the next
-	// private text message from that user.
+	// private text message from that user (or dropped after greetInputTTL).
 	greetMu    sync.Mutex
-	greetInput map[int64]int64
+	greetInput map[int64]greetInputState
 
 	// ИИ-антиспам: Groq-клиент, дедуп запущенных проверок (chat:user) и кэш
 	// «этот юзер — админ чата» (для белого списка и золотого голоса).
 	groqc        *groq.Client
 	spamMu       sync.Mutex
-	spamInflight map[string]struct{}
+	spamInflight map[chatUser]struct{}
 	adminMu      sync.Mutex
-	adminCache   map[string]adminCacheEntry
+	adminCache   map[chatUser]adminCacheEntry
+}
+
+// chatUser keys the per-(chat, user) maps above.
+type chatUser struct {
+	chatID int64
+	userID int64
 }
 
 func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
@@ -68,10 +74,10 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		version:      version,
 		chatCache:    make(map[int64]storage.ChatInfo),
 		userCache:    make(map[int64]storage.UserInfo),
-		greetInput:   make(map[int64]int64),
+		greetInput:   make(map[int64]greetInputState),
 		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
-		spamInflight: make(map[string]struct{}),
-		adminCache:   make(map[string]adminCacheEntry),
+		spamInflight: make(map[chatUser]struct{}),
+		adminCache:   make(map[chatUser]adminCacheEntry),
 	}, nil
 }
 

@@ -70,7 +70,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
-		return b.renderChatStats(ctx, query, chatID, statsPeriod(parts[3]))
+		return b.renderChatStats(ctx, query, chatID, parsePeriod(parts[3]))
 	case "settings":
 		if len(parts) != 3 {
 			return nil
@@ -97,12 +97,14 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
-		enabled, err := b.db.GetGreetingEnabled(ctx, chatID)
+		// Тогглы — read-modify-write: на ошибке чтения прерываемся, иначе мы
+		// запишем инверсию ДЕФОЛТА вместо инверсии реального значения.
+		s, err := b.db.GetChatSettings(ctx, chatID)
 		if err != nil {
-			b.log.Warn("get greeting in menu", "err", err)
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
 			return nil
 		}
-		if err := b.db.SetGreetingEnabled(ctx, chatID, !enabled); err != nil {
+		if err := b.db.SetGreetingEnabled(ctx, chatID, !s.GreetingEnabled); err != nil {
 			b.log.Warn("set greeting in menu", "err", err)
 			return nil
 		}
@@ -120,8 +122,16 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
+		// Экран настроек: читаем напрямую и прерываемся на ошибке, иначе
+		// покажем «стандартный» вместо реально сохранённого текста. Арм
+		// состояния — только после удачного чтения, чтобы не оставить
+		// взведённый ввод без отправленного промпта.
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
 		b.setGreetingInputPending(query.From.ID, chatID)
-		s, _ := b.db.GetChatSettings(ctx, chatID)
 		current := "стандартный"
 		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
 			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
@@ -129,7 +139,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		text := fmt.Sprintf(
 			"✏️ Пришли мне текст приветствия для чата <b>%s</b> одним сообщением.\n\n"+
 				"Подстановка: <code>{name}</code> — имя новичка.\n"+
-				"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n\n"+
+				"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n"+
+				"Запрос действует 15 минут.\n\n"+
 				"Текущий текст: %s",
 			html.EscapeString(b.chatTitle(ctx, chatID)), current)
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
@@ -184,7 +195,11 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
-		s, _ := b.db.GetChatSettings(ctx, chatID)
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
 		if err := b.db.SetDailyStatsEnabled(ctx, chatID, !s.DailyStatsEnabled); err != nil {
 			b.log.Warn("set daily stats", "err", err)
 		}
@@ -200,7 +215,11 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
-		s, _ := b.db.GetChatSettings(ctx, chatID)
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
 		if err := b.db.SetSilentAnnounceEnabled(ctx, chatID, !s.SilentAnnounceEnabled); err != nil {
 			b.log.Warn("set silent announce", "err", err)
 		}
@@ -216,11 +235,17 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.canManageChat(ctx, query.From.ID, chatID) {
 			return nil
 		}
-		s, _ := b.db.GetChatSettings(ctx, chatID)
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
 		if !s.SpamCheckEnabled && !b.groqc.Enabled() {
-			_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
-				WithText("GROQ_API_KEY не задан на сервере — включить нельзя.").
-				WithShowAlert())
+			// На query уже ответили в начале хендлера — второй Answer (алерт)
+			// Telegram отбросил бы молча, поэтому объясняем обычным
+			// сообщением: меню живёт в личке, оно ляжет прямо под ним.
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
+				"⚠️ GROQ_API_KEY не задан на сервере — включить ИИ-антиспам нельзя."))
 			return nil
 		}
 		if err := b.db.SetSpamCheckEnabled(ctx, chatID, !s.SpamCheckEnabled); err != nil {
@@ -499,27 +524,10 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		return nil
 	}
 
-	maxAttempts := b.cfg.MaxAttempts
-	if s.MaxAttempts.Valid {
-		maxAttempts = int(s.MaxAttempts.Int64)
-	}
-	timeoutSec := int(b.cfg.CaptchaTimeout.Seconds())
-	if s.CaptchaTimeoutSeconds.Valid {
-		timeoutSec = int(s.CaptchaTimeoutSeconds.Int64)
-	}
-	digestHourUTC := b.cfg.DailyStatsUTCHour
-	if s.DailyStatsUTCHour.Valid {
-		digestHourUTC = int(s.DailyStatsUTCHour.Int64)
-	}
-	captchaMode := captcha.ModeCircles
-	if s.CaptchaMode.Valid {
-		switch captcha.Mode(s.CaptchaMode.String) {
-		case captcha.ModeEmoji:
-			captchaMode = captcha.ModeEmoji
-		case captcha.ModeImage:
-			captchaMode = captcha.ModeImage
-		}
-	}
+	maxAttempts := b.effectiveMaxAttempts(s)
+	timeoutSec := int(b.effectiveCaptchaTimeout(s).Seconds())
+	digestHourUTC := b.effectiveDailyHour(s)
+	captchaMode := effectiveCaptchaMode(s)
 
 	greetingText := "стандартный"
 	if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
@@ -698,7 +706,7 @@ func (b *Bot) editWithMenu(ctx *th.Context, query telego.CallbackQuery, text str
 		ParseMode:   telego.ModeHTML,
 		ReplyMarkup: kb,
 	})
-	if err != nil {
+	if err != nil && !isNotModified(err) {
 		b.log.Warn("edit menu", "err", err)
 	}
 	return nil

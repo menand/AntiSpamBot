@@ -33,7 +33,7 @@ func Load() (*Config, error) {
 		return nil, errors.New("BOT_TOKEN is not set")
 	}
 
-	timeout, err := parseDurationSec("CAPTCHA_TIMEOUT_SECONDS", 30*time.Second)
+	timeout, err := parseDuration("CAPTCHA_TIMEOUT_SECONDS", 30*time.Second, time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	captchaDelay, err := parseDurationMs("CAPTCHA_DELAY_MS", 2000*time.Millisecond)
+	captchaDelay, err := parseDuration("CAPTCHA_DELAY_MS", 2000*time.Millisecond, time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -119,28 +119,18 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-func parseDurationMs(name string, def time.Duration) (time.Duration, error) {
+// parseDuration reads an integer env var expressed in the given unit
+// (seconds, milliseconds, …).
+func parseDuration(name string, def time.Duration, unit time.Duration) (time.Duration, error) {
 	v := os.Getenv(name)
 	if v == "" {
 		return def, nil
 	}
-	ms, err := strconv.Atoi(v)
+	n, err := strconv.Atoi(v)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
 	}
-	return time.Duration(ms) * time.Millisecond, nil
-}
-
-func parseDurationSec(name string, def time.Duration) (time.Duration, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return def, nil
-	}
-	sec, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	return time.Duration(sec) * time.Second, nil
+	return time.Duration(n) * unit, nil
 }
 
 func parseInt(name string, def int) (int, error) {

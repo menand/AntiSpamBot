@@ -70,10 +70,17 @@ type ChatSettings struct {
 	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
 }
 
+// defaultChatSettings is the settings row used when a chat has no stored row —
+// and the safe fallback when loading fails.
+func defaultChatSettings(chatID int64) ChatSettings {
+	return ChatSettings{ChatID: chatID, GreetingEnabled: true, SilentAnnounceEnabled: true}
+}
+
 // GetChatSettings loads the full settings row for a chat, applying defaults
-// when the row is absent.
+// when the row is absent. On error the returned struct still carries the
+// defaults, so callers may resolve against it without checking err first.
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
-	s := ChatSettings{ChatID: chatID, GreetingEnabled: true, SilentAnnounceEnabled: true}
+	s := defaultChatSettings(chatID)
 
 	var greetingInt, dailyInt, silentInt, spamInt int
 	err := d.sql.QueryRowContext(ctx, `
@@ -93,20 +100,14 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 		return s, nil
 	}
 	if err != nil {
-		return s, fmt.Errorf("get chat settings: %w", err)
+		// A failed Scan may have partially filled s — hand back clean defaults.
+		return defaultChatSettings(chatID), fmt.Errorf("get chat settings: %w", err)
 	}
 	s.GreetingEnabled = greetingInt != 0
 	s.DailyStatsEnabled = dailyInt != 0
 	s.SilentAnnounceEnabled = silentInt != 0
 	s.SpamCheckEnabled = spamInt != 0
 	return s, nil
-}
-
-// GetGreetingEnabled is a thin convenience over GetChatSettings, kept to
-// avoid churn at existing call sites.
-func (d *DB) GetGreetingEnabled(ctx context.Context, chatID int64) (bool, error) {
-	s, err := d.GetChatSettings(ctx, chatID)
-	return s.GreetingEnabled, err
 }
 
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {

@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26"/>
   <img src="https://img.shields.io/github/actions/workflow/status/menand/AntiSpamBot/ci.yml?branch=main&label=CI" alt="CI status"/>
-  <img src="https://img.shields.io/badge/docker-alpine%203.22-2496ED?logo=docker&logoColor=white" alt="Alpine 3.22"/>
+  <img src="https://img.shields.io/badge/docker-alpine%203.23-2496ED?logo=docker&logoColor=white" alt="Alpine 3.23"/>
   <img src="https://img.shields.io/badge/telegram-bot%20api%207.x+-26A5E4?logo=telegram&logoColor=white" alt="Telegram Bot API 7.x+"/>
   <img src="https://img.shields.io/github/last-commit/menand/AntiSpamBot" alt="Last commit"/>
 </p>

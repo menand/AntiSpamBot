@@ -509,7 +509,7 @@ func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user 
 	}
 	// Per-chat toggle; checked after the threshold so the settings query only
 	// runs on the rare announce-worthy message, not on every message.
-	if s, err := b.db.GetChatSettings(b.runCtx, message.Chat.ID); err == nil && !s.SilentAnnounceEnabled {
+	if !b.chatSettings(b.runCtx, message.Chat.ID).SilentAnnounceEnabled {
 		return
 	}
 	days := int(rec.Silence / (24 * time.Hour))
@@ -610,9 +610,10 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		}
 	}
 
-	mode := b.effectiveCaptchaMode(ctx, chatID)
+	settings := b.chatSettings(ctx, chatID)
+	mode := effectiveCaptchaMode(settings)
 	ch := captcha.New(mode)
-	captchaTimeout := b.effectiveCaptchaTimeout(ctx, chatID)
+	captchaTimeout := b.effectiveCaptchaTimeout(settings)
 	correct := ch.Correct()
 
 	// Image mode: pre-render the photo. On any render failure fall back to
@@ -747,7 +748,7 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 			"err", err, "chat", p.ChatID, "msg", p.MessageID, "reason", reason)
 	}
 
-	if count >= b.effectiveMaxAttempts(ctx, p.ChatID) {
+	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now())
 		return b.ban(ctx, p.ChatID, p.UserID)
