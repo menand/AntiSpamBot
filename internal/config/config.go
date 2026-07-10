@@ -23,8 +23,11 @@ type Config struct {
 	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
 	CaptchaDelay       time.Duration      // delay between join and sending captcha
 	DailyStatsUTCHour  int                // hour of day (UTC) at/after which daily digests are posted
-	GroqAPIKey         string             // empty = AI spam analysis unavailable
+	GroqAPIKey         string             // empty = Groq disabled
 	GroqModel          string             // empty = groq.DefaultModel
+	GigaChatAuthKey    string             // empty = GigaChat fallback disabled
+	GigaChatScope      string             // empty = gigachat.DefaultScope
+	GigaChatModel      string             // empty = gigachat.DefaultModel
 }
 
 func Load() (*Config, error) {
@@ -116,6 +119,9 @@ func Load() (*Config, error) {
 		DailyStatsUTCHour:  digestHour,
 		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
 		GroqModel:          os.Getenv("GROQ_MODEL"),
+		GigaChatAuthKey:    os.Getenv("GIGACHAT_AUTH_KEY"),
+		GigaChatScope:      os.Getenv("GIGACHAT_SCOPE"),
+		GigaChatModel:      os.Getenv("GIGACHAT_MODEL"),
 	}, nil
 }
 

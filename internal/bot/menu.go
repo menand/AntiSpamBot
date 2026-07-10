@@ -240,12 +240,12 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("get chat settings", "err", err, "chat", chatID)
 			return nil
 		}
-		if !s.SpamCheckEnabled && !b.groqc.Enabled() {
+		if !s.SpamCheckEnabled && !b.spamAIEnabled() {
 			// На query уже ответили в начале хендлера — второй Answer (алерт)
 			// Telegram отбросил бы молча, поэтому объясняем обычным
 			// сообщением: меню живёт в личке, оно ляжет прямо под ним.
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
-				"⚠️ GROQ_API_KEY не задан на сервере — включить ИИ-антиспам нельзя."))
+				"⚠️ Ни GROQ_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя."))
 			return nil
 		}
 		if err := b.db.SetSpamCheckEnabled(ctx, chatID, !s.SpamCheckEnabled); err != nil {
@@ -538,7 +538,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	spamWhitelist := effectiveSpamWhitelist(s)
 	spamMargin := effectiveSpamVoteMargin(s)
 	spamLabel := onOffLabel(s.SpamCheckEnabled)
-	if !b.groqc.Enabled() {
+	if !b.spamAIEnabled() {
 		spamLabel = "нет ключа 🔑"
 	}
 
