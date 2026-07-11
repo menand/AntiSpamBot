@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -140,8 +141,24 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 		b.log.Warn("spam check: message total", "err", err, "chat", chatID, "user", user.ID)
 		return
 	}
-	if total > effectiveSpamWhitelist(s) {
+	wl := effectiveSpamWhitelist(s)
+	if total > wl {
 		return
+	}
+	// Доверие кросс-чатовое: наговорил на белый список в ЛЮБОМ одном
+	// разрешённом чате бота — доверяем и здесь (в факты LLM идёт total
+	// текущего чата). Запрос только для новичков — старожилы уже отсеялись
+	// пер-чатовым гейтом выше. Фильтр chatAllowed не даёт нафармить доверие
+	// в постороннем чате, куда бота затащили (работает при ALLOWED_CHATS).
+	totals, err := b.db.UserMessageTotalsByChat(b.runCtx, user.ID)
+	if err != nil {
+		b.log.Warn("spam check: totals by chat", "err", err, "user", user.ID)
+		return
+	}
+	for cid, n := range totals {
+		if n > wl && b.chatAllowed(cid) {
+			return
+		}
 	}
 	if b.isOwner(user.ID) || b.isChatAdminCached(b.runCtx, chatID, user.ID) {
 		return
@@ -227,6 +244,115 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 		// Без строки в БД кнопки мертвы — снимаем плашку, не мусорим.
 		b.log.Error("persist spam vote", "err", err, "chat", chatID)
 		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
+		return
+	}
+	// Уже в своей горутине (maybeSpamCheck) — уведомляем синхронно.
+	b.notifySpamSuspicion(message, prob, threshold)
+}
+
+// spamNotifyTargets — владельцы, включившие ЛС-уведомления о спаме. Один
+// запрос на всех; пересечение с OWNER_IDS отсеивает строки бывших владельцев.
+func (b *Bot) spamNotifyTargets(ctx context.Context) []int64 {
+	ids, err := b.db.SpamNotifyOwners(ctx)
+	if err != nil {
+		b.log.Warn("spam notify owners", "err", err)
+		return nil
+	}
+	var out []int64
+	for _, id := range ids {
+		if b.isOwner(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// notifySpamSuspicion шлёт подписанным владельцам форвард подозрительного
+// сообщения + карточку с оценкой. Best effort: ошибки только в Warn.
+func (b *Bot) notifySpamSuspicion(message telego.Message, prob, threshold int) {
+	targets := b.spamNotifyTargets(b.runCtx)
+	if len(targets) == 0 {
+		return
+	}
+	chatID := message.Chat.ID
+	title := message.Chat.Title
+	if title == "" {
+		title = fmt.Sprintf("Chat %d", chatID)
+	}
+	info := fmt.Sprintf("🚨 Подозрение на спам в «%s»\nАвтор: %s\nОценка: %d%% (порог %d)",
+		html.EscapeString(title),
+		html.EscapeString(userLabel(*message.From)), prob, threshold)
+	for _, ownerID := range targets {
+		if _, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
+			ChatID:     tu.ID(ownerID),
+			FromChatID: tu.ID(chatID),
+			MessageID:  message.MessageID,
+		}); err != nil {
+			// Форвард может быть запрещён (protected content) — карточка ниже
+			// всё равно уйдёт, но без текста сообщения было бы слепо: дошлём.
+			b.log.Warn("forward spam suspicion", "err", err, "owner", ownerID)
+		}
+		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
+			WithParseMode(telego.ModeHTML)); err != nil {
+			b.log.Warn("notify spam suspicion", "err", err, "owner", ownerID)
+		}
+	}
+}
+
+// notifySpamVerdict шлёт подписанным владельцам итог голосования: кто решил,
+// раскладку голосов по именам и список чатов, где спамер добанен. targets
+// вычислил resolveSpamVote — там же, где решалось, читать ли бюллетени.
+func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, why string,
+	ballots []storage.Ballot, alsoBanned []string) {
+	if len(targets) == 0 {
+		return
+	}
+	ids := []int64{v.AuthorID}
+	for _, bl := range ballots {
+		ids = append(ids, bl.VoterID)
+	}
+	infos, err := b.db.GetUserInfos(b.runCtx, ids)
+	if err != nil {
+		b.log.Warn("verdict notify: user infos", "err", err)
+		infos = map[int64]storage.UserInfo{}
+	}
+
+	var sb strings.Builder
+	if spam {
+		sb.WriteString("⚖️ Вердикт: <b>спам</b>, автор забанен")
+	} else {
+		sb.WriteString("⚖️ Вердикт: <b>не спам</b>")
+	}
+	fmt.Fprintf(&sb, "\nЧат: %s\nАвтор: %s\nОценка была %d%%\nРешение: %s",
+		html.EscapeString(b.chatTitle(b.runCtx, v.ChatID)),
+		mentionWithUsername(infos, v.AuthorID), v.Prob, html.EscapeString(why))
+	var yes, no []string
+	for _, bl := range ballots {
+		if bl.IsSpam {
+			yes = append(yes, mentionWithUsername(infos, bl.VoterID))
+		} else {
+			no = append(no, mentionWithUsername(infos, bl.VoterID))
+		}
+	}
+	if len(yes) > 0 {
+		sb.WriteString("\nЗа спам: " + strings.Join(yes, ", "))
+	}
+	if len(no) > 0 {
+		sb.WriteString("\nПротив: " + strings.Join(no, ", "))
+	}
+	if len(alsoBanned) > 0 {
+		escaped := make([]string, len(alsoBanned))
+		for i, t := range alsoBanned {
+			escaped[i] = html.EscapeString(t)
+		}
+		sb.WriteString("\nТакже забанен в: " + strings.Join(escaped, ", "))
+	}
+	text := sb.String()
+	for _, ownerID := range targets {
+		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
+			WithParseMode(telego.ModeHTML)); err != nil {
+			b.log.Warn("notify spam verdict", "err", err, "owner", ownerID)
+		}
 	}
 }
 
@@ -390,6 +516,13 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 			tu.CallbackQuery(query.ID).WithText("Нельзя голосовать за своё сообщение.").WithShowAlert())
 		return nil
 	}
+	// В кэш имён: уведомление владельцу о вердикте рендерит голосовавших по id.
+	b.rememberUser(b.runCtx, storage.UserInfo{
+		UserID:    query.From.ID,
+		FirstName: query.From.FirstName,
+		LastName:  query.From.LastName,
+		Username:  query.From.Username,
+	})
 
 	voteWord := "не спам"
 	if isSpamVote {
@@ -455,6 +588,18 @@ func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 // resolveSpamVote исполняет вердикт. TakeSpamVote атомарен: первый вызвавший
 // исполняет, проигравшие гонку выходят молча — двойной бан/удаление исключены.
 func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
+	// Подписчики уведомлений и бюллетени — до Take: он удаляет бюллетени в
+	// своей транзакции. Бюллетени читаем только когда они кому-то нужны;
+	// проигравший гонку прочитает зря — не страшно, он выйдет по !taken.
+	targets := b.spamNotifyTargets(b.runCtx)
+	var ballots []storage.Ballot
+	if len(targets) > 0 {
+		var err error
+		ballots, err = b.db.ListBallots(b.runCtx, v.ChatID, v.BotMsgID)
+		if err != nil {
+			b.log.Warn("list ballots", "err", err, "chat", v.ChatID)
+		}
+	}
 	taken, err := b.db.TakeSpamVote(b.runCtx, v.ChatID, v.BotMsgID)
 	if err != nil {
 		b.log.Warn("take spam vote", "err", err, "chat", v.ChatID)
@@ -482,6 +627,11 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
 			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
 		}
+		// Общая база — по вердикту, независимо от того, хватило ли прав в
+		// исходном чате: вердикт вынесен людьми.
+		if err := b.db.AddSpamBanned(b.runCtx, v.AuthorID, v.ChatID, time.Now()); err != nil {
+			b.log.Warn("add spam banned", "err", err, "user", v.AuthorID)
+		}
 		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
 			"prob", v.Prob, "why", why)
 	} else {
@@ -491,6 +641,49 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 	if err := b.deleteMessage(b.runCtx, v.ChatID, v.BotMsgID); err != nil {
 		b.log.Warn("delete spam vote message", "err", err, "chat", v.ChatID)
 	}
+	// Кросс-бан и уведомления — в горутине: обход всех чатов не должен
+	// держать колбэк-хендлер (плашка уже снята, вердикт исполнен).
+	if spam || len(targets) > 0 {
+		go func() {
+			var alsoBanned []string
+			if spam {
+				alsoBanned = b.banEverywhere(v.ChatID, v.AuthorID)
+			}
+			b.notifySpamVerdict(targets, v, spam, why, ballots, alsoBanned)
+		}()
+	}
+}
+
+// banEverywhere банит юзера во всех группах бота, кроме исходной. Возвращает
+// названия чатов, где бан прошёл. Событие spamban пишется только в чате
+// вердикта (вызывающим) — иначе статистика «Забанены» размножится.
+// Best effort в один заход, без retryTG: типовая ошибка тут — «нет прав»,
+// перманентная, и лестница ретраев лишь растянула бы обход на минуты.
+func (b *Bot) banEverywhere(originChatID, userID int64) []string {
+	chats, err := b.db.ListChats(b.runCtx)
+	if err != nil {
+		b.log.Warn("ban everywhere: list chats", "err", err)
+		return nil
+	}
+	var banned []string
+	for _, c := range chats {
+		if c.ChatID == originChatID || (c.Type != "group" && c.Type != "supergroup") ||
+			!b.chatAllowed(c.ChatID) {
+			continue
+		}
+		if err := b.api.BanChatMember(b.runCtx, &telego.BanChatMemberParams{
+			ChatID:         tu.ID(c.ChatID),
+			UserID:         userID,
+			RevokeMessages: true,
+		}); err != nil {
+			// Обычно нет прав на бан в этом чате — ок, идём дальше.
+			b.log.Warn("cross-chat spam ban", "err", err, "chat", c.ChatID, "user", userID)
+			continue
+		}
+		b.log.Info("cross-chat spam ban", "chat", c.ChatID, "user", userID)
+		banned = append(banned, titleOrID(c))
+	}
+	return banned
 }
 
 // spamVoteSweepLoop закрывает голосования без кворума: раз в час (и сразу на

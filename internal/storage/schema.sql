@@ -62,6 +62,8 @@ CREATE TABLE IF NOT EXISTS user_message_counts (
 );
 CREATE INDEX IF NOT EXISTS idx_umc_chat_day ON user_message_counts(chat_id, day);
 CREATE INDEX IF NOT EXISTS idx_umc_chat_user ON user_message_counts(chat_id, user_id);
+-- Кросс-чатовое доверие антиспама: выборка по одному юзеру без chat_id.
+CREATE INDEX IF NOT EXISTS idx_umc_user ON user_message_counts(user_id, chat_id);
 
 -- Cache of display names so we can render mentions without calling Telegram on every /stats.
 CREATE TABLE IF NOT EXISTS user_info (
@@ -133,4 +135,20 @@ CREATE TABLE IF NOT EXISTS spam_ballots (
     voter_id   INTEGER NOT NULL,
     is_spam    INTEGER NOT NULL,
     PRIMARY KEY (chat_id, bot_msg_id, voter_id)
+);
+
+-- Общая база спамеров: вердикт «спам» в любом чате баним во всех чатах бота,
+-- а при входе такого юзера в новый чат — мгновенный бан вместо капчи.
+-- Ручной разбан админом в любом чате снимает флаг (DeleteSpamBanned из
+-- handleChatMember) — иначе ошибочный вердикт был бы неисправим.
+CREATE TABLE IF NOT EXISTS spam_banned (
+    user_id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL, -- чат, где вынесен вердикт
+    at      INTEGER NOT NULL
+);
+
+-- Глобальные (не пер-чатовые) настройки владельцев бота (OWNER_IDS).
+CREATE TABLE IF NOT EXISTS owner_settings (
+    owner_id    INTEGER PRIMARY KEY,
+    spam_notify INTEGER NOT NULL DEFAULT 0 -- слать в ЛС подозрения и вердикты
 );

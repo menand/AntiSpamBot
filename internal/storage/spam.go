@@ -140,6 +140,77 @@ func (d *DB) ExpiredSpamVotes(ctx context.Context, olderThan time.Time) ([]SpamV
 	return out, rows.Err()
 }
 
+// Ballot — один голос в голосовании «спам/не спам».
+type Ballot struct {
+	VoterID int64
+	IsSpam  bool
+}
+
+// ListBallots — все голоса активного голосования. Вызывать ДО TakeSpamVote:
+// он удаляет бюллетени в своей транзакции.
+func (d *DB) ListBallots(ctx context.Context, chatID int64, botMsgID int) ([]Ballot, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT voter_id, is_spam FROM spam_ballots WHERE chat_id = ? AND bot_msg_id = ?`,
+		chatID, botMsgID)
+	if err != nil {
+		return nil, fmt.Errorf("list ballots: %w", err)
+	}
+	defer rows.Close()
+	var out []Ballot
+	for rows.Next() {
+		var bl Ballot
+		var isSpam int
+		if err := rows.Scan(&bl.VoterID, &isSpam); err != nil {
+			return nil, fmt.Errorf("scan ballot: %w", err)
+		}
+		bl.IsSpam = isSpam != 0
+		out = append(out, bl)
+	}
+	return out, rows.Err()
+}
+
+// AddSpamBanned заносит юзера в общую базу спамеров. Повторный вердикт в
+// другом чате не перезаписывает первоисточник.
+func (d *DB) AddSpamBanned(ctx context.Context, userID, chatID int64, at time.Time) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO spam_banned (user_id, chat_id, at) VALUES (?, ?, ?)
+		ON CONFLICT(user_id) DO NOTHING
+	`, userID, chatID, at.Unix())
+	if err != nil {
+		return fmt.Errorf("add spam banned: %w", err)
+	}
+	return nil
+}
+
+func (d *DB) IsSpamBanned(ctx context.Context, userID int64) (bool, error) {
+	var one int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT 1 FROM spam_banned WHERE user_id = ?`, userID).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is spam banned: %w", err)
+	}
+	return true, nil
+}
+
+// DeleteSpamBanned — прощение: ручной разбан админом в любом чате снимает
+// глобальный флаг, иначе ошибочный вердикт был бы неисправим (join-хук банил
+// бы заново при каждом входе). Возвращает, была ли запись.
+func (d *DB) DeleteSpamBanned(ctx context.Context, userID int64) (bool, error) {
+	res, err := d.sql.ExecContext(ctx,
+		`DELETE FROM spam_banned WHERE user_id = ?`, userID)
+	if err != nil {
+		return false, fmt.Errorf("delete spam banned: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("delete spam banned rows: %w", err)
+	}
+	return n > 0, nil
+}
+
 // UserMessageTotal — сколько всего сообщений юзер написал в чате (для белого
 // списка антиспама). Считается по дневным агрегатам, копится исторически.
 func (d *DB) UserMessageTotal(ctx context.Context, chatID, userID int64) (int, error) {
@@ -152,6 +223,76 @@ func (d *DB) UserMessageTotal(ctx context.Context, chatID, userID int64) (int, e
 		return 0, fmt.Errorf("user message total: %w", err)
 	}
 	return n, nil
+}
+
+// UserMessageTotalsByChat — сколько сообщений юзер написал в каждом чате
+// бота. Кросс-чатовое доверие: наговорил на белый список в одном чате —
+// доверяем и в остальных (максимум по чатам, не сумма: 3+3 — ещё не доверие);
+// фильтр по ALLOWED_CHATS применяет вызывающий — это конфиг, не БД.
+func (d *DB) UserMessageTotalsByChat(ctx context.Context, userID int64) (map[int64]int, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT chat_id, SUM(count) FROM user_message_counts
+		WHERE user_id = ? GROUP BY chat_id
+	`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("user message totals by chat: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int64]int)
+	for rows.Next() {
+		var chatID int64
+		var n int
+		if err := rows.Scan(&chatID, &n); err != nil {
+			return nil, fmt.Errorf("scan user message totals: %w", err)
+		}
+		out[chatID] = n
+	}
+	return out, rows.Err()
+}
+
+// SpamNotifyEnabled — включены ли у владельца ЛС-уведомления о спаме.
+func (d *DB) SpamNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
+	var on int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT spam_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("spam notify enabled: %w", err)
+	}
+	return on != 0, nil
+}
+
+// SpamNotifyOwners — все владельцы с включёнными уведомлениями одним
+// запросом (вместо точечного SELECT на каждого при каждом событии).
+func (d *DB) SpamNotifyOwners(ctx context.Context) ([]int64, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT owner_id FROM owner_settings WHERE spam_notify != 0`)
+	if err != nil {
+		return nil, fmt.Errorf("spam notify owners: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan spam notify owner: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO owner_settings (owner_id, spam_notify) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET spam_notify = excluded.spam_notify
+	`, ownerID, boolToInt(on))
+	if err != nil {
+		return fmt.Errorf("set spam notify: %w", err)
+	}
+	return nil
 }
 
 func boolToInt(b bool) int {
