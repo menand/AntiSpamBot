@@ -35,6 +35,11 @@ const (
 	// spamFactsTextLimit — сколько рун текста уходит в Groq. Спам-простыни
 	// длиннее не делают вердикт лучше, а токены жгут.
 	spamFactsTextLimit = 1500
+
+	// editCheckCooldown — минимальный интервал между спам-проверками ПРАВОК
+	// одного (chat, user): правки не растят счётчик сообщений, без кулдауна
+	// новичок жёг бы LLM-квоту бесконечными правками одного сообщения.
+	editCheckCooldown = 2 * time.Minute
 )
 
 // effectiveSpamThreshold/effectiveSpamWhitelist — чистые резолверы поверх уже
@@ -178,14 +183,14 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 	b.spamInflight[k] = struct{}{}
 	b.spamMu.Unlock()
 
-	go func() {
+	b.goSafe("runSpamCheck", func() {
 		defer func() {
 			b.spamMu.Lock()
 			delete(b.spamInflight, k)
 			b.spamMu.Unlock()
 		}()
 		b.runSpamCheck(message, s, total)
-	}()
+	})
 }
 
 func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTotal int) {
@@ -539,6 +544,30 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		return nil
 	}
 
+	// Гейт доверия: голос учитывается только от участников с историей в ЭТОМ
+	// чате — тот же порог, что у белого списка спам-чека. Иначе пара свежих
+	// подставных аккаунтов снимала бы плашку («не спам») или, наоборот,
+	// подтверждала ложный вердикт LLM — а он эскалирует в banEverywhere и
+	// глобальную базу спамеров. Сознательно пер-чатово, без кросс-чатового
+	// доверия maybeSpamCheck: голос — про репутацию в этом чате. Ошибка БД —
+	// fail-closed: неучтённый голос дешевле накрученного вердикта.
+	s := b.chatSettings(b.runCtx, chatID)
+	total, err := b.db.UserMessageTotal(b.runCtx, chatID, voter)
+	if err != nil || total <= effectiveSpamWhitelist(s) {
+		if err != nil {
+			b.log.Warn("spam vote trust gate", "err", err, "chat", chatID, "voter", voter)
+		} else {
+			b.log.Info("spam vote ballot rejected — voter below trust threshold",
+				"chat", chatID, "bot_msg", botMsgID,
+				"voter", userLabel(query.From), "vote", voteWord, "msg_total", total)
+		}
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Голосовать могут участники с историей сообщений в этом чате.").
+				WithShowAlert())
+		return nil
+	}
+
 	if err := b.db.UpsertBallot(b.runCtx, chatID, botMsgID, voter, isSpamVote); err != nil {
 		b.log.Warn("upsert ballot", "err", err, "chat", chatID)
 		return nil
@@ -553,7 +582,7 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		"voter", userLabel(query.From), "vote", voteWord,
 		"tally", fmt.Sprintf("%d:%d", yes, no))
 
-	margin := effectiveSpamVoteMargin(b.chatSettings(b.runCtx, chatID))
+	margin := effectiveSpamVoteMargin(s)
 	switch verdict, decided := voteVerdict(yes, no, margin); {
 	case decided:
 		b.resolveSpamVote(v, verdict, fmt.Sprintf("голоса %d:%d", yes, no))
@@ -644,13 +673,13 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 	// Кросс-бан и уведомления — в горутине: обход всех чатов не должен
 	// держать колбэк-хендлер (плашка уже снята, вердикт исполнен).
 	if spam || len(targets) > 0 {
-		go func() {
+		b.goSafe("spamVerdictFanout", func() {
 			var alsoBanned []string
 			if spam {
 				alsoBanned = b.banEverywhere(v.ChatID, v.AuthorID)
 			}
 			b.notifySpamVerdict(targets, v, spam, why, ballots, alsoBanned)
-		}()
+		})
 	}
 }
 

@@ -9,3 +9,8 @@ docker-compose.yml
 .idea/
 .vscode/
 *.log
+*.db
+*.db-shm
+*.db-wal
+/bin
+/out

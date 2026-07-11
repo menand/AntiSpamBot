@@ -157,6 +157,24 @@ func (b *Bot) chatDefaultPermissions(ctx context.Context, chatID int64) telego.C
 	}
 }
 
+// releaseOnAbort снимает капча-мут с обрывочных путей runCaptcha (pending ещё
+// не записан — рестарт юзера не восстановит, мут был бы вечным). На живом ctx
+// работает прямо на нём: полный бюджет ретраев release, включая honor
+// retry_after 429-шторма (ровно тот сценарий, где отправка капчи и падает).
+// На мёртвом (shutdown) — свежий detached-бюджет: release на отменённом ctx
+// был бы гарантированный no-op. 15 секунд покрывают обе retryTG-лестницы
+// release (getChat + restrict, ~14 c сна в худшем случае).
+func (b *Bot) releaseOnAbort(ctx context.Context, chatID, userID int64) {
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+	}
+	if err := b.release(ctx, chatID, userID); err != nil {
+		b.log.Warn("release on captcha abort", "err", err, "chat", chatID, "user", userID)
+	}
+}
+
 func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	// Обе половины кика ретраятся на короткой лестнице: без ретрая бана
 	// сетевой чих оставляет юзера замьюченным «зомби» в чате, а событие kick

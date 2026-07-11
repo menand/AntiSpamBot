@@ -275,12 +275,25 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		if !b.store.BeginKickoff(chatID, user.ID) {
 			return
 		}
-		go func() {
+		b.goSafe("banKnownSpammer", func() {
+			// Замок снимается двумя штатными путями ниже (fail — сразу,
+			// success — через минуту в AfterFunc). Паника между ними раньше
+			// роняла процесс и рестарт чистил in-memory карту; с recover в
+			// goSafe не снятый замок жил бы вечно — BeginKickoff навсегда
+			// false, и этот спамер в этом чате не получал бы ни бана, ни
+			// капчи. Defer-страховка снимает его, если владение не передано.
+			handedOff := false
+			defer func() {
+				if !handedOff {
+					b.store.FinishKickoff(chatID, user.ID)
+				}
+			}()
 			if err := b.banRevoke(b.runCtx, chatID, user.ID); err != nil {
 				// Бан не прошёл (обычно нет прав) — не оставляем спамера
 				// без присмотра: обычная капча, как до этой фичи.
 				b.log.Warn("ban known spammer on join", "err", err, "chat", chatID, "user", user.ID)
 				b.store.FinishKickoff(chatID, user.ID)
+				handedOff = true // снят вручную ДО startCaptcha — он берёт замок заново
 				if b.startCaptcha(chatID, user, threadID) {
 					_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now())
 				}
@@ -292,8 +305,9 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 			// играет Pending в store, у бана ничего не остаётся — а дубль
 			// new_chat_members может прийти следующим poll'ом и задвоить
 			// событие spamban в статистике.
+			handedOff = true
 			time.AfterFunc(time.Minute, func() { b.store.FinishKickoff(chatID, user.ID) })
-		}()
+		})
 		return
 	}
 	if !b.startCaptcha(chatID, user, threadID) {
@@ -436,38 +450,46 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
+	// Всё дальше — обслуживание чата: реестр, капчи по сервис-сообщениям,
+	// статистика, анонсы, спам-чек. Посторонние чаты (вне ALLOWED_CHATS) не
+	// обслуживаем — иначе первое же сообщение заносит чат в реестр и открывает
+	// его админам DM-меню (вплоть до включения ИИ-антиспама за счёт владельца).
+	// Ветки миграции выше гейта: MigrateFromChatID приходит уже с НОВЫМ
+	// chat_id, которого в ALLOWED_CHATS ещё нет.
+	if !b.chatAllowed(message.Chat.ID) {
+		return nil
+	}
+
 	// Service message: new members joined. This is a fallback for cases where
 	// Telegram doesn't emit a chat_member update (some group types, some
 	// rejoin scenarios). startCaptcha dedups via the in-memory store, so even
 	// if chat_member also fires for the same user, only one captcha is shown.
 	if len(message.NewChatMembers) > 0 {
-		if b.chatAllowed(message.Chat.ID) {
-			// In forum supergroups the join service message lands in a topic;
-			// send the captcha to the same one so the user actually sees it.
-			threadID := 0
-			if message.IsTopicMessage {
-				threadID = message.MessageThreadID
+		// In forum supergroups the join service message lands in a topic;
+		// send the captcha to the same one so the user actually sees it.
+		threadID := 0
+		if message.IsTopicMessage {
+			threadID = message.MessageThreadID
+		}
+		hadHuman := false
+		for _, nm := range message.NewChatMembers {
+			if nm.IsBot {
+				continue
 			}
-			hadHuman := false
-			for _, nm := range message.NewChatMembers {
-				if nm.IsBot {
-					continue
-				}
-				if b.me != nil && nm.ID == b.me.ID {
-					continue
-				}
-				hadHuman = true
-				b.log.Info("new_chat_members service message",
-					"chat", message.Chat.ID, "user", nm.ID)
-				b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm, threadID)
+			if b.me != nil && nm.ID == b.me.ID {
+				continue
 			}
-			// Remove Telegram's "X joined the chat" service message — clutters
-			// the chat and we're already showing the captcha.
-			if hadHuman {
-				if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
-					b.log.Warn("delete join service message",
-						"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
-				}
+			hadHuman = true
+			b.log.Info("new_chat_members service message",
+				"chat", message.Chat.ID, "user", nm.ID)
+			b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm, threadID)
+		}
+		// Remove Telegram's "X joined the chat" service message — clutters
+		// the chat and we're already showing the captcha.
+		if hadHuman {
+			if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+				b.log.Warn("delete join service message",
+					"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
 			}
 		}
 		return nil
@@ -476,11 +498,9 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	// Service message: member left or was kicked. Delete it (same rationale
 	// as new_chat_members — "bot kicked X" / "X left the chat" spam).
 	if message.LeftChatMember != nil {
-		if b.chatAllowed(message.Chat.ID) {
-			if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
-				b.log.Warn("delete leave service message",
-					"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
-			}
+		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+			b.log.Warn("delete leave service message",
+				"err", err, "chat", message.Chat.ID, "msg", message.MessageID)
 		}
 		return nil
 	}
@@ -539,6 +559,65 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 	b.maybeAnnounceReturn(ctx, message, user, rec)
+	b.maybeSpamCheck(message)
+	return nil
+}
+
+// handleEditedGroupMessage — правки сообщений. Единственная задача — прогнать
+// отредактированный текст через ИИ-антиспам: «невинное сообщение → правка в
+// спам» иначе полностью обходит проверку (она видит только первые N сообщений
+// автора). Счётчики и анонсы не трогаем — оригинал уже посчитан при отправке,
+// иначе правки накручивали бы статистику и ускоряли выход в белый список.
+func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+	if !b.chatAllowed(message.Chat.ID) {
+		return nil
+	}
+	if message.From == nil || message.From.IsBot {
+		return nil
+	}
+	if message.From.ID == telegramServiceUserID || message.IsAutomaticForward {
+		return nil
+	}
+	// Live-локация шлёт edited_message каждые несколько секунд всю трансляцию —
+	// это не «правка текста», жечь на неё LLM-запросы нельзя.
+	if message.Location != nil {
+		return nil
+	}
+	// Правка в спам мид-капча (сообщение проскочило в секунды до рестрикта):
+	// удаляем, как handleGroupMessage удаляет оригиналы.
+	if b.store.IsCaptchaActive(message.Chat.ID, message.From.ID) {
+		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+			b.log.Warn("delete edited pre-captcha message",
+				"err", err, "chat", message.Chat.ID, "user", message.From.ID)
+		}
+		return nil
+	}
+	// Бюджет-предохранитель: правки не растят счётчик сообщений, поэтому
+	// новичок (total ≤ whitelist) мог бы бесконечными правками одного
+	// сообщения гонять LLM-запросы без всякого самоограничения — обычный
+	// путь ограничивает себя сам ростом счётчика до белого списка. Не чаще
+	// одной проверки правок на (chat, user) в editCheckCooldown; правка в
+	// спам сразу после проверенной benign-правки проскочит окно — осознанный
+	// трейд-офф против выжигания квоты.
+	k := chatUser{message.Chat.ID, message.From.ID}
+	b.spamMu.Lock()
+	if _, busy := b.spamInflight[k]; busy {
+		// Проверка этого юзера уже в полёте (секунды LLM-вызова): правку
+		// пропускаем, но кулдаун НЕ жжём — иначе правка, попавшая в это
+		// окно, блокировала бы перепроверку на весь editCheckCooldown.
+		b.spamMu.Unlock()
+		return nil
+	}
+	last, seen := b.editChecked[k]
+	if seen && time.Since(last) < editCheckCooldown {
+		b.spamMu.Unlock()
+		return nil
+	}
+	b.editChecked[k] = time.Now()
+	b.spamMu.Unlock()
 	b.maybeSpamCheck(message)
 	return nil
 }
@@ -615,7 +694,7 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
 	// sleeps for CaptchaDelay before sending the captcha message. During the
 	// whole window handleGroupMessage deletes anything the user sends
 	// (store.IsCaptchaActive returns true while inflight is held).
-	go b.runCaptcha(chatID, user, threadID)
+	b.goSafe("runCaptcha", func() { b.runCaptcha(chatID, user, threadID) })
 	return true
 }
 
@@ -649,6 +728,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	if b.cfg.CaptchaDelay > 0 {
 		select {
 		case <-ctx.Done():
+			// Shutdown в окне задержки: рестрикт уже применён, а pending ещё
+			// не записан — рестарт юзера не восстановит. Снимаем мут.
+			b.releaseOnAbort(ctx, chatID, user.ID)
 			return
 		case <-time.After(b.cfg.CaptchaDelay):
 		}
@@ -685,6 +767,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 				WithCallbackData(fmt.Sprintf("capok:%d", user.ID))),
 	)
 
+	// Отправка ретраится: 429 прилетает ровно во время масс-джойна, а
+	// single-shot фейл здесь release'ил юзера БЕЗ капчи — щит отключался
+	// как раз под флудом.
 	var msg *telego.Message
 	var err error
 	if photo != nil {
@@ -692,15 +777,21 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			"Привет, %s!\nДля защиты от спама выбери эмодзи, наиболее похожую на картинку, за %d секунд.",
 			mentionHTML(user), int(captchaTimeout.Seconds()),
 		)
-		p := tu.Photo(tu.ID(chatID),
-			tu.File(tu.NameReader(bytes.NewReader(photo), "captcha.png"))).
-			WithCaption(caption).
-			WithParseMode(telego.ModeHTML).
-			WithReplyMarkup(kb)
-		if threadID != 0 {
-			p = p.WithMessageThreadID(threadID)
-		}
-		msg, err = b.api.SendPhoto(ctx, p)
+		err = retryTG(ctx, func() error {
+			// Params пересоздаются на каждую попытку: bytes.Reader одноразовый,
+			// повторная отправка того же объекта ушла бы с пустым телом.
+			p := tu.Photo(tu.ID(chatID),
+				tu.File(tu.NameReader(bytes.NewReader(photo), "captcha.png"))).
+				WithCaption(caption).
+				WithParseMode(telego.ModeHTML).
+				WithReplyMarkup(kb)
+			if threadID != 0 {
+				p = p.WithMessageThreadID(threadID)
+			}
+			var e error
+			msg, e = b.api.SendPhoto(ctx, p)
+			return e
+		})
 	} else {
 		text := fmt.Sprintf(
 			"Привет, %s!\nДля защиты от спама выбери <b>%s</b> за %d секунд.",
@@ -712,11 +803,17 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		if threadID != 0 {
 			params = params.WithMessageThreadID(threadID)
 		}
-		msg, err = b.api.SendMessage(ctx, params)
+		err = retryTG(ctx, func() error {
+			var e error
+			msg, e = b.api.SendMessage(ctx, params)
+			return e
+		})
 	}
 	if err != nil {
 		b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
-		_ = b.release(ctx, chatID, user.ID)
+		// releaseOnAbort: при живом ctx (сетевой фейл) — полный бюджет ретраев,
+		// при отменённом (shutdown) — detached, иначе мут не снялся бы.
+		b.releaseOnAbort(ctx, chatID, user.ID)
 		return
 	}
 
@@ -731,10 +828,26 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		ExpiresAt:  expires,
 		ThreadID:   threadID,
 	}); err != nil {
-		b.log.Warn("persist pending", "err", err)
+		// Третий pre-persist обрыв (после shutdown-в-задержке и фейла
+		// отправки): капча только в памяти не переживёт рестарт — юзер
+		// остался бы замьючен навсегда, причём сбой БД как раз коррелирует
+		// со скорым рестартом. Fail-open, как и при неудачной отправке:
+		// снимаем капчу и впускаем. Take с проверкой — юзер мог успеть
+		// ответить за эти миллисекунды, тогда исход уже решён без нас.
+		b.log.Warn("persist pending — dropping captcha, letting user in (fail-open)",
+			"err", err, "chat", chatID, "user", user.ID)
+		if taken, ok := b.store.Take(chatID, user.ID); ok && taken == p {
+			taken.Cancel()
+			if derr := b.deleteMessage(ctx, chatID, msg.MessageID); derr != nil {
+				b.log.Warn("delete captcha after persist failure",
+					"err", derr, "chat", chatID, "msg", msg.MessageID)
+			}
+			b.releaseOnAbort(ctx, chatID, user.ID)
+		}
+		return
 	}
 
-	go b.waitTimeout(p)
+	b.goSafe("waitTimeout", func() { b.waitTimeout(p) })
 }
 
 func (b *Bot) waitTimeout(p *captcha.Pending) {

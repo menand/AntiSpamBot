@@ -40,18 +40,18 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 	lines := make([]string, len(providers))
 	done := make(chan struct{}, len(providers))
 	for i, p := range providers {
-		go func(i int, name string, c spamClassifier) {
+		b.goSafe("aiCheck:"+p.name, func() {
 			defer func() { done <- struct{}{} }()
-			if !c.Enabled() {
-				lines[i] = fmt.Sprintf("➖ %s — ключ не задан", name)
+			if !p.c.Enabled() {
+				lines[i] = fmt.Sprintf("➖ %s — ключ не задан", p.name)
 				return
 			}
 			ctx, cancel := context.WithTimeout(b.runCtx, aiCheckTimeout)
 			defer cancel()
 			start := time.Now()
-			prob, err := c.SpamProbability(ctx, aiCheckFacts)
-			lines[i] = formatProviderCheck(name, c.Model(), prob, time.Since(start), err)
-		}(i, p.name, p.c)
+			prob, err := p.c.SpamProbability(ctx, aiCheckFacts)
+			lines[i] = formatProviderCheck(p.name, p.c.Model(), prob, time.Since(start), err)
+		})
 	}
 	for range providers {
 		<-done

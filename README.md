@@ -111,6 +111,7 @@ Telegram анти-спам бот на Go. Новых участников вс�
 - 💾 **SQLite** — один файл, переживает рестарты, автоматически мигрирует данные при превращении basic-group в supergroup.
 - 🔐 **Role model**: владелец бота (`OWNER_IDS`) vs админ чата (проверяется через `getChatMember`) vs обычный. Каждый видит и может управлять только своими чатами.
 - ⏳ **Мгновенный мут, капча через 2 сек** — права режутся сразу после входа (спам-боты не успевают ничего доставить), а капча приходит с задержкой, чтобы клиент новичка успел отрисовать чат. Любые сообщения в этом окне удаляются.
+- 🤖 **ИИ-антиспам** (опционально, per chat) — сообщения новичков (первые несколько, включая отредактированные) оценивает LLM: Groq первичен, GigaChat подхватывает при его ошибках/лимитах. При подозрении бот вешает под сообщением голосование «спам / не спам»: перевес голосов доверенных участников решает, голос админа решает сразу. Вердикт «спам» — бан со стиранием всех сообщений автора, кросс-бан в остальных чатах бота и запись в глобальную базу спамеров (повторный вход такого юзера = мгновенный бан вместо капчи; ручной разбан админом прощает). Владельцам — 🔔 уведомления в ЛС о подозрениях и вердиктах. Нужен `GROQ_API_KEY` и/или `GIGACHAT_AUTH_KEY`.
 - ✅ **Кнопка «Впустить»** на капче — админ чата пропускает живого человека вручную.
 - ✏️ **Свой текст приветствия** per chat с подстановкой `{name}` — задаётся через DM-меню.
 - 🧵 **Форум-группы**: капча и приветствие приходят в тот же топик, где появился новичок.
@@ -256,7 +257,7 @@ git pull && docker compose up -d --build
 |---|---|---|
 | `BOT_TOKEN` | **обязат.** | Токен от @BotFather |
 | `OWNER_IDS` | — | Telegram user_id владельцев бота через запятую. Получают 🟢/🔴, видят все чаты в меню. |
-| `ALLOWED_CHATS` | — (= все) | Chat ID через запятую. Если задан — бот игнорирует другие чаты. |
+| `ALLOWED_CHATS` | — (= все) | Chat ID через запятую. Если задан — бот игнорирует другие чаты. При апгрейде группы в супергруппу chat_id меняется — обнови список. |
 | `CAPTCHA_TIMEOUT_SECONDS` | `30` | Дефолт секунд на капчу (перекрывается per-chat) |
 | `MAX_ATTEMPTS` | `3` | Дефолт порога бана (перекрывается per-chat) |
 | `CAPTCHA_DELAY_MS` | `2000` | Задержка между мутом (мгновенным) и отправкой капчи, чтобы клиент новичка успел отрисовать чат. Сообщения от новичка в окне удаляются. |
@@ -266,20 +267,30 @@ git pull && docker compose up -d --build
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FILE` | — (в Docker: `/data/bot.log`) | Если задан — логи дублируются в файл с ротацией (10 МБ × 3 бэкапа, 30 дней). Нужен для `/logs`. |
 | `DB_PATH` | `bot.db` (в Docker: `/data/bot.db`) | Путь к SQLite-файлу |
+| `GROQ_API_KEY` | — | Ключ Groq API — включает возможность ИИ-антиспама (сам анализ включается per-chat в меню) |
+| `GROQ_MODEL` | `llama-3.1-8b-instant` | Модель Groq |
+| `GIGACHAT_AUTH_KEY` | — | Authorization key GigaChat (Сбер) — фолбек при ошибках/лимитах Groq; может работать и единственным провайдером |
+| `GIGACHAT_SCOPE` | `GIGACHAT_API_PERS` | Scope GigaChat (персональный аккаунт) |
+| `GIGACHAT_MODEL` | `GigaChat` | Модель GigaChat (Lite) |
 
 ---
 
 ## Статистика и приватность
 
 ### Что собирается
-- События: `join` / `pass` / `kick` / `ban` (per-chat, per-user, по времени).
+- События: `join` / `pass` / `kick` / `ban` / `spamban` (per-chat, per-user, по времени).
 - Сообщения: кто, когда, в каком чате, сколько (без содержимого).
 - Агрегаты по дням: сообщения новичков vs старичков.
 - Кэш display-имён (first_name, last_name, username) — для мемов в `/stats`.
 
-### Что НЕ собирается
-- **Содержимое сообщений** — никогда.
-- **Ничего за пределами чатов, где работает бот.**
+### Содержимое сообщений
+- В БД тексты сообщений **не сохраняются** — только счётчики.
+- **При включённом ИИ-антиспаме** текст (до 1500 символов) сообщений новичков,
+  ещё не наработавших белый список, отправляется в сторонний LLM-сервис
+  (Groq и/или GigaChat) для оценки спамности и записывается в лог-файл бота
+  (доступен только владельцам через `/logs`). Фича по умолчанию выключена;
+  включая её в чате, предупреди участников.
+- Ничего за пределами чатов, где работает бот, не собирается.
 
 ### Приватность
 - Каждый чат изолирован: админ чата А не видит чат Б.
@@ -301,17 +312,20 @@ git pull && docker compose up -d --build
 ```
 cmd/bot/                 entrypoint (main)
 internal/config/         env-переменные и их валидация
-internal/captcha/        генерация challenge (кружки + эмодзи-категории) + in-memory store
+internal/captcha/        генерация challenge (кружки + эмодзи-категории + картинка) + in-memory store
 internal/storage/        SQLite: schema, миграции, CRUD (chats, members, events, stats, settings)
   └─ migrate.go          handler для basic-group → supergroup миграции данных
+internal/groq/           клиент Groq API — первичный LLM ИИ-антиспама (+ общий SystemPrompt)
+internal/gigachat/       клиент GigaChat API — фолбек ИИ-антиспама (OAuth, вшитый НУЦ CA)
 internal/bot/            telego-клиент, update handlers, DM-меню, ежедневный digest
   ├─ menu.go             главное меню и settings submenu
   ├─ handlers.go         chat_member, callbacks, captcha lifecycle
+  ├─ spamcheck.go        ИИ-антиспам: белый список, голосование, вердикты, кросс-бан
   ├─ daily.go            loop для ежедневных сводок
   ├─ access.go           helpers: userChats, canManageChat, effective*-resolvers
   └─ logs.go, info.go    команды /logs, /info
 scripts/auto-deploy.sh   cron-скрипт для автодеплоя из git
-Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.22
+Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.23
 docker-compose.yml       служба bot, volume bot-data для SQLite и логов
 .env.example             шаблон настроек
 CLAUDE.md                заметки по архитектуре для AI-ассистентов
@@ -351,7 +365,7 @@ CI (GitHub Actions): `vet` + `test -race` + `build` на каждый push/PR. D
 ```bash
 docker compose exec bot sh -c 'cat /data/bot.db' > bot-$(date +%F).db
 # или через sqlite3 backup (онлайн, без паузы):
-docker run --rm -v antispambot_bot-data:/data alpine:3.22 sh -c \
+docker run --rm -v antispambot_bot-data:/data alpine:3.23 sh -c \
   'apk add -q sqlite && sqlite3 /data/bot.db ".backup /data/bot.db.bak"'
 ```
 
