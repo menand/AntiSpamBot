@@ -103,6 +103,121 @@ func TestUserMessageTotal(t *testing.T) {
 	}
 }
 
+func TestUserMessageTotalsByChat(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	now := time.Now()
+	// 3 сообщения в чате -1, 2 в чате -2 — по-чатовые суммы, не общая.
+	for i := 0; i < 3; i++ {
+		_, _ = db.RecordMessage(ctx, -1, 42, now.Add(time.Duration(i)*time.Minute))
+	}
+	for i := 0; i < 2; i++ {
+		_, _ = db.RecordMessage(ctx, -2, 42, now.Add(time.Duration(i)*time.Minute))
+	}
+	_, _ = db.RecordMessage(ctx, -1, 43, now) // чужие сообщения не попадают
+
+	totals, err := db.UserMessageTotalsByChat(ctx, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(totals) != 2 || totals[-1] != 3 || totals[-2] != 2 {
+		t.Fatalf("want {-1:3 -2:2}, got %v", totals)
+	}
+	if totals, _ := db.UserMessageTotalsByChat(ctx, 999); len(totals) != 0 {
+		t.Fatalf("unknown user must have no rows, got %v", totals)
+	}
+}
+
+func TestListBallots(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	v := SpamVote{ChatID: -1, BotMsgID: 100, TargetMsgID: 99, AuthorID: 42, Prob: 95, CreatedAt: time.Now()}
+	_ = db.PutSpamVote(ctx, v)
+	_ = db.UpsertBallot(ctx, -1, 100, 7, true)
+	_ = db.UpsertBallot(ctx, -1, 100, 8, false)
+
+	ballots, err := db.ListBallots(ctx, -1, 100)
+	if err != nil || len(ballots) != 2 {
+		t.Fatalf("want 2 ballots, got %v err=%v", ballots, err)
+	}
+	byVoter := map[int64]bool{}
+	for _, bl := range ballots {
+		byVoter[bl.VoterID] = bl.IsSpam
+	}
+	if !byVoter[7] || byVoter[8] {
+		t.Fatalf("ballot values mismatch: %v", byVoter)
+	}
+
+	// После Take бюллетеней нет.
+	_, _ = db.TakeSpamVote(ctx, -1, 100)
+	ballots, _ = db.ListBallots(ctx, -1, 100)
+	if len(ballots) != 0 {
+		t.Fatalf("ballots must be gone after take, got %v", ballots)
+	}
+}
+
+func TestSpamBanned(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if banned, err := db.IsSpamBanned(ctx, 42); err != nil || banned {
+		t.Fatalf("fresh user must not be banned: %v %v", banned, err)
+	}
+	if err := db.AddSpamBanned(ctx, 42, -1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Повторный вердикт в другом чате — идемпотентно.
+	if err := db.AddSpamBanned(ctx, 42, -2, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if banned, err := db.IsSpamBanned(ctx, 42); err != nil || !banned {
+		t.Fatalf("user must be banned: %v %v", banned, err)
+	}
+
+	// Прощение: ручной разбан админом снимает флаг.
+	removed, err := db.DeleteSpamBanned(ctx, 42)
+	if err != nil || !removed {
+		t.Fatalf("delete must remove existing row: %v %v", removed, err)
+	}
+	if banned, _ := db.IsSpamBanned(ctx, 42); banned {
+		t.Fatal("user must be forgiven after delete")
+	}
+	if removed, _ := db.DeleteSpamBanned(ctx, 42); removed {
+		t.Fatal("second delete must be a no-op")
+	}
+}
+
+func TestSpamNotify(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if on, err := db.SpamNotifyEnabled(ctx, 1); err != nil || on {
+		t.Fatalf("default must be off: %v %v", on, err)
+	}
+	if owners, _ := db.SpamNotifyOwners(ctx); len(owners) != 0 {
+		t.Fatalf("no subscribers expected, got %v", owners)
+	}
+	if err := db.SetSpamNotify(ctx, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetSpamNotify(ctx, 2, false)
+	if on, _ := db.SpamNotifyEnabled(ctx, 1); !on {
+		t.Fatal("must be on after enable")
+	}
+	owners, err := db.SpamNotifyOwners(ctx)
+	if err != nil || len(owners) != 1 || owners[0] != 1 {
+		t.Fatalf("want [1], got %v err=%v", owners, err)
+	}
+	if err := db.SetSpamNotify(ctx, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := db.SpamNotifyEnabled(ctx, 1); on {
+		t.Fatal("must be off after disable")
+	}
+}
+
 func TestGreetingsLifecycle(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

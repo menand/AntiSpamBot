@@ -57,6 +57,21 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
+	// Ручной разбан админом (kicked → любой другой статус чужой рукой, но не
+	// нашей собственной — kick() бота делает ban+unban) снимает и глобальный
+	// флаг спамера, иначе ошибочный вердикт был бы неисправим: join-хук
+	// банил бы заново при каждом входе. ДО joined-ветки: kicked→member — это
+	// тоже join, и без прощения он тут же упёрся бы в IsSpamBanned.
+	if oldStatus == "kicked" && newStatus != "kicked" &&
+		upd.From.ID != user.ID && (b.me == nil || upd.From.ID != b.me.ID) {
+		if removed, err := b.db.DeleteSpamBanned(b.runCtx, user.ID); err != nil {
+			b.log.Warn("delete spam banned", "err", err, "user", user.ID)
+		} else if removed {
+			b.log.Info("spam ban forgiven — admin unbanned manually",
+				"chat", upd.Chat.ID, "user", user.ID, "by", upd.From.ID)
+		}
+	}
+
 	joined := (oldStatus == "left" || oldStatus == "kicked") &&
 		(newStatus == "member" || newStatus == "restricted")
 	if joined {
@@ -252,6 +267,35 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		Title:  chatTitle,
 		Type:   chatType,
 	})
+	// Известный спамер (вердикт «спам» в любом чате бота): мгновенный бан
+	// вместо капчи. BeginKickoff гасит дубль-доставку chat_member +
+	// new_chat_members; в горутине — banRevoke с ретраями не должен
+	// блокировать обработку апдейтов.
+	if banned, err := b.db.IsSpamBanned(b.runCtx, user.ID); err == nil && banned {
+		if !b.store.BeginKickoff(chatID, user.ID) {
+			return
+		}
+		go func() {
+			if err := b.banRevoke(b.runCtx, chatID, user.ID); err != nil {
+				// Бан не прошёл (обычно нет прав) — не оставляем спамера
+				// без присмотра: обычная капча, как до этой фичи.
+				b.log.Warn("ban known spammer on join", "err", err, "chat", chatID, "user", user.ID)
+				b.store.FinishKickoff(chatID, user.ID)
+				if b.startCaptcha(chatID, user, threadID) {
+					_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now())
+				}
+				return
+			}
+			b.log.Info("banned known spammer on join", "chat", chatID, "user", user.ID)
+			_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventSpamBan, time.Now())
+			// Замок держим ещё минуту: у капчи роль «маркера после kickoff»
+			// играет Pending в store, у бана ничего не остаётся — а дубль
+			// new_chat_members может прийти следующим poll'ом и задвоить
+			// событие spamban в статистике.
+			time.AfterFunc(time.Minute, func() { b.store.FinishKickoff(chatID, user.ID) })
+		}()
+		return
+	}
 	if !b.startCaptcha(chatID, user, threadID) {
 		// Duplicate delivery (chat_member + new_chat_members) — already counted.
 		return

@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"strconv"
@@ -62,6 +63,22 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		go b.runAICheck(sent.Chat.ID, sent.MessageID)
 		return nil
+	case "spamnotify":
+		// Глобальный (не пер-чатовый) тумблер владельца: слать ли ему в ЛС
+		// подозрения на спам и вердикты голосований.
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		on, err := b.db.SpamNotifyEnabled(ctx, query.From.ID)
+		if err != nil {
+			b.log.Warn("get spam notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		if err := b.db.SetSpamNotify(ctx, query.From.ID, !on); err != nil {
+			b.log.Warn("set spam notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 	case "logs":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -391,6 +408,14 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 			tu.InlineKeyboardButton("📄 Прислать лог").WithCallbackData("menu:logs"),
 			tu.InlineKeyboardButton("🔌 Проверить ИИ").WithCallbackData("menu:aicheck"),
 		})
+		notifyMark := "❌"
+		if on, err := b.db.SpamNotifyEnabled(b.runCtx, userID); err == nil && on {
+			notifyMark = "✅"
+		}
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton("🔔 Спам-уведомления в ЛС: " + notifyMark).
+				WithCallbackData("menu:spamnotify"),
+		})
 	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -705,12 +730,22 @@ func periodButton(chatID int64, want, current statsPeriod, label string) telego.
 		WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, want))
 }
 
-func (b *Bot) chatTitle(ctx *th.Context, chatID int64) string {
+// ctx — context.Context, а не *th.Context: хелпером пользуются и уведомления
+// антиспама на runCtx.
+func (b *Bot) chatTitle(ctx context.Context, chatID int64) string {
 	c, ok, err := b.db.GetChat(ctx, chatID)
-	if err == nil && ok && c.Title != "" {
-		return c.Title
+	if err == nil && ok {
+		return titleOrID(c)
 	}
 	return fmt.Sprintf("Chat %d", chatID)
+}
+
+// titleOrID — «Название» или «Chat <id>», когда названия в реестре нет.
+func titleOrID(c storage.ChatInfo) string {
+	if c.Title != "" {
+		return c.Title
+	}
+	return fmt.Sprintf("Chat %d", c.ChatID)
 }
 
 func (b *Bot) editWithMenu(ctx *th.Context, query telego.CallbackQuery, text string, kb *telego.InlineKeyboardMarkup) error {
