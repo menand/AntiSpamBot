@@ -175,9 +175,14 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	chatID := message.Chat.ID
 	user := *message.From
 
+	// Давность упоминаем только в первые сутки после входа: счётчики ведутся
+	// с момента установки бота, и «неизвестно» неотличимо от «старожил» —
+	// поэтому всё, что старше суток или без записи, для LLM просто не фактор.
 	memberFor := ""
 	if joinedAt, ok, err := b.db.MemberJoinedAt(b.runCtx, chatID, user.ID); err == nil && ok {
-		memberFor = humanDurationRU(time.Since(joinedAt))
+		if since := time.Since(joinedAt); since < 24*time.Hour {
+			memberFor = humanDurationRU(since)
+		}
 	}
 	facts := buildSpamFacts(message, memberFor, msgTotal)
 
