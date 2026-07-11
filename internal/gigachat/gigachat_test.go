@@ -201,6 +201,26 @@ func TestParseProbability(t *testing.T) {
 	}
 }
 
+func TestClampScale(t *testing.T) {
+	tests := []struct {
+		in   float64
+		want int
+	}{
+		{0, 0},
+		{0.95, 95}, // дробь 0..1 — шкала вероятности, переводим в проценты
+		{1, 1},     // ровно 1 — это 1%, НЕ 100% (осознанное решение, см. clampScale)
+		{1.5, 1},   // >1 не масштабируется, int() отбрасывает дробь
+		{61, 61},
+		{150, 100}, // клампы
+		{-5, 0},
+	}
+	for _, tc := range tests {
+		if got := clampScale(tc.in); got != tc.want {
+			t.Errorf("clampScale(%v) = %d, want %d", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestDisabledWithoutKey(t *testing.T) {
 	if New("", "", "", "p").Enabled() {
 		t.Fatal("empty auth key must mean disabled")

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -52,8 +53,13 @@ type Bot struct {
 	gigac        *gigachat.Client
 	spamMu       sync.Mutex
 	spamInflight map[chatUser]struct{}
-	adminMu      sync.Mutex
-	adminCache   map[chatUser]adminCacheEntry
+	// editChecked — время последней спам-проверки ПРАВКИ по (chat, user):
+	// правки не инкрементят счётчик сообщений, и без кулдауна новичок мог бы
+	// бесконечными правками одного сообщения жечь LLM-квоту. Unbounded по
+	// тому же соглашению, что userCache (запись ~40 байт на активного юзера).
+	editChecked map[chatUser]time.Time
+	adminMu     sync.Mutex
+	adminCache  map[chatUser]adminCacheEntry
 }
 
 // chatUser keys the per-(chat, user) maps above.
@@ -82,6 +88,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
 		gigac:        gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
 		spamInflight: make(map[chatUser]struct{}),
+		editChecked:  make(map[chatUser]time.Time),
 		adminCache:   make(map[chatUser]adminCacheEntry),
 	}, nil
 }
@@ -115,10 +122,10 @@ func (b *Bot) Run(ctx context.Context) error {
 		b.log.Error("restore pending captchas", "err", err)
 	}
 
-	go b.attemptsSweepLoop(ctx)
-	go b.dailyDigestLoop(ctx)
-	go b.reconcileChats(ctx)
-	go b.spamVoteSweepLoop(ctx)
+	b.goSafe("attemptsSweepLoop", func() { b.attemptsSweepLoop(ctx) })
+	b.goSafe("dailyDigestLoop", func() { b.dailyDigestLoop(ctx) })
+	b.goSafe("reconcileChats", func() { b.reconcileChats(ctx) })
+	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
 	var providers []string
 	if b.groqc.Enabled() {
 		providers = append(providers, "groq:"+b.groqc.Model())
@@ -144,7 +151,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}()
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		AllowedUpdates: []string{"message", "callback_query", "chat_member", "my_chat_member"},
+		AllowedUpdates: []string{"message", "edited_message", "callback_query", "chat_member", "my_chat_member"},
 	})
 	if err != nil {
 		return fmt.Errorf("long polling: %w", err)
@@ -159,6 +166,16 @@ func (b *Bot) Run(ctx context.Context) error {
 	if err := b.setCommands(ctx); err != nil {
 		b.log.Warn("set commands", "err", err)
 	}
+
+	// Паника в хендлере не должна ронять весь процесс (все чаты гаснут разом).
+	// Middleware покрывает только цепочки telego-хендлеров; собственные
+	// горутины прикрывает goSafe — recover не пересекает границу горутины.
+	// Обязательно ДО bh.Handle*: telego матчит маршруты в порядке регистрации.
+	bh.Use(th.PanicRecoveryHandler(func(recovered any) error {
+		b.log.Error("panic in handler",
+			"recovered", recovered, "stack", string(debug.Stack()))
+		return nil
+	}))
 
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
@@ -175,6 +192,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // greeting-text input flow
 	bh.HandleMessage(b.handleGroupMessage)                         // fallback: count messages in groups
+	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
 
 	return bh.Start()
 }
@@ -224,10 +242,25 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 			expires = now.Add(1 * time.Second)
 		}
 		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID)
-		go b.waitTimeout(p)
+		b.goSafe("waitTimeout", func() { b.waitTimeout(p) })
 	}
 	b.log.Info("restored pending captchas", "count", len(rows))
 	return len(rows), nil
+}
+
+// goSafe запускает fn в горутине с recover: паника логируется, процесс живёт.
+// Трейд-офф: упавший фоновый луп тихо умирает до рестарта (виден только
+// log.Error) — это лучше, чем ронять бота во всех чатах разом.
+func (b *Bot) goSafe(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.log.Error("panic in goroutine", "name", name,
+					"recovered", r, "stack", string(debug.Stack()))
+			}
+		}()
+		fn()
+	}()
 }
 
 func (b *Bot) isOwner(userID int64) bool {

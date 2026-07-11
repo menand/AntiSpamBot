@@ -90,7 +90,9 @@ func mentionWithUsername(infos map[int64]storage.UserInfo, userID int64) string 
 	info, ok := infos[userID]
 	if ok && info.Username != "" &&
 		strings.TrimSpace(info.FirstName+" "+info.LastName) != "" {
-		m += " - @" + info.Username
+		// Экранирование — hardening: сегодня username это [A-Za-z0-9_], но это
+		// единственное пользовательское значение в ModeHTML без escape.
+		m += " - @" + html.EscapeString(info.Username)
 	}
 	return m
 }

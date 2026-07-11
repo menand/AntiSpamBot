@@ -61,7 +61,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("send ai check placeholder", "err", err)
 			return nil
 		}
-		go b.runAICheck(sent.Chat.ID, sent.MessageID)
+		b.goSafe("runAICheck", func() { b.runAICheck(sent.Chat.ID, sent.MessageID) })
 		return nil
 	case "spamnotify":
 		// Глобальный (не пер-чатовый) тумблер владельца: слать ли ему в ЛС
