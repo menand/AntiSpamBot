@@ -113,10 +113,14 @@ func (d *DB) RememberUser(ctx context.Context, info UserInfo) error {
 // UserIDByUsername ищет user_id по @username в кэше user_info (без «@»,
 // регистронезависимо). Bot API не умеет резолвить юзерские @username, но все
 // писавшие/прошедшие капчу у нас закэшированы. (0, false, nil) — не найден.
+// ORDER BY updated_at DESC: @username может со временем перейти к другому
+// аккаунту — берём того, кто ПОСЛЕДНИМ засветился под этим ником, иначе
+// /ban @foo мог бы попасть в старого владельца вместо актуального.
 func (d *DB) UserIDByUsername(ctx context.Context, username string) (int64, bool, error) {
 	var id int64
 	err := d.sql.QueryRowContext(ctx,
-		`SELECT user_id FROM user_info WHERE username = ? COLLATE NOCASE`,
+		`SELECT user_id FROM user_info WHERE username = ? COLLATE NOCASE
+		 ORDER BY updated_at DESC LIMIT 1`,
 		username).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil

@@ -31,31 +31,9 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 	if !s.SpamCheckEnabled {
 		return
 	}
-	// Гейты от дешёвого к дорогому — зеркало maybeSpamCheck: белый список
-	// (перезашедший старожил не проверяется), затем API-зависимые.
-	wl := effectiveSpamWhitelist(s)
-	total, err := b.db.UserMessageTotal(b.runCtx, chatID, userID)
-	if err != nil {
-		b.log.Warn("profile check: message total", "err", err, "chat", chatID, "user", userID)
-		return
-	}
-	if total > wl {
-		return
-	}
-	totals, err := b.db.UserMessageTotalsByChat(b.runCtx, userID)
-	if err != nil {
-		b.log.Warn("profile check: totals by chat", "err", err, "user", userID)
-		return
-	}
-	for cid, n := range totals {
-		if n > wl && b.chatAllowed(cid) {
-			return
-		}
-	}
-	if b.isOwner(userID) || b.isChatAdminCached(b.runCtx, chatID, userID) {
-		return
-	}
-	if pending, err := b.db.HasPendingVoteForAuthor(b.runCtx, chatID, userID); err != nil || pending {
+	// Те же гейты доверия, что у спам-чека сообщений (перезашедший старожил
+	// не проверяется) — общий предикат, чтобы модели не разъехались.
+	if _, skip := b.spamGatesPass(chatID, userID, s); skip {
 		return
 	}
 	// Общий inflight-ключ со спам-чеком сообщений: один вопрос «банить ли X»

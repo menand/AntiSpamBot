@@ -3,8 +3,11 @@ package bot
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mymmrac/telego"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -103,9 +106,18 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64) {
 	b.goSafe("waitReplyTimeout", func() { b.waitReplyTimeout(p) })
 }
 
+// messageHasUserContent — сообщение несёт реальный ввод юзера (текст, подпись
+// или вложение), а не сервисное событие (добавление участника, смена
+// названия...). Ответом на приветствие считается только контент.
+func messageHasUserContent(m *telego.Message) bool {
+	return strings.TrimSpace(m.Text) != "" ||
+		strings.TrimSpace(m.Caption) != "" ||
+		attachmentKindRU(*m) != ""
+}
+
 // replyWaitSatisfied снимает ожидание, когда юзер написал сообщение.
-// Вызывается из handleGroupMessage на КАЖДОЕ сообщение — быстрый in-memory
-// промах для всех, у кого ожидания нет.
+// Вызывается из middleware (bot.go) на каждое групповое сообщение с контентом,
+// ДО маршрутизации — быстрый in-memory промах для всех, у кого ожидания нет.
 func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 	p, ok := b.replies.Take(chatID, userID)
 	if !ok {
