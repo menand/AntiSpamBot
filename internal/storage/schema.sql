@@ -158,8 +158,8 @@ CREATE TABLE IF NOT EXISTS spam_banned (
 
 -- Ожидания «ответь на приветствие» (режим reply_check): после капчи юзер
 -- обязан написать что-нибудь до expires_at, иначе кик. Переживают рестарт
--- по образцу pending_captchas; greeting_msg_id — приветствие-якорь, сносится
--- при кике за молчание.
+-- по образцу pending_captchas. Приветствие-якорь сносится при кике за
+-- молчание по id из таблицы greetings (TakeGreetingMsg).
 CREATE TABLE IF NOT EXISTS pending_replies (
     chat_id         INTEGER NOT NULL,
     user_id         INTEGER NOT NULL,
