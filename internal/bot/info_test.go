@@ -10,7 +10,7 @@ func TestFormatUptimeRU(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{0, "1 секунда"}, // clamp to >=1s
+		{0, "1 секунда"}, // клампится к >=1s
 		{500 * time.Millisecond, "1 секунда"},
 		{1 * time.Second, "1 секунда"},
 		{2 * time.Second, "2 секунды"},

@@ -6,12 +6,12 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// rememberChat upserts the chat registry row, skipping the DB write when the
-// cached value is identical. Called on every group message, so without the
-// cache this is one extra SQLite write per message. The cache is updated only
-// after a successful write so a failed upsert retries on the next message.
-// Unbounded by design: entries are ~100 bytes and the key space is the set of
-// chats the bot lives in.
+// rememberChat апсертит строку реестра чатов, пропуская запись в БД, когда
+// закэшированное значение не изменилось. Вызывается на каждом групповом
+// сообщении — без кэша это была бы лишняя SQLite-запись на каждое. Кэш
+// обновляется только после успешной записи, чтобы неудачный upsert
+// повторился на следующем сообщении. Неограниченный размер — осознанно:
+// запись ~100 байт, а пространство ключей — множество чатов бота.
 func (b *Bot) rememberChat(ctx context.Context, info storage.ChatInfo) {
 	b.cacheMu.Lock()
 	cached, ok := b.chatCache[info.ChatID]
@@ -28,9 +28,9 @@ func (b *Bot) rememberChat(ctx context.Context, info storage.ChatInfo) {
 	b.cacheMu.Unlock()
 }
 
-// rememberUser is the same write-through pattern for user display names.
-// Memory grows with the number of distinct active users seen during the
-// process lifetime — acceptable for group-bot scale.
+// rememberUser — тот же write-through-паттерн для display-имён юзеров.
+// Память растёт с числом уникальных активных юзеров за время жизни
+// процесса — для масштаба группового бота приемлемо.
 func (b *Bot) rememberUser(ctx context.Context, info storage.UserInfo) {
 	b.cacheMu.Lock()
 	cached, ok := b.userCache[info.UserID]

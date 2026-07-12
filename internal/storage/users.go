@@ -17,14 +17,15 @@ type UserInfo struct {
 }
 
 type MessageRecord struct {
-	Silence         time.Duration // time since last_message_at or members.joined_at
-	HasBaseline     bool          // false = no reliable baseline to compute silence from
-	WasFirstMessage bool          // true if this is user's first message in this chat
+	Silence         time.Duration // время с last_message_at или members.joined_at
+	HasBaseline     bool          // false = нет надёжного baseline для вычисления тишины
+	WasFirstMessage bool          // true, если это первое сообщение юзера в этом чате
 }
 
-// RecordMessage upserts user_activity + user_message_counts inside a transaction
-// and returns silence information relative to the last message (or join time if
-// the user never wrote before). If neither baseline exists, HasBaseline is false.
+// RecordMessage делает upsert в user_activity + user_message_counts внутри
+// одной транзакции и возвращает данные о тишине относительно последнего
+// сообщения (или времени входа, если юзер раньше не писал). Если нет ни того
+// ни другого baseline, HasBaseline = false.
 func (d *DB) RecordMessage(ctx context.Context, chatID, userID int64, at time.Time) (MessageRecord, error) {
 	var mr MessageRecord
 	atUnix := at.Unix()
@@ -44,6 +45,7 @@ func (d *DB) RecordMessage(ctx context.Context, chatID, userID int64, at time.Ti
 	}
 
 	var joinedAt sql.NullInt64
+	// Best-effort: нет строки members — нет baseline тишины, это штатно; ошибка чтения даёт то же поведение.
 	_ = tx.QueryRowContext(ctx,
 		`SELECT joined_at FROM members WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID).Scan(&joinedAt)
@@ -86,8 +88,8 @@ func (d *DB) RecordMessage(ctx context.Context, chatID, userID int64, at time.Ti
 	return mr, nil
 }
 
-// RememberUser upserts display-name info for a user. Idempotent; safe to call
-// on every message.
+// RememberUser делает upsert отображаемого имени юзера. Идемпотентен;
+// безопасно вызывать на каждом сообщении.
 func (d *DB) RememberUser(ctx context.Context, info UserInfo) error {
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO user_info (user_id, first_name, last_name, username, updated_at)
@@ -108,8 +110,8 @@ func (d *DB) RememberUser(ctx context.Context, info UserInfo) error {
 	return nil
 }
 
-// GetUserInfos looks up cached display info for many users at once. Missing
-// users are absent from the result map.
+// GetUserInfos достаёт закэшированные отображаемые данные сразу многих
+// юзеров. Юзеры без записи в результирующей map отсутствуют.
 func (d *DB) GetUserInfos(ctx context.Context, userIDs []int64) (map[int64]UserInfo, error) {
 	result := make(map[int64]UserInfo, len(userIDs))
 	if len(userIDs) == 0 {
@@ -151,7 +153,8 @@ type UserCount struct {
 	Secs int
 }
 
-// TopFailers returns users with the most kick+ban events in [from, until), sorted desc.
+// TopFailers возвращает юзеров с наибольшим числом событий kick+ban в
+// [from, until), по убыванию.
 func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, COUNT(*) AS n FROM events
@@ -167,12 +170,12 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 	return scanUserCounts(rows)
 }
 
-// PassedUsers returns everyone who passed the captcha in [from, until), in
-// the order the first pass happened, with the captcha solve time in seconds
-// (best of the period when the user passed more than once). The join lookup
-// deliberately has no lower time bound — the join may precede the period
-// (joined at 23:59, passed at 00:00). Secs is -1 when no join was recorded
-// (old data). No limit — renderStats cuts the list.
+// PassedUsers возвращает всех, кто прошёл капчу в [from, until), в порядке
+// первого прохождения, со временем решения капчи в секундах (лучшее за
+// период, если юзер проходил не один раз). Поиск join намеренно без нижней
+// границы по времени — вход мог случиться до начала периода (вошёл в 23:59,
+// прошёл в 00:00). Secs = -1, когда join не записан (старые данные).
+// Без лимита — список обрезает renderStats.
 func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Time) ([]UserCount, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, COUNT(*) AS n, COALESCE(MIN(dur), -1) AS secs
@@ -202,9 +205,9 @@ func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Tim
 	return out, rows.Err()
 }
 
-// EventUsers returns everyone with at least one event of the given kinds in
-// [from, until), in the order the first event happened. No limit — the caller
-// (renderStats) cuts the list to fit Telegram's message length.
+// EventUsers возвращает всех, у кого есть хотя бы одно событие указанных
+// видов в [from, until), в порядке первого события. Без лимита — вызывающий
+// (renderStats) обрезает список под допустимую длину сообщения Telegram.
 func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time, kinds ...EventKind) ([]UserCount, error) {
 	if len(kinds) == 0 {
 		return nil, nil
@@ -229,8 +232,9 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 	return scanUserCounts(rows)
 }
 
-// TopWriters returns users with the most messages in [from, until) (by day,
-// exclusive upper bound — same semantics as QueryStats), sorted desc.
+// TopWriters возвращает юзеров с наибольшим числом сообщений в [from, until)
+// (по дням, верхняя граница исключается — семантика та же, что у QueryStats),
+// по убыванию.
 func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
 	fromDay := from.UTC().Format("2006-01-02")
 	untilDay := until.UTC().Format("2006-01-02")

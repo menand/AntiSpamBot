@@ -15,16 +15,16 @@ import (
 	"golang.org/x/image/math/f64"
 )
 
-// Vendored Noto Emoji glyphs (see assets/NOTICE.md). Embedded so the binary
-// stays self-contained and CGO-free — color emoji cannot be rasterized from
-// fonts in pure Go (COLR/CBDT tables are unsupported).
+// Вендоренные глифы Noto Emoji (см. assets/NOTICE.md). Вшиты через go:embed,
+// чтобы бинарь оставался самодостаточным и CGO-free — цветные emoji нельзя
+// растеризовать из шрифтов на чистом Go (таблицы COLR/CBDT не поддерживаются).
 //
 //go:embed assets/*.png
 var glyphFS embed.FS
 
-// glyphFile maps an emoji to its Noto asset name: codepoints in lowercase
-// hex joined by '_', variation selectors (U+FE0F) dropped — Noto's own
-// file-naming scheme.
+// glyphFile отображает emoji в имя его Noto-ассета: кодпоинты в нижнем
+// регистре hex, соединённые '_', variation selectors (U+FE0F) отброшены —
+// родная схема именования файлов Noto.
 func glyphFile(emoji string) string {
 	var parts []string
 	for _, r := range emoji {
@@ -36,8 +36,7 @@ func glyphFile(emoji string) string {
 	return "emoji_u" + strings.Join(parts, "_") + ".png"
 }
 
-// loadGlyph reads and decodes the Noto PNG for the given emoji from the
-// embedded FS.
+// loadGlyph читает и декодирует Noto-PNG заданного emoji из встроенной FS.
 func loadGlyph(emoji string) (image.Image, error) {
 	data, err := glyphFS.ReadFile("assets/" + glyphFile(emoji))
 	if err != nil {
@@ -50,17 +49,17 @@ func loadGlyph(emoji string) (image.Image, error) {
 	return img, nil
 }
 
-// Canvas size. Big enough that the glyph survives Telegram's photo
-// re-compression, small enough to render in microseconds.
+// Размер холста. Достаточно большой, чтобы глиф пережил пережатие фото в
+// Telegram, и достаточно маленький, чтобы рендер занимал микросекунды.
 const (
 	imgW = 384
 	imgH = 256
 )
 
-// RenderImage draws tok's glyph, mildly distorted, on a noisy light
-// background and returns the PNG bytes. Distortions are deliberately mild:
-// the goal is to keep the answer out of the text channel (kills text-parsing
-// bots), not to resist vision models — harsher noise hurts humans first.
+// RenderImage рисует мягко искажённый глиф tok на шумном светлом фоне и
+// возвращает байты PNG. Искажения намеренно мягкие: цель — убрать ответ из
+// текстового канала (это убивает ботов, парсящих текст), а не сопротивляться
+// vision-моделям — жёсткий шум в первую очередь бьёт по людям.
 func RenderImage(tok Token) ([]byte, error) {
 	return renderImage(tok, rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())))
 }
@@ -85,8 +84,9 @@ func renderImage(tok Token, rng *rand.Rand) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// drawBackground fills the canvas with a light vertical gradient plus a few
-// translucent light blobs. Light tones only — the glyph must stay readable.
+// drawBackground заливает холст светлым вертикальным градиентом с несколькими
+// полупрозрачными светлыми пятнами. Только светлые тона — глиф должен
+// оставаться читаемым.
 func drawBackground(img *image.RGBA, rng *rand.Rand) {
 	light := func() float64 { return float64(215 + rng.IntN(31)) } // 215..245
 	tr, tg, tb := light(), light(), light()
@@ -111,15 +111,16 @@ func drawBackground(img *image.RGBA, rng *rand.Rand) {
 	}
 }
 
-// drawGlyph paints the glyph with random scale (0.8–1.2), rotation (±25°)
-// and position, via a CatmullRom-filtered affine transform.
+// drawGlyph наносит глиф со случайными масштабом (0.8–1.2), поворотом (±25°)
+// и позицией через аффинное преобразование с фильтром CatmullRom.
 func drawGlyph(canvas *image.RGBA, glyph image.Image, rng *rand.Rand) {
 	src := glyph.Bounds()
 	scale := 0.8 + rng.Float64()*0.4
 	angle := (rng.Float64()*50 - 25) * math.Pi / 180
 
-	// Rotation grows the bounding box; budget 1.35× and place the glyph
-	// CENTER so the rotated bbox keeps `margin` clearance on every side.
+	// Поворот раздувает ограничивающий бокс; закладываем бюджет 1.35× и
+	// ставим ЦЕНТР глифа так, чтобы у повёрнутого bbox оставался зазор
+	// `margin` с каждой стороны.
 	eff := float64(src.Dx()) * scale * 1.35
 	const margin = 12.0
 	half := eff / 2
@@ -137,8 +138,8 @@ func drawGlyph(canvas *image.RGBA, glyph image.Image, rng *rand.Rand) {
 	xdraw.CatmullRom.Transform(canvas, m, glyph, src, xdraw.Over, nil)
 }
 
-// applyWave shifts each row horizontally along a sine — cheap geometric
-// distortion that breaks naive template matching.
+// applyWave сдвигает каждую строку по горизонтали вдоль синусоиды — дешёвое
+// геометрическое искажение, ломающее наивный template matching.
 func applyWave(img *image.RGBA, rng *rand.Rand) *image.RGBA {
 	amp := 3 + rng.Float64()*3      // 3..6 px
 	period := 40 + rng.Float64()*40 // 40..80 px
@@ -159,14 +160,14 @@ func applyWave(img *image.RGBA, rng *rand.Rand) *image.RGBA {
 	return out
 }
 
-// drawLines crosses the image with 2–4 translucent dark strokes.
+// drawLines перечёркивает картинку 2–4 полупрозрачными тёмными штрихами.
 func drawLines(img *image.RGBA, rng *rand.Rand) {
 	for i := 0; i < 2+rng.IntN(3); i++ {
 		x1, y1 := rng.Float64()*imgW, rng.Float64()*imgH
 		x2, y2 := rng.Float64()*imgW, rng.Float64()*imgH
 		shade := uint8(60 + rng.IntN(80))
 		c := color.NRGBA{R: shade, G: shade, B: shade, A: 140}
-		radius := 1 + rng.IntN(2) // stroke thickness 2..4 px
+		radius := 1 + rng.IntN(2) // толщина штриха 2..4 px
 		steps := int(math.Hypot(x2-x1, y2-y1)) + 1
 		for s := 0; s <= steps; s++ {
 			t := float64(s) / float64(steps)
@@ -175,7 +176,7 @@ func drawLines(img *image.RGBA, rng *rand.Rand) {
 	}
 }
 
-// addNoise flips ~2% of pixels to random grays.
+// addNoise перекрашивает ~2% пикселей в случайные оттенки серого.
 func addNoise(img *image.RGBA, rng *rand.Rand) {
 	for i := 0; i < imgW*imgH/50; i++ {
 		x, y := rng.IntN(imgW), rng.IntN(imgH)
@@ -184,7 +185,7 @@ func addNoise(img *image.RGBA, rng *rand.Rand) {
 	}
 }
 
-// fillCircle alpha-blends a filled disc onto the (opaque) canvas.
+// fillCircle накладывает залитый диск на (непрозрачный) холст альфа-блендингом.
 func fillCircle(img *image.RGBA, cx, cy, r int, c color.NRGBA) {
 	a := float64(c.A) / 255
 	for dy := -r; dy <= r; dy++ {

@@ -19,8 +19,8 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// telegramServiceUserID is the "Telegram" pseudo-user (not marked as a bot)
-// that authors linked-channel auto-forwards and other service posts.
+// telegramServiceUserID — псевдо-юзер «Telegram» (не помечен как бот),
+// авторствующий автофорварды привязанного канала и прочие сервисные посты.
 const telegramServiceUserID = 777000
 
 func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
@@ -75,16 +75,16 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	joined := (oldStatus == "left" || oldStatus == "kicked") &&
 		(newStatus == "member" || newStatus == "restricted")
 	if joined {
-		// chat_member updates carry no topic info; captcha goes to General (0).
+		// chat_member-апдейты не несут информации о топике; капча уйдёт в General (0).
 		b.onUserJoined(upd.Chat.ID, upd.Chat.Title, upd.Chat.Type, user, 0)
 		return nil
 	}
 
-	// User left (or was removed by an admin) while their captcha was still
-	// active: cancel it quietly. They didn't fail the check — recording a
-	// kick event here would skew the failure stats, and our own post-fail
-	// kick is not affected (onFail always Takes the pending before kicking,
-	// so this lookup misses for those).
+	// Юзер вышел (или его убрал админ), пока капча была активна: тихо
+	// отменяем её. Проверку он не провалил — событие kick здесь исказило бы
+	// статистику провалов, а наш собственный кик после провала не задет
+	// (вызывающие onFail всегда забирают pending через Take ДО кика, так что
+	// для них этот lookup промахнётся).
 	if newStatus == "left" || newStatus == "kicked" {
 		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
 			p.Cancel()
@@ -100,12 +100,12 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	return nil
 }
 
-// handleMyChatMember tracks the bot's own membership across chats. On leave
-// (voluntary or kicked) the chat is dropped from the registry and its pending
-// captchas are cancelled — their timeouts would otherwise fire kick/ban calls
-// in a chat the bot no longer belongs to. Historical stats stay for archival.
-// On join/promotion it registers the chat and tells admins which rights are
-// missing, instead of failing silently later.
+// handleMyChatMember отслеживает собственное членство бота в чатах. При
+// уходе (добровольном или кике) чат выбрасывается из реестра, а его активные
+// капчи отменяются — иначе их таймауты стреляли бы kick/ban-вызовами в чате,
+// где бота уже нет. Историческая статистика остаётся как архив. При
+// добавлении/повышении — регистрирует чат и говорит админам, каких прав не
+// хватает, вместо молчаливых отказов потом.
 func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 	upd := update.MyChatMember
 	if upd == nil {
@@ -140,10 +140,11 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 	return nil
 }
 
-// dropChat removes a chat from the DM-menu registry and cancels its pending
-// captchas. Historical stats stay for archival. Evicting the write-through
-// cache is essential: otherwise a later rememberChat with an unchanged title
-// skips the DB write and the chat never reappears in the registry.
+// dropChat убирает чат из реестра DM-меню и отменяет его активные капчи.
+// Историческая статистика остаётся как архив. Выселить чат из
+// write-through-кэша обязательно: иначе позднейший rememberChat с
+// неизменившимся названием пропустит запись в БД и чат никогда не вернётся
+// в реестр.
 func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	b.log.Info("dropping chat from registry", "chat", chatID, "reason", why)
 	for _, p := range b.store.TakeChat(chatID) {
@@ -160,11 +161,11 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	b.cacheMu.Unlock()
 }
 
-// reconcileChats sweeps the chat registry once at startup and drops rows for
-// chats the bot is not actually in. Rows outlive membership when BOT_TOKEN is
-// switched to a different bot (the old bot's chats stay in the shared DB) or
-// when the bot was kicked while offline — my_chat_member never fires for
-// either, so the DM menu keeps showing dead chats forever.
+// reconcileChats один раз на старте прочёсывает реестр чатов и выбрасывает
+// строки чатов, где бота на самом деле нет. Строки переживают членство,
+// когда BOT_TOKEN переключили на другого бота (чаты старого остаются в общей
+// БД) или когда бота кикнули, пока он лежал — my_chat_member в обоих случаях
+// не приходит, и DM-меню вечно показывало бы мёртвые чаты.
 func (b *Bot) reconcileChats(ctx context.Context) {
 	chats, err := b.db.ListChats(ctx)
 	if err != nil {
@@ -183,16 +184,18 @@ func (b *Bot) reconcileChats(ctx context.Context) {
 		if reason, stale := staleChatReason(m, err); stale {
 			b.dropChat(ctx, c.ChatID, reason)
 		} else if err != nil {
-			// Transient (network, 429, 5xx): keep the row, next restart retries.
+			// Транзиентное (сеть, 429, 5xx): строку оставляем, следующий
+			// рестарт попробует снова.
 			b.log.Warn("reconcile chats: check membership", "err", err, "chat", c.ChatID)
 		}
 	}
 }
 
-// staleChatReason decides whether a getChatMember(self) result proves the bot
-// is not in the chat. Telegram answers 400 "chat not found" for chats this
-// bot has never seen and 403 "bot was kicked"/"not a member" for lost
-// membership — both definitive. Anything else must NOT drop the row.
+// staleChatReason решает, доказывает ли результат getChatMember(self), что
+// бота в чате нет. Telegram отвечает 400 «chat not found» на чаты, которых
+// этот бот никогда не видел, и 403 «bot was kicked»/«not a member» на
+// потерянное членство — оба ответа окончательны. Всё остальное строку
+// выбрасывать НЕ должно.
 func staleChatReason(m telego.ChatMember, err error) (string, bool) {
 	if err != nil {
 		var apiErr *telegoapi.Error
@@ -207,9 +210,9 @@ func staleChatReason(m telego.ChatMember, err error) (string, bool) {
 	return "", false
 }
 
-// checkAdminRights posts a setup hint into the chat when the bot was added
-// without the rights it needs (restrict + delete), and a confirmation once
-// the missing rights get granted. Quiet when nothing is wrong from the start.
+// checkAdminRights постит в чат подсказку по настройке, когда бота добавили
+// без нужных прав (restrict + delete), и подтверждение, когда недостающие
+// права выдали. Молчит, если с самого начала всё в порядке.
 func (b *Bot) checkAdminRights(upd *telego.ChatMemberUpdated) {
 	missing := missingRights(upd.NewChatMember)
 	if len(missing) > 0 {
@@ -221,8 +224,8 @@ func (b *Bot) checkAdminRights(upd *telego.ChatMemberUpdated) {
 		}
 		return
 	}
-	// Confirm only as a transition out of a broken state — not on every
-	// unrelated promotion/permission change.
+	// Подтверждаем только переход ИЗ сломанного состояния — не на каждое
+	// постороннее повышение/изменение прав.
 	if len(missingRights(upd.OldChatMember)) > 0 {
 		if _, err := b.api.SendMessage(b.runCtx,
 			tu.Message(tu.ID(upd.Chat.ID), "✅ Все нужные права на месте — я работаю.")); err != nil {
@@ -231,9 +234,9 @@ func (b *Bot) checkAdminRights(upd *telego.ChatMemberUpdated) {
 	}
 }
 
-// missingRights lists human-readable admin rights the bot lacks for the
-// captcha flow. A plain member lacks everything; an administrator may still
-// miss individual toggles.
+// missingRights перечисляет человекочитаемые админ-права, которых боту не
+// хватает для капчи. Обычному участнику не хватает всего; администратору
+// могут не выдать отдельные тумблеры.
 func missingRights(m telego.ChatMember) []string {
 	switch v := m.(type) {
 	case *telego.ChatMemberAdministrator:
@@ -250,17 +253,17 @@ func missingRights(m telego.ChatMember) []string {
 	case *telego.ChatMemberMember:
 		return []string{"права администратора («Блокировка пользователей», «Удаление сообщений»)"}
 	default:
-		// restricted/left/banned states are handled elsewhere.
+		// Состояния restricted/left/banned обрабатываются в других местах.
 		return nil
 	}
 }
 
-// onUserJoined is the common kickoff for both chat_member events and
-// message.new_chat_members service messages. Safe to call multiple times
-// for the same user — startCaptcha dedups via the in-memory store, and the
-// join event is recorded only by the call that actually starts the captcha,
-// so a join delivered through both update types counts once in stats.
-// threadID is the forum topic the join was seen in (0 = none/General).
+// onUserJoined — общий kickoff для chat_member-событий и сервис-сообщений
+// message.new_chat_members. Безопасен при повторных вызовах для одного
+// юзера: startCaptcha дедупит через in-memory store, а событие join пишет
+// только тот вызов, который реально запустил капчу, — вход, доставленный
+// обоими типами апдейтов, попадает в статистику один раз. threadID — топик
+// форума, где замечен вход (0 = нет/General).
 func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User, threadID int) {
 	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID: chatID,
@@ -311,7 +314,7 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		return
 	}
 	if !b.startCaptcha(chatID, user, threadID) {
-		// Duplicate delivery (chat_member + new_chat_members) — already counted.
+		// Дубль-доставка (chat_member + new_chat_members) — уже посчитано.
 		return
 	}
 	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now()); err != nil {
@@ -362,9 +365,10 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 	return nil
 }
 
-// handleApproveCallback handles the "✅ Впустить" button on the captcha
-// keyboard (callback data "capok:<userID>"). Chat admins and bot owners can
-// approve a struggling human manually — same effect as a correct answer.
+// handleApproveCallback обрабатывает кнопку «✅ Впустить» на клавиатуре капчи
+// (callback data "capok:<userID>"). Админ чата или владелец бота может
+// впустить застрявшего человека вручную — эффект тот же, что у правильного
+// ответа.
 func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery) error {
 	if query.Message == nil {
 		return nil
@@ -427,10 +431,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
-	// Service message: basic group upgraded to supergroup. Telegram emits
-	// MigrateToChatID in the old group and MigrateFromChatID in the new one;
-	// we handle both as insurance. MigrateChat is idempotent, so a double
-	// fire is harmless.
+	// Сервис-сообщение: basic-группа апгрейднулась до супергруппы. Telegram
+	// шлёт MigrateToChatID в старую группу и MigrateFromChatID в новую;
+	// обрабатываем оба для подстраховки. MigrateChat идемпотентен — двойное
+	// срабатывание безвредно.
 	if message.MigrateToChatID != 0 {
 		oldID := message.Chat.ID
 		newID := message.MigrateToChatID
@@ -460,13 +464,14 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
-	// Service message: new members joined. This is a fallback for cases where
-	// Telegram doesn't emit a chat_member update (some group types, some
-	// rejoin scenarios). startCaptcha dedups via the in-memory store, so even
-	// if chat_member also fires for the same user, only one captcha is shown.
+	// Сервис-сообщение: вошли новые участники. Это фолбэк для случаев, когда
+	// Telegram не шлёт chat_member-апдейт (некоторые типы групп, некоторые
+	// сценарии повторного входа). startCaptcha дедупит через in-memory store,
+	// так что даже если chat_member тоже придёт для того же юзера, капча
+	// будет одна.
 	if len(message.NewChatMembers) > 0 {
-		// In forum supergroups the join service message lands in a topic;
-		// send the captcha to the same one so the user actually sees it.
+		// В форум-супергруппах сервис-сообщение о входе падает в топик; шлём
+		// капчу туда же, чтобы юзер её реально увидел.
 		threadID := 0
 		if message.IsTopicMessage {
 			threadID = message.MessageThreadID
@@ -484,8 +489,8 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 				"chat", message.Chat.ID, "user", nm.ID)
 			b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm, threadID)
 		}
-		// Remove Telegram's "X joined the chat" service message — clutters
-		// the chat and we're already showing the captcha.
+		// Сносим телеграмное «X вошёл в чат» — засоряет чат, а капчу мы уже
+		// показываем.
 		if hadHuman {
 			if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 				b.log.Warn("delete join service message",
@@ -495,8 +500,8 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 
-	// Service message: member left or was kicked. Delete it (same rationale
-	// as new_chat_members — "bot kicked X" / "X left the chat" spam).
+	// Сервис-сообщение: участник вышел или был кикнут. Удаляем (по той же
+	// причине, что и new_chat_members — спам «бот исключил X» / «X вышел»).
 	if message.LeftChatMember != nil {
 		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 			b.log.Warn("delete leave service message",
@@ -508,22 +513,22 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	if message.From == nil || message.From.IsBot {
 		return nil
 	}
-	// Auto-forwarded posts from a linked channel arrive from the service user
-	// 777000 ("Telegram", is_bot=false) — without this filter a rarely-posting
-	// channel earns "silent returner" announcements and pollutes top-writer
-	// stats.
+	// Автофорварды из привязанного канала приходят от сервис-юзера 777000
+	// («Telegram», is_bot=false) — без этого фильтра редко постящий канал
+	// зарабатывал бы анонсы «молчаливого возвращенца» и засорял топ
+	// писателей.
 	if message.From.ID == telegramServiceUserID || message.IsAutomaticForward {
 		return nil
 	}
-	// Skip other service messages (title changes, pins, etc.)
+	// Пропускаем прочие сервис-сообщения (смена названия, пины и т.п.).
 	if message.NewChatTitle != "" || message.NewChatPhoto != nil ||
 		message.PinnedMessage != nil {
 		return nil
 	}
 
-	// User is in the pre-captcha delay window (or still has an active captcha
-	// that somehow slipped past restriction): delete whatever they wrote.
-	// Don't proceed to stats/silence detection for these messages.
+	// Юзер в окне задержки перед капчей (или у него активная капча, а
+	// сообщение как-то проскочило мимо рестрикта): удаляем всё, что он
+	// написал. К статистике/детектору тишины эти сообщения не идут.
 	if b.store.IsCaptchaActive(message.Chat.ID, message.From.ID) {
 		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 			b.log.Warn("delete pre-captcha message",
@@ -630,8 +635,8 @@ func (b *Bot) maybeAnnounceReturn(ctx *th.Context, message telego.Message, user 
 	if rec.Silence < threshold {
 		return
 	}
-	// Per-chat toggle; checked after the threshold so the settings query only
-	// runs on the rare announce-worthy message, not on every message.
+	// Пер-чатовый тумблер; проверяется ПОСЛЕ порога, чтобы запрос настроек
+	// шёл только на редких анонсо-достойных сообщениях, а не на каждом.
 	if !b.chatSettings(b.runCtx, message.Chat.ID).SilentAnnounceEnabled {
 		return
 	}
@@ -671,29 +676,28 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 		return false
 	}
 	if !ok {
-		// Pre-existing member before the bot was added.
+		// Участник, состоявший в чате ещё до добавления бота.
 		return false
 	}
 	window := time.Duration(b.cfg.NewcomerDays) * 24 * time.Hour
 	return when.Sub(joinedAt) < window
 }
 
-// startCaptcha reports whether this call won the kickoff and actually started
-// a captcha flow; false means one is already active or being set up for this
-// user (duplicate join delivery) and the call was a no-op.
+// startCaptcha отвечает, выиграл ли этот вызов kickoff и реально ли запустил
+// капчу; false — капча для юзера уже активна или уже запускается (дубль
+// доставки входа), и вызов был no-op.
 func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
-	// Race guard: chat_member events and message.new_chat_members can both
-	// fire for the same join. Without a kickoff lock they race through the
-	// pre-Put phase (restrict + send) and produce two captcha messages.
+	// Страховка от гонки: chat_member и message.new_chat_members могут
+	// прийти на один и тот же вход. Без kickoff-замка они наперегонки
+	// пробегают фазу до Put (restrict + отправка) и дают два сообщения капчи.
 	if !b.store.BeginKickoff(chatID, user.ID) {
 		b.log.Debug("captcha already in progress, skipping duplicate kickoff",
 			"chat", chatID, "user", user.ID)
 		return false
 	}
-	// Run the captcha flow asynchronously — it restricts immediately, then
-	// sleeps for CaptchaDelay before sending the captcha message. During the
-	// whole window handleGroupMessage deletes anything the user sends
-	// (store.IsCaptchaActive returns true while inflight is held).
+	// Капча-флоу асинхронный: рестрикт сразу, потом сон CaptchaDelay перед
+	// отправкой сообщения. Всё это окно handleGroupMessage удаляет любые
+	// сообщения юзера (store.IsCaptchaActive true, пока держится inflight).
 	b.goSafe("runCaptcha", func() { b.runCaptcha(chatID, user, threadID) })
 	return true
 }
@@ -703,9 +707,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 
 	ctx := b.runCtx
 
-	// Cache display name now — we'll need it when sending the greeting after a
-	// successful pass (by then the user hasn't written anything, so user_info
-	// wouldn't be populated from message-handling path).
+	// Кэшируем display-имя сейчас — оно понадобится приветствию после
+	// успешного прохождения (к тому моменту юзер ещё ничего не писал, и
+	// путь обработки сообщений user_info не заполнил бы).
 	b.rememberUser(ctx, storage.UserInfo{
 		UserID:    user.ID,
 		FirstName: user.FirstName,
@@ -713,18 +717,18 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		Username:  user.Username,
 	})
 
-	// Restrict FIRST — every second before this call is an open window for
-	// join-and-post spam bots: the message would get deleted, but push
-	// notifications have already gone out. The restriction itself is
-	// invisible to the user, so it doesn't need the render delay below.
+	// Restrict ПЕРВЫМ — каждая секунда до этого вызова открытое окно для
+	// спам-ботов «вошёл-и-запостил»: сообщение-то удалится, но
+	// push-уведомления уже разлетелись. Сам рестрикт юзеру не виден, поэтому
+	// задержка на отрисовку (ниже) ему не нужна.
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
 		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
 		return
 	}
 
-	// Now give the user's client time to fully open the chat. Without this,
-	// the captcha message sometimes doesn't merge into the user's
-	// already-rendered view and they only see it after reopening the chat.
+	// Теперь даём клиенту юзера время полностью открыть чат. Без этого
+	// сообщение капчи иногда не подклеивается в уже отрисованную ленту, и
+	// юзер видит его только после повторного открытия чата.
 	if b.cfg.CaptchaDelay > 0 {
 		select {
 		case <-ctx.Done():
@@ -742,8 +746,8 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	captchaTimeout := b.effectiveCaptchaTimeout(settings)
 	correct := ch.Correct()
 
-	// Image mode: pre-render the photo. On any render failure fall back to
-	// the text prompt — a captcha must always go out.
+	// Режим картинки: фото рендерим заранее. Любая ошибка рендера — фолбэк
+	// на текстовый промпт: капча обязана уйти всегда.
 	var photo []byte
 	if mode == captcha.ModeImage {
 		var rerr error
@@ -898,7 +902,7 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 	count, err := b.db.IncrementAttempt(ctx, p.ChatID, p.UserID, attemptsTTL)
 	if err != nil {
 		b.log.Warn("increment attempt", "err", err)
-		count = 1 // fall forward as first attempt
+		count = 1 // считаем первой попыткой и едем дальше
 	}
 	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
 		b.log.Warn("delete captcha on fail/timeout",

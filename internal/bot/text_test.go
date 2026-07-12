@@ -9,7 +9,7 @@ import (
 )
 
 func TestTruncateLabel(t *testing.T) {
-	// 25 Cyrillic runes = 50 bytes: would break the old byte-based cut.
+	// 25 кириллических рун = 50 байт: старая побайтовая обрезка сломалась бы.
 	long := "Очень длинное название чата для проверки обрезки"
 	got := truncateLabel(long, 40)
 	if !utf8.ValidString(got) {
@@ -31,12 +31,12 @@ func TestTruncateLabel(t *testing.T) {
 func TestRenderGreeting(t *testing.T) {
 	mention := `<a href="tg://user?id=1">Вася</a>`
 
-	// Default when no custom template.
+	// Дефолт, когда кастомного шаблона нет.
 	if got := renderGreeting("", mention); !strings.Contains(got, mention) {
 		t.Errorf("default greeting must mention the user: %q", got)
 	}
 
-	// Custom template: {name} substituted, user HTML escaped.
+	// Кастомный шаблон: {name} подставляется, пользовательский HTML экранируется.
 	got := renderGreeting("Привет, {name}! <b>Прочти правила</b>", mention)
 	if !strings.Contains(got, mention) {
 		t.Errorf("{name} not substituted: %q", got)
@@ -102,7 +102,7 @@ func TestHumanDaysRU(t *testing.T) {
 }
 
 func TestHumanDaysGenRU(t *testing.T) {
-	// Genitive forms for "после N ..." phrases.
+	// Родительный падеж для фраз «после N ...».
 	tests := []struct {
 		days int
 		want string

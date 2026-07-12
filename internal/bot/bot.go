@@ -34,15 +34,16 @@ type Bot struct {
 	startedAt time.Time
 	version   string
 
-	// Write-through caches over chats/user_info: skip the DB write when the
-	// value didn't change. Saves 2 of the 4 SQLite writes per group message.
+	// Write-through-кэши над chats/user_info: пропускаем запись в БД, когда
+	// значение не изменилось. Экономят 2 из 4 SQLite-записей на групповое
+	// сообщение.
 	cacheMu   sync.Mutex
 	chatCache map[int64]storage.ChatInfo
 	userCache map[int64]storage.UserInfo
 
-	// Pending "send me the new greeting text" prompts: userID → armed state.
-	// Set when an admin taps ✏️ in chat settings, consumed by the next
-	// private text message from that user (or dropped after greetInputTTL).
+	// Взведённые запросы «пришли мне новый текст приветствия»: userID →
+	// состояние. Ставится, когда админ жмёт ✏️ в настройках чата; забирается
+	// следующим личным текстовым сообщением (или отваливается по greetInputTTL).
 	greetMu    sync.Mutex
 	greetInput map[int64]greetInputState
 
@@ -62,7 +63,7 @@ type Bot struct {
 	adminCache  map[chatUser]adminCacheEntry
 }
 
-// chatUser keys the per-(chat, user) maps above.
+// chatUser — ключ пер-(chat, user) карт выше.
 type chatUser struct {
 	chatID int64
 	userID int64
@@ -190,22 +191,22 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
-	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // greeting-text input flow
-	bh.HandleMessage(b.handleGroupMessage)                         // fallback: count messages in groups
+	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия
+	bh.HandleMessage(b.handleGroupMessage)                         // фолбэк: сервис-сообщения + счётчики в группах
 	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
 
 	return bh.Start()
 }
 
-// privateMessagePredicate matches non-command private-chat messages that fell
-// through the command handlers above.
+// privateMessagePredicate матчит некомандные сообщения в личке, которые
+// провалились сквозь командные хендлеры выше.
 func privateMessagePredicate(_ context.Context, update telego.Update) bool {
 	return update.Message != nil && update.Message.Chat.Type == telego.ChatTypePrivate
 }
 
 func (b *Bot) setCommands(ctx context.Context) error {
-	// Clear any commands that were previously announced at the default or
-	// group scope — we want the "/" menu empty in groups.
+	// Сносим команды, ранее объявленные в default- и групповых scope — меню
+	// «/» в группах должно быть пустым.
 	_ = b.api.DeleteMyCommands(ctx, &telego.DeleteMyCommandsParams{
 		Scope: &telego.BotCommandScopeAllGroupChats{Type: "all_group_chats"},
 	})
@@ -216,7 +217,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 		Scope: &telego.BotCommandScopeDefault{Type: "default"},
 	})
 
-	// Only private chats see the "/" command menu.
+	// Меню команд «/» видно только в личке.
 	return b.api.SetMyCommands(ctx, &telego.SetMyCommandsParams{
 		Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		Commands: []telego.BotCommand{
@@ -238,7 +239,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 	for _, row := range rows {
 		expires := row.ExpiresAt
 		if expires.Before(now) {
-			// Already expired while the bot was down — treat as timeout immediately.
+			// Истекла, пока бот лежал — считаем таймаутом немедленно.
 			expires = now.Add(1 * time.Second)
 		}
 		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID)

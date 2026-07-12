@@ -12,8 +12,8 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
-// retryAfterDelay extracts Telegram's flood-control hint from an API error.
-// Returns (delay, true) when the error is a 429 with a retry_after parameter.
+// retryAfterDelay достаёт flood-control-подсказку Telegram из ошибки API.
+// Возвращает (задержку, true), когда ошибка — 429 с параметром retry_after.
 func retryAfterDelay(err error) (time.Duration, bool) {
 	var apiErr *telegoapi.Error
 	if errors.As(err, &apiErr) && apiErr.ErrorCode == 429 && apiErr.Parameters != nil && apiErr.Parameters.RetryAfter > 0 {
@@ -22,7 +22,7 @@ func retryAfterDelay(err error) (time.Duration, bool) {
 	return 0, false
 }
 
-// sleepCtx waits for d or until ctx is done, whichever comes first.
+// sleepCtx ждёт d или отмены ctx — что случится раньше.
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	select {
 	case <-ctx.Done():
@@ -32,22 +32,22 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// tgBackoffs is the shared retry schedule for critical Telegram calls: the
-// first attempt fires immediately, then three waits. On 429 (mass-join flood
-// control) retryWith stretches a wait to Telegram's retry_after instead,
-// otherwise every retry burns against the same flood window. retry_after is
-// honored in full — a goroutine parked for a few minutes is cheaper than a
-// human muted forever, and ctx cancellation (shutdown) aborts the sleep.
+// tgBackoffs — общая лестница ретраев критичных Telegram-вызовов: первая
+// попытка сразу, затем три ожидания. На 429 (flood control при масс-джойне)
+// retryWith растягивает ожидание до телеграмного retry_after — иначе каждый
+// ретрай бился бы в то же flood-окно. retry_after выжидается полностью:
+// горутина, припаркованная на пару минут, дешевле человека, замьюченного
+// навсегда, а отмена ctx (shutdown) прерывает сон.
 var tgBackoffs = []time.Duration{0, 1 * time.Second, 2 * time.Second, 4 * time.Second}
 
-// kickUnbanBackoffs is the short ladder for the unban inside kick: the whole
-// captcha fail path lives in waitTimeout's 10s cleanup context, and tgBackoffs
-// (7s of pure sleep) would starve the later attempts once call latency is
-// added. Four attempts within ~1.8s of sleep.
+// kickUnbanBackoffs — короткая лестница для обеих половин kick: весь путь
+// провала капчи живёт в 10-секундном cleanup-контексте waitTimeout, и
+// tgBackoffs (7 c чистого сна) заморили бы поздние попытки, как только
+// добавится латентность вызовов. Четыре попытки при ~1.8 c сна.
 var kickUnbanBackoffs = []time.Duration{0, 300 * time.Millisecond, 600 * time.Millisecond, 900 * time.Millisecond}
 
-// retryTG calls a Telegram API method with the shared backoff schedule and
-// returns the last error when every attempt fails.
+// retryTG вызывает метод Telegram API по общей лестнице бэкоффов и
+// возвращает последнюю ошибку, если все попытки провалились.
 func retryTG(ctx context.Context, call func() error) error {
 	return retryWith(ctx, tgBackoffs, call)
 }
@@ -60,8 +60,8 @@ func retryWith(ctx context.Context, backoffs []time.Duration, call func() error)
 		}
 		if wait > 0 {
 			if err := sleepCtx(ctx, wait); err != nil {
-				// Keep the API error that caused the retrying — "context
-				// deadline exceeded" alone is undiagnosable in the log.
+				// Сохраняем API-ошибку, из-за которой ретраили: голый
+				// «context deadline exceeded» в логе не диагностируется.
 				return fmt.Errorf("%w (last attempt error: %v)", err, lastErr)
 			}
 		}
@@ -72,9 +72,9 @@ func retryWith(ctx context.Context, backoffs []time.Duration, call func() error)
 	return lastErr
 }
 
-// isNotModified matches Telegram's "message is not modified" error: someone
-// re-tapped a button that renders the exact same message. Expected, not worth
-// a warning in the log.
+// isNotModified матчит телеграмную ошибку «message is not modified»: кто-то
+// повторно нажал кнопку, дающую байт-в-байт то же сообщение. Ожидаемо,
+// warning в логе не заслуживает.
 func isNotModified(err error) bool {
 	var apiErr *telegoapi.Error
 	return errors.As(err, &apiErr) &&
@@ -82,8 +82,8 @@ func isNotModified(err error) bool {
 }
 
 func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
-	// Retried — a DNS/TCP blip on this call means the user is NOT restricted
-	// and no captcha gets sent. Worse than a retry delay.
+	// Ретраится: сетевой чих (DNS/TCP) на этом вызове означает, что юзер НЕ
+	// ограничен и капча не уйдёт. Это хуже, чем задержка на ретрай.
 	err := retryTG(ctx, func() error {
 		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
 			ChatID:      tu.ID(chatID),
@@ -97,13 +97,13 @@ func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// release lifts the captcha restriction. It applies the chat's own default
-// permissions (getChat) so a passed user ends up with exactly the same rights
-// as everyone else — not more. If the chat restricts e.g. polls or media by
-// default, blanket all-true permissions here would silently grant them.
-// Retried — during a mass-join wave many users pass at the same time, and a
-// dropped 429 here would leave a verified human muted with no captcha left
-// to retry through.
+// release снимает капча-ограничение. Применяет собственные дефолтные права
+// чата (getChat), чтобы прошедший капчу получил ровно те же права, что у
+// всех, — не больше. Если чат по умолчанию запрещает, скажем, опросы или
+// медиа, огульные all-true права молча выдали бы их. Ретраится: при волне
+// масс-джойна многие проходят капчу одновременно, и уроненный здесь 429
+// оставил бы проверенного человека замьюченным — а капчи, через которую
+// можно было бы повторить, уже нет.
 func (b *Bot) release(ctx context.Context, chatID, userID int64) error {
 	perms := b.chatDefaultPermissions(ctx, chatID)
 	err := retryTG(ctx, func() error {
@@ -119,12 +119,12 @@ func (b *Bot) release(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// chatDefaultPermissions fetches the chat's default member permissions.
-// Retried: during the same mass-join 429 wave that release retries through,
-// a single-shot getChat would reliably fail and silently over-grant the
-// all-true fallback. Falls back to a permissive all-true set only when the
-// retries are exhausted — being unable to look up the defaults must not
-// leave a verified human muted forever.
+// chatDefaultPermissions запрашивает дефолтные права участников чата.
+// Ретраится: в ту же волну масс-джойна с 429, сквозь которую ретраится
+// release, одиночный getChat стабильно падал бы и молча выдавал бы
+// сверх-щедрый all-true-фолбэк. Откат к разрешительному all-true — только
+// когда ретраи исчерпаны: невозможность узнать дефолты не должна оставить
+// проверенного человека замьюченным навсегда.
 func (b *Bot) chatDefaultPermissions(ctx context.Context, chatID int64) telego.ChatPermissions {
 	var perms *telego.ChatPermissions
 	err := retryTG(ctx, func() error {
@@ -176,10 +176,10 @@ func (b *Bot) releaseOnAbort(ctx context.Context, chatID, userID int64) {
 }
 
 func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
-	// Обе половины кика ретраятся на короткой лестнице: без ретрая бана
-	// сетевой чих оставляет юзера замьюченным «зомби» в чате, а событие kick
-	// уже записано. Короткая лестница ×2 (~3.6 c сна) укладывается в 10 c
-	// cleanup-ctx вместе с латентностью вызовов.
+	// Обе половины кика ретраятся: без ретрая бана сетевой чих оставляет
+	// юзера замьюченным «зомби» в чате, а событие kick уже записано (почему
+	// короткая лестница — см. kickUnbanBackoffs: ×2 укладывается в 10 c
+	// cleanup-ctx).
 	err := retryWith(ctx, kickUnbanBackoffs, func() error {
 		return b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
 			ChatID: tu.ID(chatID),
@@ -189,10 +189,8 @@ func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("ban (for kick) after retries: %w", err)
 	}
-	// Retry the unban so a transient API error doesn't turn a kick into a
-	// permaban. Deliberately on the short ladder: the whole fail path shares
-	// waitTimeout's 10s cleanup context with deleteMessage + ban + DB writes,
-	// and the long tgBackoffs would starve the attempts that matter.
+	// Разбан тоже ретраится, чтобы транзиентная ошибка API не превратила кик
+	// в перманентный бан (почему короткая лестница — см. kickUnbanBackoffs).
 	err = retryWith(ctx, kickUnbanBackoffs, func() error {
 		return b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
 			ChatID:       tu.ID(chatID),
@@ -206,8 +204,8 @@ func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// ban permanently bans a user. Retried — it is the terminal action of the
-// captcha fail path, so nothing after it can be starved by the backoff.
+// ban банит юзера перманентно. Ретраится: это терминальное действие пути
+// провала капчи, после него бэкофф уже некому заморить.
 func (b *Bot) ban(ctx context.Context, chatID, userID int64) error {
 	err := retryTG(ctx, func() error {
 		return b.api.BanChatMember(ctx, &telego.BanChatMemberParams{

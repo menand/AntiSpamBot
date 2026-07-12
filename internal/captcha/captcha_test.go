@@ -48,7 +48,7 @@ func TestCirclesShufflePermutesOrder(t *testing.T) {
 }
 
 func TestEmojiPicksOneFromEachCategory(t *testing.T) {
-	// Build reverse index: emoji → category id.
+	// Строим обратный индекс: emoji → id категории.
 	emojiToCat := make(map[string]int, 64)
 	for catIdx, cat := range emojiCategories {
 		for _, tok := range cat {
@@ -56,9 +56,9 @@ func TestEmojiPicksOneFromEachCategory(t *testing.T) {
 		}
 	}
 
-	// Run many iterations; every challenge must cover every category exactly once.
+	// Гоняем много итераций; каждый челлендж обязан покрыть каждую категорию ровно один раз.
 	const iterations = 200
-	categoryHit := make([]int, len(emojiCategories)) // total counts across all runs
+	categoryHit := make([]int, len(emojiCategories)) // суммарные счётчики по всем прогонам
 	for i := 0; i < iterations; i++ {
 		c := New(ModeEmoji)
 		if len(c.Options) != len(emojiCategories) {
@@ -84,7 +84,7 @@ func TestEmojiPicksOneFromEachCategory(t *testing.T) {
 		}
 	}
 
-	// Sanity: every category should have been hit many times across 200 iterations.
+	// Sanity: за 200 итераций каждая категория должна была выпасть много раз.
 	for i, n := range categoryHit {
 		if n != iterations {
 			t.Errorf("category %d hit %d times, expected %d (one per iteration)", i, n, iterations)
@@ -93,9 +93,9 @@ func TestEmojiPicksOneFromEachCategory(t *testing.T) {
 }
 
 func TestEmojiShufflesCategoryOrder(t *testing.T) {
-	// After shuffling, the emoji at slot 0 should sometimes come from different
-	// categories across runs. If slot 0 were always category 0, the shuffle
-	// would be broken.
+	// После перемешивания emoji в слоте 0 от прогона к прогону должен
+	// приходить из разных категорий. Если бы слот 0 всегда доставался
+	// категории 0, шафл был бы сломан.
 	emojiToCat := make(map[string]int, 64)
 	for catIdx, cat := range emojiCategories {
 		for _, tok := range cat {
@@ -122,7 +122,7 @@ func TestNewImageMode(t *testing.T) {
 	if ch.CorrectIdx < 0 || ch.CorrectIdx >= len(ch.Options) {
 		t.Fatalf("CorrectIdx out of range: %d", ch.CorrectIdx)
 	}
-	// Image mode must draw from the emoji pool (glyphs exist only for it).
+	// Режим image обязан выбирать из emoji-пула (глифы есть только для него).
 	if _, err := loadGlyph(ch.Correct().Emoji); err != nil {
 		t.Fatalf("correct option has no glyph: %v", err)
 	}

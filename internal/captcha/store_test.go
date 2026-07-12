@@ -26,11 +26,11 @@ func TestStorePutAndTake(t *testing.T) {
 func TestStorePutCancelsExisting(t *testing.T) {
 	s := NewStore()
 	first := s.Put(1, 2, 100, 0, time.Now().Add(time.Minute), 0)
-	_ = s.Put(1, 2, 200, 0, time.Now().Add(time.Minute), 0) // overwrites
+	_ = s.Put(1, 2, 200, 0, time.Now().Add(time.Minute), 0) // перезаписывает
 
 	select {
 	case <-first.Done():
-		// good — old one was cancelled
+		// хорошо — старый отменён
 	case <-time.After(time.Second):
 		t.Fatal("first pending was not cancelled when second Put replaced it")
 	}
@@ -40,7 +40,7 @@ func TestPendingCancelIsIdempotent(t *testing.T) {
 	s := NewStore()
 	p := s.Put(1, 2, 0, 0, time.Now().Add(time.Minute), 0)
 	p.Cancel()
-	p.Cancel() // must not panic
+	p.Cancel() // не должен паниковать
 	p.Cancel()
 }
 
@@ -59,7 +59,7 @@ func TestBeginKickoffExclusive(t *testing.T) {
 				mu.Lock()
 				won++
 				mu.Unlock()
-				// simulate some setup work before either Put or cleanup
+				// имитируем подготовительную работу перед Put или очисткой
 				time.Sleep(time.Millisecond)
 				s.FinishKickoff(1, 2)
 			}
@@ -70,7 +70,7 @@ func TestBeginKickoffExclusive(t *testing.T) {
 		t.Fatalf("expected exactly 1 kickoff to win, got %d", won)
 	}
 
-	// After everyone finished, next kickoff should succeed
+	// Когда все закончили, следующий kickoff должен пройти.
 	if !s.BeginKickoff(1, 2) {
 		t.Fatal("kickoff should succeed after all previous ones finished")
 	}

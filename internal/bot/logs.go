@@ -10,7 +10,7 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
-// Telegram bot API file upload limit is 50 MB.
+// Лимит Telegram Bot API на загрузку файла ботом — 50 МБ.
 const maxLogUploadBytes = 50 * 1024 * 1024
 
 func (b *Bot) handleLogsCommand(ctx *th.Context, message telego.Message) error {

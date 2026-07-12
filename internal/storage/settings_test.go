@@ -40,7 +40,7 @@ func TestSetMaxAttempts(t *testing.T) {
 		t.Errorf("got %+v, want 5", s.MaxAttempts)
 	}
 
-	// Clear via nil → back to NULL.
+	// Сброс через nil → обратно в NULL.
 	if err := db.SetMaxAttempts(ctx, 1, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestSetCaptchaMode(t *testing.T) {
 		t.Errorf("got %+v, want emoji", s.CaptchaMode)
 	}
 
-	// Clear.
+	// Сброс.
 	if err := db.SetCaptchaMode(ctx, 1, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSettingsAreIndependent(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
 
-	// Setting one field should not wipe others.
+	// Установка одного поля не должна затирать остальные.
 	_ = db.SetGreetingEnabled(ctx, 1, false)
 	five := 5
 	_ = db.SetMaxAttempts(ctx, 1, &five)
@@ -132,7 +132,7 @@ func TestSetGreetingText(t *testing.T) {
 		t.Errorf("got %+v, want %q", s.GreetingText, text)
 	}
 
-	// Clear via nil → back to NULL (built-in default).
+	// Сброс через nil → обратно в NULL (встроенный дефолт).
 	if err := db.SetGreetingText(ctx, 1, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -148,11 +148,11 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 
 	_ = db.SetDailyStatsEnabled(ctx, 100, true)
 	_ = db.SetDailyStatsEnabled(ctx, 200, true)
-	_ = db.SetDailyStatsEnabled(ctx, 300, false) // not eligible
+	_ = db.SetDailyStatsEnabled(ctx, 300, false) // не участвует
 	_ = db.MarkDailyStatsSent(ctx, 100, "2026-04-22")
 
-	// Global default hour 6; ask at 10 UTC — both enabled chats pass the
-	// hour check, but 100 already got today's digest.
+	// Глобальный дефолтный час 6; спрашиваем в 10 UTC — оба включённых чата
+	// проходят проверку часа, но 100 уже получил сегодняшний дайджест.
 	ids, err := db.ChatsNeedingDailyStats(ctx, 10, 6, "2026-04-22")
 	if err != nil {
 		t.Fatal(err)
@@ -161,14 +161,14 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 		t.Errorf("got %v, want [200]", ids)
 	}
 
-	// At 4 UTC (before the 6 UTC default), no chat is ready yet.
+	// В 4 UTC (до дефолтных 6 UTC) ни один чат ещё не готов.
 	ids, _ = db.ChatsNeedingDailyStats(ctx, 4, 6, "2026-04-22")
 	if len(ids) != 0 {
 		t.Errorf("got %v, want 0 chats before default hour", ids)
 	}
 
-	// Per-chat override: chat 200 wants 21 UTC. At 20 UTC it's not ready;
-	// at 21 UTC it is.
+	// Пер-чатовый override: чат 200 хочет 21 UTC. В 20 UTC он ещё не готов;
+	// в 21 UTC — готов.
 	v := 21
 	_ = db.SetDailyStatsHour(ctx, 200, &v)
 	ids, _ = db.ChatsNeedingDailyStats(ctx, 20, 6, "2026-04-22")
@@ -180,8 +180,8 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 		t.Errorf("at 22 UTC chat 200 should be ready, got %v", ids)
 	}
 
-	// Next UTC day at 22 UTC: both chats eligible again (100 via default
-	// 6 UTC, 200 via override 21 UTC, neither sent for Apr 23 yet).
+	// Следующий UTC-день в 22 UTC: оба чата снова в очереди (100 по дефолтным
+	// 6 UTC, 200 по override 21 UTC, за 23 апреля ещё никому не отправляли).
 	ids, _ = db.ChatsNeedingDailyStats(ctx, 22, 6, "2026-04-23")
 	if len(ids) != 2 {
 		t.Errorf("new day at 22 UTC: got %v, want 2 chats", ids)

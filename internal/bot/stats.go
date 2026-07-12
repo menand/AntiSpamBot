@@ -14,10 +14,9 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// handleStatsCommand is a no-op. Stats and settings are now accessed only via
-// the DM menu (/chats → pick chat → stats view). The handler stays registered
-// so that if someone types /stats in a group the command is swallowed without
-// the bot replying in the chat.
+// handleStatsCommand — no-op. Статистика и настройки доступны только через
+// DM-меню (/chats → выбрать чат → экран статистики). Хендлер зарегистрирован,
+// чтобы /stats в группе проглатывался без ответа бота в чат.
 func (b *Bot) handleStatsCommand(_ *th.Context, _ telego.Message) error {
 	return nil
 }
@@ -58,9 +57,9 @@ const (
 	periodAll   statsPeriod = "all"
 )
 
-// parsePeriod validates a period token coming from callback data. Anything
-// unknown (stale buttons, forged data) falls back to periodWeek — the raw
-// string must never reach statsRange or the rendered HTML.
+// parsePeriod валидирует токен периода из callback data. Всё неизвестное
+// (устаревшие кнопки, подделанные данные) откатывается к periodWeek — сырая
+// строка не должна дойти ни до statsRange, ни до рендеренного HTML.
 func parsePeriod(s string) statsPeriod {
 	switch p := statsPeriod(s); p {
 	case periodDay, periodWeek, periodMonth, periodAll:
@@ -69,14 +68,15 @@ func parsePeriod(s string) statsPeriod {
 	return periodWeek
 }
 
-// statsRange returns calendar-aligned UTC windows, [from, until). Events are
-// counted by unix time and messages by calendar day; aligning both bounds to
-// midnight keeps the two counts covering the same range (see QueryStats):
+// statsRange возвращает календарно выровненные UTC-окна [from, until).
+// События считаются по unix-времени, сообщения — по календарным дням;
+// выравнивание обеих границ по полуночи держит оба счёта в одном диапазоне
+// (см. QueryStats):
 //
-//	day   — today (since 00:00 UTC)
-//	week  — last 7 calendar days including today
-//	month — last 30 calendar days including today
-//	all   — since epoch
+//	day   — сегодня (с 00:00 UTC)
+//	week  — последние 7 календарных дней, включая сегодня
+//	month — последние 30 календарных дней, включая сегодня
+//	all   — с начала эпохи
 func statsRange(p statsPeriod) (from, until time.Time) {
 	now := time.Now().UTC()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)

@@ -12,7 +12,7 @@ type PendingRow struct {
 	MessageID  int
 	CorrectIdx int
 	ExpiresAt  time.Time
-	ThreadID   int // forum topic the user joined in; 0 = no topic
+	ThreadID   int // топик форума, в котором вошёл юзер; 0 = без топика
 }
 
 func (d *DB) PutPending(ctx context.Context, p PendingRow) error {
@@ -41,9 +41,9 @@ func (d *DB) DeletePending(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// DeletePendingChat drops all pending captchas for a chat. Used when the bot
-// leaves (or is kicked from) a chat — the captcha messages are unreachable
-// there and timeouts would only produce failing kick/ban calls.
+// DeletePendingChat удаляет все активные капчи чата. Вызывается, когда бот
+// покидает чат (или его выгоняют) — сообщения капч там уже недоступны, и
+// таймауты порождали бы только падающие вызовы kick/ban.
 func (d *DB) DeletePendingChat(ctx context.Context, chatID int64) error {
 	_, err := d.sql.ExecContext(ctx,
 		`DELETE FROM pending_captchas WHERE chat_id = ?`, chatID)

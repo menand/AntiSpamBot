@@ -15,13 +15,13 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// Callback data formats (all prefixed "menu:"):
+// Форматы callback data (все с префиксом "menu:"):
 //
-//	menu:main               — back to main menu
-//	menu:help               — help text
-//	menu:add                — "how to add me to a group" instructions
-//	menu:chats              — list of chats (owner only)
-//	menu:stats:<chat>:<p>   — stats for chat over period p ∈ {day,week,month,all}
+//	menu:main               — назад в главное меню
+//	menu:help               — справка
+//	menu:add                — инструкция «как добавить меня в группу»
+//	menu:chats              — список чатов
+//	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,week,month,all}
 const (
 	cbMain  = "menu:main"
 	cbHelp  = "menu:help"
@@ -83,8 +83,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
-		// Reuse the command handler — it takes a Message; synthesize one with the
-		// essentials (from/chat). Easier than duplicating the logic here.
+		// Переиспользуем командный хендлер — он принимает Message; синтезируем
+		// его из необходимого (from/chat). Проще, чем дублировать логику здесь.
 		synthetic := telego.Message{
 			From: &query.From,
 			Chat: telego.Chat{ID: query.Message.GetChat().ID, Type: "private"},
@@ -115,9 +115,9 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "gr":
-		// Toggles greeting. Supports both old format (menu:gr:chat:period)
-		// which comes from stale inline buttons, and new format
-		// (menu:gr:chat) from the settings submenu.
+		// Тоггл приветствия. Понимает и старый формат (menu:gr:chat:period)
+		// с устаревших inline-кнопок, и новый (menu:gr:chat) из подменю
+		// настроек.
 		if len(parts) < 3 {
 			return nil
 		}
@@ -141,8 +141,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "grtxt":
-		// Arm the "send me the new greeting text" flow: the next private
-		// message from this user becomes the chat's greeting template.
+		// Взводим флоу «пришли мне новый текст приветствия»: следующее личное
+		// сообщение юзера станет шаблоном приветствия чата.
 		if len(parts) != 3 {
 			return nil
 		}
@@ -189,6 +189,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
+		// Границы диапазонов здесь и ниже — защита от бессмысленных значений
+		// из подделанного callback data; штатные пресеты всегда внутри.
 		if err != nil || v < 1 || v > 100 {
 			return nil
 		}
@@ -208,6 +210,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
+		// < 5 c человек не успеет физически, > 10 мин — капча теряет смысл.
 		if err != nil || v < 5 || v > 600 {
 			return nil
 		}
@@ -295,6 +298,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
+		// Порог < 50% вешал бы плашку на половину обычных сообщений, а 100%
+		// недостижим (LLM редко отвечает ровно сотней) — фича бы «отключилась».
 		if err != nil || v < 50 || v > 99 {
 			return nil
 		}
@@ -314,6 +319,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
+		// > 1000 сообщений до доверия — это уже не «новичок», а вечная слежка.
 		if err != nil || v < 1 || v > 1000 {
 			return nil
 		}
@@ -333,6 +339,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
+		// Перевес > 10 голосов в живом чате не собрать — вердикт бы не выносился.
 		if err != nil || v < 1 || v > 10 {
 			return nil
 		}
@@ -464,8 +471,8 @@ func backKeyboard() *telego.InlineKeyboardMarkup {
 	}
 }
 
-// chatsListView builds the "Твои чаты" text + chat-picker keyboard shared by
-// the /chats command and the menu button. withBack appends the menu's back row.
+// chatsListView собирает текст «Твои чаты» + клавиатуру выбора чата, общие
+// для команды /chats и кнопки меню. withBack добавляет ряд «Назад».
 func chatsListView(chats []storage.ChatInfo, withBack bool) (string, *telego.InlineKeyboardMarkup) {
 	var sb strings.Builder
 	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
@@ -494,9 +501,10 @@ func chatsListView(chats []storage.ChatInfo, withBack bool) (string, *telego.Inl
 	return sb.String(), &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// truncateLabel shortens a button label to max runes. Slicing by bytes here
-// would cut a multi-byte rune in half — Telegram rejects the whole keyboard
-// on invalid UTF-8, which for Cyrillic titles means a broken chat list.
+// truncateLabel укорачивает подпись кнопки до max рун. Срез по байтам резал
+// бы многобайтовую руну пополам — Telegram отклоняет всю клавиатуру при
+// невалидном UTF-8, что для кириллических названий значит сломанный список
+// чатов.
 func truncateLabel(s string, max int) string {
 	r := []rune(s)
 	if len(r) <= max {
@@ -614,8 +622,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
-		// UTC hours chosen to display as 00/04/08/12/16/20 MSK after the
-		// MSK = UTC+3 shift applied by mskHourLabel.
+		// UTC-часы подобраны так, чтобы после сдвига МСК = UTC+3 (его делает
+		// mskHourLabel) показываться как 00/04/08/12/16/20 МСК.
 		hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}),
 		{
 			tu.InlineKeyboardButton(toggleLabel("😴 Анонс молчунов", s.SilentAnnounceEnabled)).
@@ -672,9 +680,9 @@ func captchaModeLabel(m captcha.Mode) string {
 	}
 }
 
-// hourPresetRow renders a row of UTC hours as buttons, labelled in MSK
-// (UTC+3) with just the hour digits (e.g. "04"). Compact so the row fits on
-// narrow clients without Telegram collapsing buttons.
+// hourPresetRow рендерит ряд UTC-часов кнопками с подписями в МСК (UTC+3),
+// только цифры часа (например «04»). Компактно, чтобы ряд влезал на узких
+// клиентах и Telegram не схлопывал кнопки.
 func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.InlineKeyboardButton {
 	row := make([]telego.InlineKeyboardButton, 0, len(presetsUTC))
 	for _, utcHour := range presetsUTC {
@@ -690,8 +698,8 @@ func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.Inli
 	return row
 }
 
-// mskHourLabel formats a UTC hour as "HH:00" in Moscow time. Used in the
-// settings text where the ":00" makes the hour-of-day obvious.
+// mskHourLabel форматирует UTC-час как «HH:00» по Москве. Используется в
+// тексте настроек, где «:00» делает час суток очевидным.
 func mskHourLabel(utcHour int) string {
 	msk := (utcHour + 3) % 24
 	return fmt.Sprintf("%02d:00", msk)

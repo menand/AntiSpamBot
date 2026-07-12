@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// IncrementAttempt returns the new count. If the last update was older than ttl,
-// the counter resets to 1.
+// IncrementAttempt возвращает новое значение счётчика. Если последнее
+// обновление старше ttl, счётчик сбрасывается в 1.
 func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl time.Duration) (int, error) {
 	now := time.Now().Unix()
 	ttlSec := int64(ttl.Seconds())
@@ -61,7 +61,7 @@ func (d *DB) ResetAttempts(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// SweepAttempts removes records older than ttl. Safe to call periodically.
+// SweepAttempts удаляет записи старше ttl. Безопасно вызывать периодически.
 func (d *DB) SweepAttempts(ctx context.Context, ttl time.Duration) error {
 	cutoff := time.Now().Add(-ttl).Unix()
 	_, err := d.sql.ExecContext(ctx,
