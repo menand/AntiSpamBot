@@ -126,6 +126,47 @@ func (b *Bot) spamAIEnabled() bool {
 	return b.groqc.Enabled() || b.gigac.Enabled()
 }
 
+// spamGatesPass — общие гейты «стоит ли гнать этого юзера в LLM», от дешёвого
+// к дорогому: пер-чатовый белый список → кросс-чатовое доверие → owner/admin →
+// нет висящей плашки на автора. Общие для спам-чека сообщений и профиль-чека
+// (иначе две копии модели доверия разъехались бы). skip=true — пропустить;
+// total — пер-чатовое число сообщений юзера (спам-чек кладёт его в факты LLM).
+// s.SpamCheckEnabled вызывающий проверяет сам (у путей разный ранний выход).
+func (b *Bot) spamGatesPass(chatID, userID int64, s storage.ChatSettings) (total int, skip bool) {
+	wl := effectiveSpamWhitelist(s)
+	total, err := b.db.UserMessageTotal(b.runCtx, chatID, userID)
+	if err != nil {
+		b.log.Warn("spam gates: message total", "err", err, "chat", chatID, "user", userID)
+		return 0, true
+	}
+	if total > wl {
+		return total, true
+	}
+	// Доверие кросс-чатовое: наговорил на белый список в ЛЮБОМ одном
+	// разрешённом чате бота — доверяем и здесь. Запрос только для новичков —
+	// старожилы уже отсеялись пер-чатовым гейтом выше. Фильтр chatAllowed не
+	// даёт нафармить доверие в постороннем чате (работает при ALLOWED_CHATS).
+	totals, err := b.db.UserMessageTotalsByChat(b.runCtx, userID)
+	if err != nil {
+		b.log.Warn("spam gates: totals by chat", "err", err, "user", userID)
+		return 0, true
+	}
+	for cid, n := range totals {
+		if n > wl && b.chatAllowed(cid) {
+			return total, true
+		}
+	}
+	if b.isOwner(userID) || b.isChatAdminCached(b.runCtx, chatID, userID) {
+		return total, true
+	}
+	// Одна плашка на автора: при вердикте «спам» banRevoke снесёт все его
+	// сообщения, флагать каждое нет смысла.
+	if pending, err := b.db.HasPendingVoteForAuthor(b.runCtx, chatID, userID); err != nil || pending {
+		return total, true
+	}
+	return total, false
+}
+
 // maybeSpamCheck — хук в конце handleGroupMessage. Решает, надо ли гнать
 // сообщение в LLM, и если да — делает это асинхронно (запрос в хендлере
 // заблокировал бы обработку апдейтов).
@@ -140,38 +181,8 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 	if !s.SpamCheckEnabled {
 		return
 	}
-	// Белый список, от дешёвого к дорогому. total уже включает текущее
-	// сообщение (счётчики пишутся до хука): анализируются первые N сообщений.
-	total, err := b.db.UserMessageTotal(b.runCtx, chatID, user.ID)
-	if err != nil {
-		b.log.Warn("spam check: message total", "err", err, "chat", chatID, "user", user.ID)
-		return
-	}
-	wl := effectiveSpamWhitelist(s)
-	if total > wl {
-		return
-	}
-	// Доверие кросс-чатовое: наговорил на белый список в ЛЮБОМ одном
-	// разрешённом чате бота — доверяем и здесь (в факты LLM идёт total
-	// текущего чата). Запрос только для новичков — старожилы уже отсеялись
-	// пер-чатовым гейтом выше. Фильтр chatAllowed не даёт нафармить доверие
-	// в постороннем чате, куда бота затащили (работает при ALLOWED_CHATS).
-	totals, err := b.db.UserMessageTotalsByChat(b.runCtx, user.ID)
-	if err != nil {
-		b.log.Warn("spam check: totals by chat", "err", err, "user", user.ID)
-		return
-	}
-	for cid, n := range totals {
-		if n > wl && b.chatAllowed(cid) {
-			return
-		}
-	}
-	if b.isOwner(user.ID) || b.isChatAdminCached(b.runCtx, chatID, user.ID) {
-		return
-	}
-	// Одна плашка на автора: при вердикте «спам» banRevoke снесёт все его
-	// сообщения, флагать каждое нет смысла.
-	if pending, err := b.db.HasPendingVoteForAuthor(b.runCtx, chatID, user.ID); err != nil || pending {
+	total, skip := b.spamGatesPass(chatID, user.ID, s)
+	if skip {
 		return
 	}
 	// Дедуп параллельных сообщений того же автора, пока Groq думает.

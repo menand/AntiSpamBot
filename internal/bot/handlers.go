@@ -551,11 +551,6 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
 
-	// ЛЮБОЕ сообщение юзера снимает ожидание «ответь на приветствие»
-	// (владелец выбрал мягкий режим: строгий reply не требуется). Дальше
-	// сообщение обрабатывается штатно — счётчики и ИИ-анализ включительно.
-	b.replyWaitSatisfied(chatID, user.ID)
-
 	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID: chatID,
 		Title:  message.Chat.Title,
@@ -909,8 +904,13 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 	if err := b.release(ctx, p.ChatID, p.UserID); err != nil {
 		return err
 	}
-	b.maybeSendGreeting(ctx, p.ChatID, p.UserID, p.ThreadID)
-	// После приветствия — ИИ-оценка профиля новичка (асинхронная внутри).
+	s := b.chatSettings(ctx, p.ChatID)
+	// Ожидание ответа взводим СРАЗУ после размьюта, до сетевой отправки
+	// приветствия: юзер уже может писать, и его первое сообщение должно
+	// застать ожидание активным (иначе гонка → кик написавшего).
+	b.maybeArmReplyWait(s, p.ChatID, p.UserID)
+	b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID)
+	// Затем — ИИ-оценка профиля новичка (асинхронная внутри).
 	b.maybeProfileCheck(p.ChatID, p.UserID, p.ThreadID)
 	return nil
 }

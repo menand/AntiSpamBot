@@ -189,9 +189,15 @@ func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("ban (for kick) after retries: %w", err)
 	}
-	// Разбан тоже ретраится, чтобы транзиентная ошибка API не превратила кик
-	// в перманентный бан (почему короткая лестница — см. kickUnbanBackoffs).
-	err = retryWith(ctx, kickUnbanBackoffs, func() error {
+	return b.unban(ctx, chatID, userID)
+}
+
+// unban снимает бан (вторая половина кика), ретраясь на короткой лестнице,
+// чтобы транзиентная ошибка API не превратила кик в перманентный бан
+// (почему короткая — см. kickUnbanBackoffs). OnlyIfBanned делает вызов
+// идемпотентным.
+func (b *Bot) unban(ctx context.Context, chatID, userID int64) error {
+	err := retryWith(ctx, kickUnbanBackoffs, func() error {
 		return b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
 			ChatID:       tu.ID(chatID),
 			UserID:       userID,
@@ -199,7 +205,7 @@ func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 		})
 	})
 	if err != nil {
-		return fmt.Errorf("unban (for kick) after retries: %w", err)
+		return fmt.Errorf("unban after retries: %w", err)
 	}
 	return nil
 }
@@ -239,23 +245,12 @@ func (b *Bot) banRevoke(ctx context.Context, chatID, userID int64) error {
 }
 
 // kickRevoke — кик со стиранием ВСЕХ сообщений юзера (для админской команды
-// /kick): banRevoke, затем ретраящийся unban (как в kick), чтобы юзер мог
-// перезайти. banRevoke уже ретраится сам.
+// /kick): banRevoke + unban, чтобы юзер мог перезайти. Обе половины ретраятся.
 func (b *Bot) kickRevoke(ctx context.Context, chatID, userID int64) error {
 	if err := b.banRevoke(ctx, chatID, userID); err != nil {
 		return err
 	}
-	err := retryWith(ctx, kickUnbanBackoffs, func() error {
-		return b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
-			ChatID:       tu.ID(chatID),
-			UserID:       userID,
-			OnlyIfBanned: true,
-		})
-	})
-	if err != nil {
-		return fmt.Errorf("unban (for kickRevoke) after retries: %w", err)
-	}
-	return nil
+	return b.unban(ctx, chatID, userID)
 }
 
 func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) error {

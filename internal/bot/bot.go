@@ -185,6 +185,21 @@ func (b *Bot) Run(ctx context.Context) error {
 		return nil
 	}))
 
+	// Снятие ожидания «ответь на приветствие» — в middleware, ДО маршрутизации:
+	// иначе команда (/start и т.п.) первым сообщением новичка ушла бы в свой
+	// хендлер мимо handleGroupMessage, и юзера кикнуло бы за молчание, хотя он
+	// написал. Дёшево (in-memory Take-промах для всех, у кого ожидания нет).
+	// Только НАСТОЯЩИЙ контент (текст/медиа): сервисное сообщение (новичок
+	// добавил участника — тоже с From) не должно засчитываться за ответ.
+	bh.Use(func(ctx *th.Context, update telego.Update) error {
+		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot &&
+			(m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
+			messageHasUserContent(m) {
+			b.replyWaitSatisfied(m.Chat.ID, m.From.ID)
+		}
+		return ctx.Next(update)
+	})
+
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))

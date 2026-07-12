@@ -78,7 +78,7 @@ func humanReasonWith(reason string, nameLookup func(ids []int64) map[int64]stora
 	case reason == storage.ReasonGlobal:
 		return "в глобальной базе спамеров"
 	case strings.HasPrefix(reason, storage.ReasonModPrefix):
-		adminID, _ := strconv.ParseInt(strings.TrimPrefix(reason, storage.ReasonModPrefix), 10, 64)
+		adminID, _ := parseModID(reason)
 		return "команда админа " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)
 	case strings.HasPrefix(reason, storage.ReasonVotePrefix):
 		ids := parseVoteIDs(reason)
@@ -103,7 +103,7 @@ func reasonUserIDs(lists ...[]storage.UserCount) []int64 {
 		for _, uc := range l {
 			switch {
 			case strings.HasPrefix(uc.LastReason, storage.ReasonModPrefix):
-				if id, err := strconv.ParseInt(strings.TrimPrefix(uc.LastReason, storage.ReasonModPrefix), 10, 64); err == nil {
+				if id, ok := parseModID(uc.LastReason); ok {
 					out = append(out, id)
 				}
 			case strings.HasPrefix(uc.LastReason, storage.ReasonVotePrefix):
@@ -112,6 +112,15 @@ func reasonUserIDs(lists ...[]storage.UserCount) []int64 {
 		}
 	}
 	return out
+}
+
+// parseModID достаёт adminID из reason «mod:<id>».
+func parseModID(reason string) (int64, bool) {
+	id, err := strconv.ParseInt(strings.TrimPrefix(reason, storage.ReasonModPrefix), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return id, true
 }
 
 // parseVoteIDs достаёт id голосовавших «за» из reason «vote:1,2,3».
