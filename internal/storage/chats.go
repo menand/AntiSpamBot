@@ -63,11 +63,14 @@ type ChatSettings struct {
 	LastDailyStatsDay     sql.NullString
 	CaptchaMode           sql.NullString // NULL = дефолт (circles)
 	GreetingText          sql.NullString // NULL = встроенное приветствие по умолчанию
+	GreetingEntities      sql.NullString // JSON entities шаблона; NULL = плоский текст
 	SilentAnnounceEnabled bool           // по умолчанию true, когда строки нет
 	SpamCheckEnabled      bool           // по умолчанию false, когда строки нет
 	SpamThreshold         sql.NullInt64  // NULL = 90 (%)
 	SpamWhitelistMsgs     sql.NullInt64  // NULL = 5 сообщений до белого списка
 	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
+	ReplyCheckEnabled     bool           // режим «требовать ответа»; по умолчанию false
+	ReplyCheckSeconds     sql.NullInt64  // NULL = 60 секунд на ответ
 }
 
 // defaultChatSettings — строка настроек для чата без сохранённой строки —
@@ -82,20 +85,20 @@ func defaultChatSettings(chatID int64) ChatSettings {
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
 	s := defaultChatSettings(chatID)
 
-	var greetingInt, dailyInt, silentInt, spamInt int
+	var greetingInt, dailyInt, silentInt, spamInt, replyInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
-		       captcha_mode, greeting_text, silent_announce_enabled,
+		       captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
-		       spam_vote_margin
+		       spam_vote_margin, reply_check_enabled, reply_check_seconds
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
-		&s.CaptchaMode, &s.GreetingText, &silentInt,
+		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities, &silentInt,
 		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
-		&s.SpamVoteMargin)
+		&s.SpamVoteMargin, &replyInt, &s.ReplyCheckSeconds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -107,7 +110,42 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	s.DailyStatsEnabled = dailyInt != 0
 	s.SilentAnnounceEnabled = silentInt != 0
 	s.SpamCheckEnabled = spamInt != 0
+	s.ReplyCheckEnabled = replyInt != 0
 	return s, nil
+}
+
+// SetReplyCheckEnabled тогглит режим «требовать ответа на приветствие».
+func (d *DB) SetReplyCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_check_enabled)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET reply_check_enabled = excluded.reply_check_enabled
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set reply_check_enabled: %w", err)
+	}
+	return nil
+}
+
+// SetReplyCheckSeconds переопределяет срок ожидания ответа. nil снимает.
+func (d *DB) SetReplyCheckSeconds(ctx context.Context, chatID int64, seconds *int) error {
+	var v any
+	if seconds != nil {
+		v = int64(*seconds)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_check_seconds)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET reply_check_seconds = excluded.reply_check_seconds
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set reply_check_seconds: %w", err)
+	}
+	return nil
 }
 
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {
@@ -271,17 +309,24 @@ func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) err
 
 // SetGreetingText сохраняет кастомный шаблон приветствия для этого чата.
 // Шаблон может содержать плейсхолдер {name}, который при отправке заменяется
-// упоминанием нового участника. nil возвращает встроенный дефолт.
-func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text *string) error {
-	var v any
+// упоминанием нового участника. entitiesJSON — сериализованные
+// telego.MessageEntity форматирования (nil = плоский текст). nil-текст
+// возвращает встроенный дефолт (entities при этом тоже сбрасываются).
+func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text, entitiesJSON *string) error {
+	var v, ve any
 	if text != nil {
 		v = *text
 	}
+	if entitiesJSON != nil {
+		ve = *entitiesJSON
+	}
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, greeting_text)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET greeting_text = excluded.greeting_text
-	`, chatID, v)
+		INSERT INTO chat_settings (chat_id, greeting_text, greeting_entities)
+		VALUES (?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET
+			greeting_text = excluded.greeting_text,
+			greeting_entities = excluded.greeting_entities
+	`, chatID, v, ve)
 	if err != nil {
 		return fmt.Errorf("set greeting_text: %w", err)
 	}

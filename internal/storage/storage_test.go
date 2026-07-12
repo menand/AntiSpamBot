@@ -200,12 +200,12 @@ func TestStats(t *testing.T) {
 	db := openTest(t)
 
 	now := time.Now()
-	_ = db.RecordEvent(ctx, 100, 1, EventJoin, now)
-	_ = db.RecordEvent(ctx, 100, 1, EventPass, now)
-	_ = db.RecordEvent(ctx, 100, 2, EventJoin, now)
-	_ = db.RecordEvent(ctx, 100, 2, EventKick, now)
-	_ = db.RecordEvent(ctx, 100, 3, EventJoin, now)
-	_ = db.RecordEvent(ctx, 100, 3, EventBan, now)
+	_ = db.RecordEvent(ctx, 100, 1, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, 100, 1, EventPass, now, "")
+	_ = db.RecordEvent(ctx, 100, 2, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, 100, 2, EventKick, now, "")
+	_ = db.RecordEvent(ctx, 100, 3, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, 100, 3, EventBan, now, "")
 
 	_ = db.UpsertMember(ctx, 100, 1, now.Add(-1*time.Hour))
 	_ = db.IncMessage(ctx, 100, now, true)

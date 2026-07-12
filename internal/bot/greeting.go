@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"strings"
@@ -31,7 +32,9 @@ type greetInputState struct {
 
 func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threadID int) {
 	s := b.chatSettings(ctx, chatID)
-	if !s.GreetingEnabled {
+	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
+	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
+	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
 		return
 	}
 	infos, err := b.db.GetUserInfos(ctx, []int64{userID})
@@ -39,7 +42,10 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 		b.log.Warn("fetch user info for greeting", "err", err)
 	}
 	mention := mentionOrID(infos, userID)
-	text := renderGreeting(s.GreetingText.String, mention)
+	text := renderGreeting(s.GreetingText.String, s.GreetingEntities.String, mention)
+	if s.ReplyCheckEnabled {
+		text += replyRequirementLine(effectiveReplyCheckSeconds(s))
+	}
 
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {
@@ -48,6 +54,7 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	sent, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
+		// Требование без доставленного якоря несправедливо — ожидание не взводим.
 		return
 	}
 	// Помним id приветствия: при спам-бане юзера revoke стирает только его
@@ -55,18 +62,27 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
 		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
+	// Взводим ожидание ТОЛЬКО после успешной отправки якоря.
+	b.maybeArmReplyWait(s, chatID, userID)
 }
 
-// renderGreeting собирает текст приветствия. Непустой кастомный шаблон
-// HTML-экранируется (админы пишут обычный текст; неэкранированный ввод
-// сломал бы или заабьюзил нашу отправку в ModeHTML), затем плейсхолдеры
-// {name} заменяются разметкой mention. Пустой шаблон = встроенный дефолт.
-func renderGreeting(template, mention string) string {
-	tpl := strings.TrimSpace(template)
-	if tpl == "" {
+// renderGreeting собирает текст приветствия. Шаблон с сохранёнными
+// entities (админ форматировал жирным/курсивом) конвертируется в HTML
+// конвертером entitiesToHTML — он сам экранирует пользовательский текст и
+// НЕ тримит его (офсеты entities считаются от сырой строки). Плоский шаблон
+// HTML-экранируется как раньше. Плейсхолдеры {name} заменяются разметкой
+// mention ПОСЛЕ экранирования. Пустой шаблон = встроенный дефолт.
+func renderGreeting(template, entitiesJSON, mention string) string {
+	if strings.TrimSpace(template) == "" {
 		return fmt.Sprintf("🎉 Добро пожаловать, %s!", mention)
 	}
-	return strings.ReplaceAll(html.EscapeString(tpl), "{name}", mention)
+	if entitiesJSON != "" {
+		var ents []telego.MessageEntity
+		if err := json.Unmarshal([]byte(entitiesJSON), &ents); err == nil && len(ents) > 0 {
+			return strings.ReplaceAll(entitiesToHTML(template, ents), "{name}", mention)
+		}
+	}
+	return strings.ReplaceAll(html.EscapeString(strings.TrimSpace(template)), "{name}", mention)
 }
 
 // handleGreetingCommand — no-op. Приветствие тогглится через DM-меню
@@ -144,27 +160,43 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 		reply("Ок, ввод текста приветствия отменён.")
 		return nil
 	case text == "-":
-		if err := b.db.SetGreetingText(b.runCtx, chatID, nil); err != nil {
+		if err := b.db.SetGreetingText(b.runCtx, chatID, nil, nil); err != nil {
 			b.log.Warn("reset greeting text", "err", err, "chat", chatID)
 			reply("Не получилось сохранить, попробуй ещё раз.")
 			return nil
 		}
-		reply("Вернул стандартное приветствие:\n\n" + renderGreeting("", b.previewMention(message.From)))
+		reply("Вернул стандартное приветствие:\n\n" + renderGreeting("", "", b.previewMention(message.From)))
 		return nil
 	}
 
-	if len([]rune(text)) > maxGreetingRunes {
+	// При наличии форматирования (жирный/курсив...) сохраняем СЫРОЙ текст:
+	// офсеты entities считаются от него, и TrimSpace их сломал бы.
+	saved := text
+	var entJSON *string
+	if len(message.Entities) > 0 {
+		saved = message.Text
+		if raw, err := json.Marshal(message.Entities); err == nil {
+			s := string(raw)
+			entJSON = &s
+		}
+	}
+
+	if len([]rune(saved)) > maxGreetingRunes {
 		b.setGreetingInputPending(message.From.ID, chatID)
 		reply(fmt.Sprintf("Слишком длинно (больше %d символов). Сократи и пришли ещё раз.", maxGreetingRunes))
 		return nil
 	}
 
-	if err := b.db.SetGreetingText(b.runCtx, chatID, &text); err != nil {
+	if err := b.db.SetGreetingText(b.runCtx, chatID, &saved, entJSON); err != nil {
 		b.log.Warn("set greeting text", "err", err, "chat", chatID)
 		reply("Не получилось сохранить, попробуй ещё раз.")
 		return nil
 	}
-	reply("Сохранил! Так будет выглядеть приветствие:\n\n" + renderGreeting(text, b.previewMention(message.From)))
+	entPreview := ""
+	if entJSON != nil {
+		entPreview = *entJSON
+	}
+	reply("Сохранил! Так будет выглядеть приветствие:\n\n" + renderGreeting(saved, entPreview, b.previewMention(message.From)))
 	return nil
 }
 

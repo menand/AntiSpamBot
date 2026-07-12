@@ -110,6 +110,23 @@ func (d *DB) RememberUser(ctx context.Context, info UserInfo) error {
 	return nil
 }
 
+// UserIDByUsername ищет user_id по @username в кэше user_info (без «@»,
+// регистронезависимо). Bot API не умеет резолвить юзерские @username, но все
+// писавшие/прошедшие капчу у нас закэшированы. (0, false, nil) — не найден.
+func (d *DB) UserIDByUsername(ctx context.Context, username string) (int64, bool, error) {
+	var id int64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT user_id FROM user_info WHERE username = ? COLLATE NOCASE`,
+		username).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("user id by username: %w", err)
+	}
+	return id, true, nil
+}
+
 // GetUserInfos достаёт закэшированные отображаемые данные сразу многих
 // юзеров. Юзеры без записи в результирующей map отсутствуют.
 func (d *DB) GetUserInfos(ctx context.Context, userIDs []int64) (map[int64]UserInfo, error) {
@@ -151,23 +168,32 @@ type UserCount struct {
 	// Остальные выборки (writers/failers/EventUsers) оставляют 0 — их
 	// рендеры это поле не читают.
 	Secs int
+	// LastReason — причина ПОСЛЕДНЕГО провального события юзера за период
+	// (events.reason). Заполняется TopFailers/EventUsers; "" = нет причины
+	// (старые строки). Разворачивает в текст humanReason в internal/bot.
+	LastReason string
 }
 
 // TopFailers возвращает юзеров с наибольшим числом событий kick+ban в
-// [from, until), по убыванию.
+// [from, until), по убыванию; LastReason — причина их последнего провала.
 func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT user_id, COUNT(*) AS n FROM events
-		WHERE chat_id = ? AND kind IN ('kick', 'ban') AND at >= ? AND at < ?
-		GROUP BY user_id
-		ORDER BY n DESC, user_id ASC
+		SELECT e.user_id, COUNT(*) AS n,
+		       (SELECT reason FROM events e2
+		        WHERE e2.chat_id = e.chat_id AND e2.user_id = e.user_id
+		          AND e2.kind IN ('kick', 'ban') AND e2.at >= ? AND e2.at < ?
+		        ORDER BY e2.at DESC LIMIT 1) AS last_reason
+		FROM events e
+		WHERE e.chat_id = ? AND e.kind IN ('kick', 'ban') AND e.at >= ? AND e.at < ?
+		GROUP BY e.user_id
+		ORDER BY n DESC, e.user_id ASC
 		LIMIT ?
-	`, chatID, from.Unix(), until.Unix(), limit)
+	`, from.Unix(), until.Unix(), chatID, from.Unix(), until.Unix(), limit)
 	if err != nil {
 		return nil, fmt.Errorf("query top failers: %w", err)
 	}
 	defer rows.Close()
-	return scanUserCounts(rows)
+	return scanUserCountsWithReason(rows)
 }
 
 // PassedUsers возвращает всех, кто прошёл капчу в [from, until), в порядке
@@ -214,22 +240,33 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 	}
 	placeholders := strings.Repeat("?,", len(kinds))
 	placeholders = placeholders[:len(placeholders)-1]
-	args := []any{chatID}
-	for _, k := range kinds {
-		args = append(args, string(k))
+
+	// Один и тот же набор параметров нужен дважды: сперва для коррелированного
+	// подзапроса last_reason, затем для основного WHERE.
+	whereArgs := func() []any {
+		a := []any{chatID}
+		for _, k := range kinds {
+			a = append(a, string(k))
+		}
+		return append(a, from.Unix(), until.Unix())
 	}
-	args = append(args, from.Unix(), until.Unix())
+	args := append(whereArgs(), whereArgs()...)
 	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`
-		SELECT user_id, COUNT(*) AS n FROM events
-		WHERE chat_id = ? AND kind IN (%s) AND at >= ? AND at < ?
-		GROUP BY user_id
-		ORDER BY MIN(at) ASC, user_id ASC
-	`, placeholders), args...)
+		SELECT e.user_id, COUNT(*) AS n,
+		       (SELECT reason FROM events e2
+		        WHERE e2.chat_id = ? AND e2.user_id = e.user_id
+		          AND e2.kind IN (%s) AND e2.at >= ? AND e2.at < ?
+		        ORDER BY e2.at DESC LIMIT 1) AS last_reason
+		FROM events e
+		WHERE e.chat_id = ? AND e.kind IN (%s) AND e.at >= ? AND e.at < ?
+		GROUP BY e.user_id
+		ORDER BY MIN(e.at) ASC, e.user_id ASC
+	`, placeholders, placeholders), args...)
 	if err != nil {
 		return nil, fmt.Errorf("query event users: %w", err)
 	}
 	defer rows.Close()
-	return scanUserCounts(rows)
+	return scanUserCountsWithReason(rows)
 }
 
 // TopWriters возвращает юзеров с наибольшим числом сообщений в [from, until)
@@ -250,6 +287,22 @@ func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time
 	}
 	defer rows.Close()
 	return scanUserCounts(rows)
+}
+
+// scanUserCountsWithReason — как scanUserCounts, но с колонкой last_reason
+// (nullable) третьей.
+func scanUserCountsWithReason(rows *sql.Rows) ([]UserCount, error) {
+	var out []UserCount
+	for rows.Next() {
+		var uc UserCount
+		var reason sql.NullString
+		if err := rows.Scan(&uc.UserID, &uc.Count, &reason); err != nil {
+			return nil, err
+		}
+		uc.LastReason = reason.String
+		out = append(out, uc)
+	}
+	return out, rows.Err()
 }
 
 func scanUserCounts(rows *sql.Rows) ([]UserCount, error) {

@@ -16,8 +16,8 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 
 	_ = db.RememberChat(ctx, ChatInfo{ChatID: old, Title: "Old", Type: "group"})
 	_ = db.UpsertMember(ctx, old, 1, now.Add(-48*time.Hour))
-	_ = db.RecordEvent(ctx, old, 1, EventJoin, now)
-	_ = db.RecordEvent(ctx, old, 1, EventPass, now)
+	_ = db.RecordEvent(ctx, old, 1, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, old, 1, EventPass, now, "")
 	_, _ = db.RecordMessage(ctx, old, 1, now)
 	_ = db.IncMessage(ctx, old, now, true)
 	_ = db.SetGreetingEnabled(ctx, old, false)
@@ -27,13 +27,16 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetDailyStatsEnabled(ctx, old, true)
 	_ = db.SetDailyStatsHour(ctx, old, &hour)
 	_ = db.SetCaptchaMode(ctx, old, &mode)
-	_ = db.SetGreetingText(ctx, old, &greet)
+	_ = db.SetGreetingText(ctx, old, &greet, nil)
 	_ = db.SetSilentAnnounceEnabled(ctx, old, false)
 	sthr, swl, svm := 75, 10, 2
 	_ = db.SetSpamCheckEnabled(ctx, old, true)
 	_ = db.SetSpamThreshold(ctx, old, &sthr)
 	_ = db.SetSpamWhitelistMsgs(ctx, old, &swl)
 	_ = db.SetSpamVoteMargin(ctx, old, &svm)
+	rpls := 90
+	_ = db.SetReplyCheckEnabled(ctx, old, true)
+	_ = db.SetReplyCheckSeconds(ctx, old, &rpls)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
@@ -108,6 +111,12 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if !ms.SpamVoteMargin.Valid || ms.SpamVoteMargin.Int64 != 2 {
 		t.Errorf("spam_vote_margin did not migrate: %+v", ms.SpamVoteMargin)
 	}
+	if !ms.ReplyCheckEnabled {
+		t.Error("reply_check_enabled did not migrate")
+	}
+	if !ms.ReplyCheckSeconds.Valid || ms.ReplyCheckSeconds.Int64 != 90 {
+		t.Errorf("reply_check_seconds did not migrate: %+v", ms.ReplyCheckSeconds)
+	}
 	// greetings старого чата чистятся: message id мертвы вместе с чатом.
 	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {
 		t.Error("old-chat greeting must be dropped on migration")
@@ -126,8 +135,8 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 	_ = db.UpsertMember(ctx, old, 1, now.Add(-10*24*time.Hour)) // более ранний вход
 	_ = db.UpsertMember(ctx, neu, 1, now.Add(-5*24*time.Hour))  // более поздний вход
 
-	_ = db.RecordEvent(ctx, old, 1, EventJoin, now)
-	_ = db.RecordEvent(ctx, neu, 1, EventJoin, now)
+	_ = db.RecordEvent(ctx, old, 1, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, neu, 1, EventJoin, now, "")
 
 	_ = db.IncMessage(ctx, old, now, true) // старый чат: 1 newcomer, 0 oldtimer
 	_ = db.IncMessage(ctx, neu, now, true) // новый чат: 1 newcomer, 0 oldtimer

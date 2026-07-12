@@ -21,17 +21,26 @@ func (b *Bot) handleStatsCommand(_ *th.Context, _ telego.Message) error {
 	return nil
 }
 
+// collectUserIDs — id всех юзеров из списков ПЛЮС id, спрятанные в причинах
+// (админы команд, голосовавшие), чтобы renderStats резолвил их имена из
+// одного infos-запроса.
 func collectUserIDs(lists ...[]storage.UserCount) []int64 {
 	seen := make(map[int64]struct{})
 	var out []int64
+	add := func(id int64) {
+		if _, ok := seen[id]; ok {
+			return
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
 	for _, l := range lists {
 		for _, uc := range l {
-			if _, ok := seen[uc.UserID]; ok {
-				continue
-			}
-			seen[uc.UserID] = struct{}{}
-			out = append(out, uc.UserID)
+			add(uc.UserID)
 		}
+	}
+	for _, id := range reasonUserIDs(lists...) {
+		add(id)
 	}
 	return out
 }
@@ -53,6 +62,7 @@ type statsPeriod string
 const (
 	periodDay       statsPeriod = "day"
 	periodYesterday statsPeriod = "yesterday"
+	periodDayBefore statsPeriod = "daybefore"
 	periodWeek      statsPeriod = "week"
 	periodMonth     statsPeriod = "month"
 	periodAll       statsPeriod = "all"
@@ -63,7 +73,7 @@ const (
 // строка не должна дойти ни до statsRange, ни до рендеренного HTML.
 func parsePeriod(s string) statsPeriod {
 	switch p := statsPeriod(s); p {
-	case periodDay, periodYesterday, periodWeek, periodMonth, periodAll:
+	case periodDay, periodYesterday, periodDayBefore, periodWeek, periodMonth, periodAll:
 		return p
 	}
 	return periodWeek
@@ -77,6 +87,7 @@ func parsePeriod(s string) statsPeriod {
 //
 //	day       — сегодня (с 00:00 МСК)
 //	yesterday — вчерашние сутки [вчера 00:00, сегодня 00:00) МСК
+//	daybefore — позавчерашние сутки [позавчера 00:00, вчера 00:00) МСК
 //	week      — последние 7 календарных суток, включая сегодня
 //	month     — последние 30 календарных суток, включая сегодня
 //	all       — с начала эпохи
@@ -88,8 +99,10 @@ func statsRange(p statsPeriod, now time.Time) (from, until time.Time) {
 	case periodDay:
 		from = midnight
 	case periodYesterday:
-		// Единственный период, чей until — СЕГОДНЯШНЯЯ полночь, а не завтрашняя.
+		// У yesterday/daybefore until — не завтрашняя полночь, а конец их суток.
 		from, until = midnight.AddDate(0, 0, -1), midnight
+	case periodDayBefore:
+		from, until = midnight.AddDate(0, 0, -2), midnight.AddDate(0, 0, -1)
 	case periodWeek:
 		from = midnight.AddDate(0, 0, -6)
 	case periodMonth:
@@ -106,6 +119,8 @@ func periodLabel(p statsPeriod) string {
 		return "сегодня"
 	case periodYesterday:
 		return "вчера"
+	case periodDayBefore:
+		return "позавчера"
 	case periodMonth:
 		return "месяц"
 	case periodAll:
@@ -199,16 +214,19 @@ func renderStats(
 				uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
 		})
 
-	appendUserList(&sb, "\n🚫 <b>Провалили капчу:</b>\n", topFailers,
+	appendUserList(&sb, "\n🚫 <b>Кикнуты/забанены:</b>\n", topFailers,
 		func(i int, uc storage.UserCount) string {
-			return fmt.Sprintf("%d. %s — %d %s\n",
+			return fmt.Sprintf("%d. %s — %d %s%s\n",
 				i+1, mentionWithUsername(infos, uc.UserID),
-				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"))
+				uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"),
+				reasonSuffix(uc.LastReason, infos))
 		})
 
 	appendUserList(&sb, "\n⛔️ <b>Забанены:</b>\n", banned,
 		func(i int, uc storage.UserCount) string {
-			return fmt.Sprintf("%d. %s\n", i+1, mentionWithUsername(infos, uc.UserID))
+			return fmt.Sprintf("%d. %s%s\n", i+1,
+				mentionWithUsername(infos, uc.UserID),
+				reasonSuffix(uc.LastReason, infos))
 		})
 
 	if p != periodAll {
@@ -219,6 +237,16 @@ func renderStats(
 	}
 
 	return sb.String()
+}
+
+// reasonSuffix — « — причина» для строки статистики, резолвя имена из уже
+// загруженного infos (без похода в БД). Пустая причина → "".
+func reasonSuffix(reason string, infos map[int64]storage.UserInfo) string {
+	human := humanReasonWith(reason, func(ids []int64) map[int64]storage.UserInfo { return infos })
+	if human == "" {
+		return ""
+	}
+	return " — " + human
 }
 
 func pct(part, total int) string {

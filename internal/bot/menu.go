@@ -22,7 +22,7 @@ import (
 //	menu:help               — справка
 //	menu:add                — инструкция «как добавить меня в группу»
 //	menu:chats              — список чатов
-//	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,yesterday,week,month,all}
+//	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,yesterday,daybefore,week,month,all}
 const (
 	cbMain  = "menu:main"
 	cbHelp  = "menu:help"
@@ -77,6 +77,22 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		if err := b.db.SetSpamNotify(ctx, query.From.ID, !on); err != nil {
 			b.log.Warn("set spam notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+	case "modnotify":
+		// Глобальный тумблер владельца: слать ли ему в ЛС кики/баны
+		// (капча, молчание, /kick, /ban, глобальная база).
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		on, err := b.db.ModNotifyEnabled(ctx, query.From.ID)
+		if err != nil {
+			b.log.Warn("get mod notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		if err := b.db.SetModNotify(ctx, query.From.ID, !on); err != nil {
+			b.log.Warn("set mod notify", "err", err, "owner", query.From.ID)
 			return nil
 		}
 		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
@@ -237,6 +253,47 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		if err := b.db.SetDailyStatsEnabled(ctx, chatID, !s.DailyStatsEnabled); err != nil {
 			b.log.Warn("set daily stats", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "rpl":
+		// Тоггл режима «требовать ответа на приветствие».
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
+		if err := b.db.SetReplyCheckEnabled(ctx, chatID, !s.ReplyCheckEnabled); err != nil {
+			b.log.Warn("set reply_check_enabled", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
+	case "rplt":
+		if len(parts) != 4 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		// < 10 c не успеет и человек, > 10 мин — ожидание теряет смысл.
+		if err != nil || v < 10 || v > 600 {
+			return nil
+		}
+		if err := b.db.SetReplyCheckSeconds(ctx, chatID, &v); err != nil {
+			b.log.Warn("set reply_check_seconds", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "sil":
@@ -420,9 +477,17 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 		if err != nil {
 			notifyOn = false // ошибка чтения — показываем «выключено», тумблер починит
 		}
+		modOn, err := b.db.ModNotifyEnabled(b.runCtx, userID)
+		if err != nil {
+			modOn = false
+		}
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton(toggleLabel("🔔 Спам-уведомления в ЛС", notifyOn)).
 				WithCallbackData("menu:spamnotify"),
+		})
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(toggleLabel("🛡 Кики и баны в ЛС", modOn)).
+				WithCallbackData("menu:modnotify"),
 		})
 	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
@@ -552,6 +617,7 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		{
 			periodButton(chatID, periodDay, p, "Сегодня"),
 			periodButton(chatID, periodYesterday, p, "Вчера"),
+			periodButton(chatID, periodDayBefore, p, "Позавчера"),
 		},
 		{
 			periodButton(chatID, periodWeek, p, "Неделя"),
@@ -593,6 +659,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	if !b.spamAIEnabled() {
 		spamLabel = "нет ключа 🔑"
 	}
+	replySeconds := effectiveReplyCheckSeconds(s)
 
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
@@ -601,6 +668,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Секунд на ответ: <b>%d</b>\n"+
 			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
+			"💬 Требовать ответа на приветствие: <b>%s</b> (%d сек)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
 			"🤖 ИИ-антиспам: <b>%s</b> (порог %d%%, белый список после %d сообщ., перевес %d)",
@@ -608,6 +676,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
 		onOffLabel(s.GreetingEnabled), greetingText,
+		onOffLabel(s.ReplyCheckEnabled), replySeconds,
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
@@ -635,6 +704,15 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("🤖 ИИ-антиспам", s.SpamCheckEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:spam:%d", chatID)),
 		},
+		{
+			tu.InlineKeyboardButton(toggleLabel("💬 Требовать ответ", s.ReplyCheckEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:rpl:%d", chatID)),
+		},
+	}
+	// Пресеты секунд ожидания — только при включённом режиме (как у антиспама).
+	if s.ReplyCheckEnabled {
+		rows = append(rows,
+			intPresetRow(chatID, "rplt", replySeconds, []int{30, 60, 90, 120}, "с"))
 	}
 	// Пресеты антиспама показываем только при включённой фиче — экран и так
 	// плотный.

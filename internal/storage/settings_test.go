@@ -124,7 +124,7 @@ func TestSetGreetingText(t *testing.T) {
 	}
 
 	text := "Привет, {name}! Прочти правила."
-	if err := db.SetGreetingText(ctx, 1, &text); err != nil {
+	if err := db.SetGreetingText(ctx, 1, &text, nil); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = db.GetChatSettings(ctx, 1)
@@ -133,7 +133,7 @@ func TestSetGreetingText(t *testing.T) {
 	}
 
 	// Сброс через nil → обратно в NULL (встроенный дефолт).
-	if err := db.SetGreetingText(ctx, 1, nil); err != nil {
+	if err := db.SetGreetingText(ctx, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	s, _ = db.GetChatSettings(ctx, 1)

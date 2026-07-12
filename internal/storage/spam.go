@@ -8,10 +8,13 @@ import (
 	"time"
 )
 
-// SpamVote — активное голосование «спам/не спам» под подозрительным сообщением.
+// SpamVote — активное голосование «спам/не спам» под подозрительным
+// сообщением ИЛИ «забанить по профилю?» для подозрительного профиля новичка.
 type SpamVote struct {
-	ChatID      int64
-	BotMsgID    int
+	ChatID   int64
+	BotMsgID int
+	// TargetMsgID — подозрительное сообщение; 0 = ПРОФИЛЬНАЯ плашка
+	// (голосование о бане по профилю, целевого сообщения не существует).
 	TargetMsgID int
 	AuthorID    int64
 	Prob        int
@@ -296,6 +299,50 @@ func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
 	return nil
 }
 
+// ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах.
+func (d *DB) ModNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
+	var on int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT mod_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("mod notify enabled: %w", err)
+	}
+	return on != 0, nil
+}
+
+// ModNotifyOwners — все владельцы с включёнными уведомлениями о модерации.
+func (d *DB) ModNotifyOwners(ctx context.Context) ([]int64, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT owner_id FROM owner_settings WHERE mod_notify != 0`)
+	if err != nil {
+		return nil, fmt.Errorf("mod notify owners: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan mod notify owner: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SetModNotify(ctx context.Context, ownerID int64, on bool) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO owner_settings (owner_id, mod_notify) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET mod_notify = excluded.mod_notify
+	`, ownerID, boolToInt(on))
+	if err != nil {
+		return fmt.Errorf("set mod notify: %w", err)
+	}
+	return nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -335,6 +382,56 @@ func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bo
 		return 0, false, fmt.Errorf("delete greeting row: %w", err)
 	}
 	return msgID, true, nil
+}
+
+// GreetingUserByMsg находит юзера по message_id его приветствия — резолв
+// цели для /kick|/ban реплаем на «Добро пожаловать». (0, false, nil) — нет.
+func (d *DB) GreetingUserByMsg(ctx context.Context, chatID int64, messageID int) (int64, bool, error) {
+	var userID int64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT user_id FROM greetings WHERE chat_id = ? AND message_id = ?`,
+		chatID, messageID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("greeting user by msg: %w", err)
+	}
+	return userID, true, nil
+}
+
+// TakeSpamVoteByAuthor удаляет активную плашку голосования по автору и
+// возвращает её bot_msg_id — чтобы снести само сообщение при /kick|/ban.
+// Бюллетени чистятся в той же транзакции. (0, false, nil) — плашки нет.
+func (d *DB) TakeSpamVoteByAuthor(ctx context.Context, chatID, authorID int64) (int, bool, error) {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, fmt.Errorf("take vote by author: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var botMsgID int
+	err = tx.QueryRowContext(ctx,
+		`SELECT bot_msg_id FROM spam_votes WHERE chat_id = ? AND author_id = ? LIMIT 1`,
+		chatID, authorID).Scan(&botMsgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("take vote by author: select: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?`, chatID, botMsgID); err != nil {
+		return 0, false, fmt.Errorf("take vote by author: delete vote: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_ballots WHERE chat_id = ? AND bot_msg_id = ?`, chatID, botMsgID); err != nil {
+		return 0, false, fmt.Errorf("take vote by author: delete ballots: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, fmt.Errorf("take vote by author: commit: %w", err)
+	}
+	return botMsgID, true, nil
 }
 
 // PruneGreetings выкидывает записи старше olderThan — сообщения старше 48 ч

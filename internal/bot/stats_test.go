@@ -10,7 +10,7 @@ import (
 )
 
 func TestParsePeriod(t *testing.T) {
-	for _, p := range []statsPeriod{periodDay, periodYesterday, periodWeek, periodMonth, periodAll} {
+	for _, p := range []statsPeriod{periodDay, periodYesterday, periodDayBefore, periodWeek, periodMonth, periodAll} {
 		if got := parsePeriod(string(p)); got != p {
 			t.Errorf("parsePeriod(%q) = %q, want %q", p, got, p)
 		}
@@ -38,6 +38,7 @@ func TestStatsRange(t *testing.T) {
 	}{
 		{periodDay, midnight, midnight.AddDate(0, 0, 1)},
 		{periodYesterday, midnight.AddDate(0, 0, -1), midnight},
+		{periodDayBefore, midnight.AddDate(0, 0, -2), midnight.AddDate(0, 0, -1)},
 		{periodWeek, midnight.AddDate(0, 0, -6), midnight.AddDate(0, 0, 1)},
 		{periodMonth, midnight.AddDate(0, 0, -29), midnight.AddDate(0, 0, 1)},
 		{periodAll, time.Unix(0, 0), midnight.AddDate(0, 0, 1)},
@@ -50,14 +51,21 @@ func TestStatsRange(t *testing.T) {
 		}
 	}
 
-	// «Вчера» и «сегодня» стыкуются без зазора и без пересечения.
+	// «Позавчера», «вчера» и «сегодня» стыкуются без зазоров и пересечений.
+	bFrom, bUntil := statsRange(periodDayBefore, now)
 	yFrom, yUntil := statsRange(periodYesterday, now)
 	dFrom, _ := statsRange(periodDay, now)
+	if !bUntil.Equal(yFrom) {
+		t.Errorf("daybefore.until (%v) must equal yesterday.from (%v)", bUntil, yFrom)
+	}
 	if !yUntil.Equal(dFrom) {
 		t.Errorf("yesterday.until (%v) must equal day.from (%v)", yUntil, dFrom)
 	}
 	if got := dFrom.Sub(yFrom); got != 24*time.Hour {
 		t.Errorf("yesterday window = %v, want 24h", got)
+	}
+	if got := yFrom.Sub(bFrom); got != 24*time.Hour {
+		t.Errorf("daybefore window = %v, want 24h", got)
 	}
 }
 
@@ -104,7 +112,7 @@ func TestRenderStatsListsComplete(t *testing.T) {
 			t.Fatalf("missing %s in:\n%s", id, out)
 		}
 	}
-	for _, header := range []string{"Новые участники", "Провалили капчу", "Забанены"} {
+	for _, header := range []string{"Новые участники", "Кикнуты/забанены", "Забанены"} {
 		if !strings.Contains(out, header) {
 			t.Fatalf("missing header %q in:\n%s", header, out)
 		}
@@ -122,7 +130,7 @@ func TestRenderStatsTruncatedToMessageLimit(t *testing.T) {
 	if !strings.Contains(out, "…и ещё") {
 		t.Fatal("huge lists must end with «…и ещё N» tails")
 	}
-	for _, header := range []string{"Новые участники", "Провалили капчу", "Забанены"} {
+	for _, header := range []string{"Новые участники", "Кикнуты/забанены", "Забанены"} {
 		if !strings.Contains(out, header) {
 			t.Fatalf("header %q must survive truncation:\n%s", header, out)
 		}
