@@ -102,12 +102,14 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled,
-			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin)
+			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
+			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
+			reply_check_enabled, reply_check_seconds)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, silent_announce_enabled,
-			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin
+			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
+			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
+			reply_check_enabled, reply_check_seconds
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {
@@ -123,6 +125,10 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pending_captchas WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old pending_captchas: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM pending_replies WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old pending_replies: %w", err)
 	}
 
 	// spam_votes / spam_ballots / greetings — то же самое: message ID умерли

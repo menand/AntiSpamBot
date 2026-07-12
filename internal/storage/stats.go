@@ -40,10 +40,22 @@ const (
 	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
 )
 
-func (d *DB) RecordEvent(ctx context.Context, chatID, userID int64, kind EventKind, at time.Time) error {
+// Причины киков/банов (events.reason). Префиксные форматы несут ID для
+// рендера имён в статистике/уведомлениях; парсит их humanReason в internal/bot.
+const (
+	ReasonCaptcha    = "captcha" // не прошёл капчу (неверный ответ или таймаут)
+	ReasonNoReply    = "noreply" // не ответил на приветствие (режим «требовать ответа»)
+	ReasonGlobal     = "global"  // мгновенный бан: юзер в глобальной базе спамеров
+	ReasonModPrefix  = "mod:"    // + adminID: команда /kick|/ban админа
+	ReasonVotePrefix = "vote:"   // + id,id,...: вердикт голосования (голоса «за»)
+)
+
+// RecordEvent пишет событие; reason — причина для kick/ban/spamban (см.
+// Reason*-константы), пустая строка для join/pass хранится как NULL.
+func (d *DB) RecordEvent(ctx context.Context, chatID, userID int64, kind EventKind, at time.Time, reason string) error {
 	_, err := d.sql.ExecContext(ctx,
-		`INSERT INTO events (chat_id, user_id, kind, at) VALUES (?, ?, ?, ?)`,
-		chatID, userID, string(kind), at.Unix())
+		`INSERT INTO events (chat_id, user_id, kind, at, reason) VALUES (?, ?, ?, ?, ?)`,
+		chatID, userID, string(kind), at.Unix(), nullableString(reason))
 	if err != nil {
 		return fmt.Errorf("record event: %w", err)
 	}

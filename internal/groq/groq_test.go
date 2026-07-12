@@ -2,6 +2,7 @@ package groq
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,6 +67,28 @@ func TestSpamProbabilityTimeout(t *testing.T) {
 	defer cancel()
 	if _, err := c.SpamProbability(ctx, "x"); err == nil {
 		t.Fatal("want timeout error, got nil")
+	}
+}
+
+func TestProbabilityCustomSystem(t *testing.T) {
+	// Кастомный системный промпт (профиль-чек) должен дойти до API как есть.
+	var gotSystem string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct{ Role, Content string } `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(req.Messages) > 0 {
+			gotSystem = req.Messages[0].Content
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"spam_probability\": 42}"}}]}`))
+	})
+	p, err := c.Probability(context.Background(), "МОЙ ПРОМПТ", "факты")
+	if err != nil || p != 42 {
+		t.Fatalf("want 42, got %d err=%v", p, err)
+	}
+	if gotSystem != "МОЙ ПРОМПТ" {
+		t.Fatalf("system prompt not passed through: %q", gotSystem)
 	}
 }
 

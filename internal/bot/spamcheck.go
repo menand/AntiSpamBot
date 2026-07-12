@@ -12,6 +12,7 @@ import (
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
+	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -323,9 +324,14 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, 
 	}
 
 	var sb strings.Builder
-	if spam {
+	switch {
+	case v.TargetMsgID == 0 && spam:
+		sb.WriteString("⚖️ Вердикт: <b>спам-профиль</b>, юзер забанен")
+	case v.TargetMsgID == 0:
+		sb.WriteString("⚖️ Вердикт: <b>профиль оставлен</b>")
+	case spam:
 		sb.WriteString("⚖️ Вердикт: <b>спам</b>, автор забанен")
-	} else {
+	default:
 		sb.WriteString("⚖️ Вердикт: <b>не спам</b>")
 	}
 	fmt.Fprintf(&sb, "\nЧат: %s\nАвтор: %s\nОценка была %d%%\nРешение: %s",
@@ -361,12 +367,18 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, 
 	}
 }
 
-// classifySpam гоняет факты по цепочке провайдеров: Groq первичен (быстрее и
-// с бо́льшим лимитом), GigaChat подхватывает при ЛЮБОЙ его ошибке — чаще всего
-// это минутный rate-limit Groq (суточный запас ещё есть, но ждать минуту
-// нельзя). Ошибка возвращается только когда упали все доступные провайдеры.
-// chatID/userID — только для логов.
+// classifySpam — classifyProbability с базовым спам-промптом сообщений.
 func (b *Bot) classifySpam(ctx context.Context, chatID, userID int64, facts string) (prob int, provider string, err error) {
+	return b.classifyProbability(ctx, groq.SystemPrompt, facts, chatID, userID)
+}
+
+// classifyProbability гоняет факты по цепочке провайдеров с заданным
+// системным промптом (спам-чек сообщений и профиль-чек различаются только
+// им): Groq первичен (быстрее и с бо́льшим лимитом), GigaChat подхватывает
+// при ЛЮБОЙ его ошибке — чаще всего это минутный rate-limit Groq (суточный
+// запас ещё есть, но ждать минуту нельзя). Ошибка возвращается только когда
+// упали все доступные провайдеры. chatID/userID — только для логов.
+func (b *Bot) classifyProbability(ctx context.Context, system, facts string, chatID, userID int64) (prob int, provider string, err error) {
 	if b.groqc.Enabled() {
 		gctx := ctx
 		if b.gigac.Enabled() {
@@ -376,22 +388,22 @@ func (b *Bot) classifySpam(ctx context.Context, chatID, userID int64, facts stri
 			gctx, cancel = context.WithTimeout(ctx, 12*time.Second)
 			defer cancel()
 		}
-		prob, err = b.groqc.SpamProbability(gctx, facts)
+		prob, err = b.groqc.Probability(gctx, system, facts)
 		if err == nil {
 			return prob, "groq", nil
 		}
 		if !b.gigac.Enabled() {
 			return 0, "groq", err
 		}
-		b.log.Warn("groq spam check failed, falling back to gigachat",
+		b.log.Warn("groq check failed, falling back to gigachat",
 			"err", err, "chat", chatID, "user", userID)
 	}
 	if !b.gigac.Enabled() {
-		// Недостижимо при гейте spamAIEnabled в maybeSpamCheck; страховка от
+		// Недостижимо при гейте spamAIEnabled у вызывающих; страховка от
 		// будущих прямых вызовов.
 		return 0, "none", errors.New("no spam providers enabled")
 	}
-	prob, err = b.gigac.SpamProbability(ctx, facts)
+	prob, err = b.gigac.Probability(ctx, system, facts)
 	return prob, "gigachat", err
 }
 
@@ -590,17 +602,52 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		// Обновляем счёт на плашке; клавиатура остаётся той же.
 		// Повторный тап того же голоса даёт байт-в-байт тот же текст —
 		// «message is not modified» здесь ожидаем, не предупреждение.
+		text, kb := b.voteView(v, yes, no, margin)
 		if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
 			ChatID:      tu.ID(chatID),
 			MessageID:   botMsgID,
-			Text:        spamVoteText(v.Prob, yes, no, margin),
+			Text:        text,
 			ParseMode:   telego.ModeHTML,
-			ReplyMarkup: spamVoteKeyboard(),
+			ReplyMarkup: kb,
 		}); err != nil && !isNotModified(err) {
 			b.log.Warn("edit spam vote tally", "err", err, "chat", chatID)
 		}
 	}
 	return nil
+}
+
+// voteView — текст и клавиатура плашки по её типу: TargetMsgID == 0 —
+// профильная («забанить по профилю?»), иначе — обычная спам-плашка.
+func (b *Bot) voteView(v storage.SpamVote, yes, no, margin int) (string, *telego.InlineKeyboardMarkup) {
+	if v.TargetMsgID == 0 {
+		infos, err := b.db.GetUserInfos(b.runCtx, []int64{v.AuthorID})
+		if err != nil {
+			infos = map[int64]storage.UserInfo{}
+		}
+		return profileVoteText(mentionOrID(infos, v.AuthorID), v.Prob, yes, no, margin),
+			profileVoteKeyboard()
+	}
+	return spamVoteText(v.Prob, yes, no, margin), spamVoteKeyboard()
+}
+
+// voteReason собирает причину события «vote:<id,id,...>» из голосов «за».
+// Золотой голос админа приходит без бюллетеня в БД — тогда причина просто
+// "vote:" (кто решил, видно в why-логе и уведомлении владельцу).
+func voteReason(ballots []storage.Ballot) string {
+	var sb strings.Builder
+	sb.WriteString(storage.ReasonVotePrefix)
+	first := true
+	for _, bl := range ballots {
+		if !bl.IsSpam {
+			continue
+		}
+		if !first {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "%d", bl.VoterID)
+		first = false
+	}
+	return sb.String()
 }
 
 // voteVerdict — чистая логика кворума: |за − против| ≥ margin решает.
@@ -618,16 +665,13 @@ func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 // исполняет, проигравшие гонку выходят молча — двойной бан/удаление исключены.
 func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 	// Подписчики уведомлений и бюллетени — до Take: он удаляет бюллетени в
-	// своей транзакции. Бюллетени читаем только когда они кому-то нужны;
-	// проигравший гонку прочитает зря — не страшно, он выйдет по !taken.
+	// своей транзакции. Бюллетени нужны всегда: причина события (vote:<ids>)
+	// пишется в статистику по голосам «за». Проигравший гонку прочитает зря —
+	// не страшно, он выйдет по !taken.
 	targets := b.spamNotifyTargets(b.runCtx)
-	var ballots []storage.Ballot
-	if len(targets) > 0 {
-		var err error
-		ballots, err = b.db.ListBallots(b.runCtx, v.ChatID, v.BotMsgID)
-		if err != nil {
-			b.log.Warn("list ballots", "err", err, "chat", v.ChatID)
-		}
+	ballots, err := b.db.ListBallots(b.runCtx, v.ChatID, v.BotMsgID)
+	if err != nil {
+		b.log.Warn("list ballots", "err", err, "chat", v.ChatID)
 	}
 	taken, err := b.db.TakeSpamVote(b.runCtx, v.ChatID, v.BotMsgID)
 	if err != nil {
@@ -643,7 +687,8 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 			// событие spamban не пишем и его приветствие не трогаем.
 			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
 		} else {
-			_ = b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan, time.Now())
+			_ = b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
+				time.Now(), voteReason(ballots))
 			// Приветствие бота для этого юзера revoke не трогает — сносим сами.
 			if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
 				if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
@@ -653,8 +698,11 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 		}
 		// revoke обычно уже стёр сообщение; ручное удаление — страховка на
 		// случай неудавшегося бана (нет прав), поэтому ошибку глушим тихо.
-		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
-			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
+		// У профильной плашки целевого сообщения нет (TargetMsgID == 0).
+		if v.TargetMsgID != 0 {
+			if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
+				b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
+			}
 		}
 		// Общая база — по вердикту, независимо от того, хватило ли прав в
 		// исходном чате: вердикт вынесен людьми.

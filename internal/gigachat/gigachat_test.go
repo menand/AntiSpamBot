@@ -201,6 +201,22 @@ func TestParseProbability(t *testing.T) {
 	}
 }
 
+func TestProbabilityCustomSystemAnd401Refresh(t *testing.T) {
+	// Probability с кастомным промптом обязан сохранить 401-force-refresh
+	// обвязку — профиль-чек не должен ломаться на протухшем токене.
+	ts := newTestServer(t)
+	ts.failNextChat.Store(http.StatusUnauthorized)
+	c := newTestClient(ts)
+	p, err := c.Probability(context.Background(), "ПРОФИЛЬ-ПРОМПТ", "факты")
+	if err != nil || p != 93 {
+		t.Fatalf("after 401+refresh want 93, got %d err=%v", p, err)
+	}
+	if ts.oauthCalls.Load() != 2 || ts.chatCalls.Load() != 2 {
+		t.Fatalf("oauth=%d chat=%d, want 2/2 (forced refresh + retry)",
+			ts.oauthCalls.Load(), ts.chatCalls.Load())
+	}
+}
+
 func TestClampScale(t *testing.T) {
 	tests := []struct {
 		in   float64

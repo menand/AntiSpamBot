@@ -34,6 +34,9 @@ type Bot struct {
 	startedAt time.Time
 	version   string
 
+	// Активные ожидания «ответь на приветствие» (режим reply_check).
+	replies *replyStore
+
 	// Write-through-кэши над chats/user_info: пропускаем запись в БД, когда
 	// значение не изменилось. Экономят 2 из 4 SQLite-записей на групповое
 	// сообщение.
@@ -81,6 +84,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		api:          api,
 		cfg:          cfg,
 		store:        captcha.NewStore(),
+		replies:      newReplyStore(),
 		log:          log,
 		version:      version,
 		chatCache:    make(map[int64]storage.ChatInfo),
@@ -121,6 +125,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	restored, err := b.restorePending(ctx)
 	if err != nil {
 		b.log.Error("restore pending captchas", "err", err)
+	}
+	if _, err := b.restorePendingReplies(ctx); err != nil {
+		b.log.Error("restore pending replies", "err", err)
 	}
 
 	b.goSafe("attemptsSweepLoop", func() { b.attemptsSweepLoop(ctx) })
@@ -189,6 +196,8 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))
 	bh.HandleMessage(b.handleInfoCommand, th.CommandEqual("info"))
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
+	bh.HandleMessage(b.handleKickCommand, th.CommandEqual("kick"))
+	bh.HandleMessage(b.handleBanCommand, th.CommandEqual("ban"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия

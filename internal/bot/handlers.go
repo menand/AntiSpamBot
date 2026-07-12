@@ -96,6 +96,9 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 			b.log.Info("captcha cancelled — user left mid-captcha",
 				"chat", upd.Chat.ID, "user", user.ID)
 		}
+		// Ожидание «ответь на приветствие» тоже снимается тихо: ушедшему
+		// (или забаненному вердиктом/командой) кик за молчание не грозит.
+		b.cancelReplyWait(upd.Chat.ID, user.ID)
 	}
 	return nil
 }
@@ -152,6 +155,12 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	}
 	if err := b.db.DeletePendingChat(ctx, chatID); err != nil {
 		b.log.Warn("delete pending captchas", "err", err, "chat", chatID)
+	}
+	for _, p := range b.replies.TakeChat(chatID) {
+		p.Cancel()
+	}
+	if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
+		b.log.Warn("delete pending replies", "err", err, "chat", chatID)
 	}
 	if err := b.db.DeleteChat(ctx, chatID); err != nil {
 		b.log.Warn("delete chat", "err", err, "chat", chatID)
@@ -298,12 +307,13 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 				b.store.FinishKickoff(chatID, user.ID)
 				handedOff = true // снят вручную ДО startCaptcha — он берёт замок заново
 				if b.startCaptcha(chatID, user, threadID) {
-					_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now())
+					_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now(), "")
 				}
 				return
 			}
 			b.log.Info("banned known spammer on join", "chat", chatID, "user", user.ID)
-			_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventSpamBan, time.Now())
+			_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventSpamBan, time.Now(), storage.ReasonGlobal)
+			b.notifyModAction(chatID, user.ID, storage.EventSpamBan, storage.ReasonGlobal)
 			// Замок держим ещё минуту: у капчи роль «маркера после kickoff»
 			// играет Pending в store, у бана ничего не остаётся — а дубль
 			// new_chat_members может прийти следующим poll'ом и задвоить
@@ -317,7 +327,7 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		// Дубль-доставка (chat_member + new_chat_members) — уже посчитано.
 		return
 	}
-	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now()); err != nil {
+	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now(), ""); err != nil {
 		b.log.Warn("record join event", "err", err)
 	}
 }
@@ -540,6 +550,11 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	chatID := message.Chat.ID
 	user := *message.From
 	when := time.Unix(int64(message.Date), 0)
+
+	// ЛЮБОЕ сообщение юзера снимает ожидание «ответь на приветствие»
+	// (владелец выбрал мягкий режим: строгий reply не требуется). Дальше
+	// сообщение обрабатывается штатно — счётчики и ИИ-анализ включительно.
+	b.replyWaitSatisfied(chatID, user.ID)
 
 	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID: chatID,
@@ -883,7 +898,7 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 	if err := b.db.UpsertMember(ctx, p.ChatID, p.UserID, time.Now()); err != nil {
 		b.log.Warn("upsert member", "err", err)
 	}
-	if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now()); err != nil {
+	if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
 		b.log.Warn("record pass event", "err", err)
 	}
 	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID)
@@ -895,6 +910,8 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 		return err
 	}
 	b.maybeSendGreeting(ctx, p.ChatID, p.UserID, p.ThreadID)
+	// После приветствия — ИИ-оценка профиля новичка (асинхронная внутри).
+	b.maybeProfileCheck(p.ChatID, p.UserID, p.ThreadID)
 	return nil
 }
 
@@ -911,11 +928,13 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 
 	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
-		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now())
+		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now(), storage.ReasonCaptcha)
+		b.notifyModAction(p.ChatID, p.UserID, storage.EventBan, storage.ReasonCaptcha)
 		return b.ban(ctx, p.ChatID, p.UserID)
 	}
 	b.log.Info("kicking user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
-	_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now())
+	_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now(), storage.ReasonCaptcha)
+	b.notifyModAction(p.ChatID, p.UserID, storage.EventKick, storage.ReasonCaptcha)
 	return b.kick(ctx, p.ChatID, p.UserID)
 }
 

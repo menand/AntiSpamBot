@@ -92,10 +92,10 @@ func TestTopWritersAndFailers(t *testing.T) {
 	}
 
 	// Провалившие капчу.
-	_ = db.RecordEvent(ctx, 1, 500, EventKick, now)
-	_ = db.RecordEvent(ctx, 1, 500, EventBan, now)
-	_ = db.RecordEvent(ctx, 1, 501, EventKick, now)
-	_ = db.RecordEvent(ctx, 1, 502, EventPass, now) // не провал
+	_ = db.RecordEvent(ctx, 1, 500, EventKick, now, "")
+	_ = db.RecordEvent(ctx, 1, 500, EventBan, now, "")
+	_ = db.RecordEvent(ctx, 1, 501, EventKick, now, "")
+	_ = db.RecordEvent(ctx, 1, 502, EventPass, now, "") // не провал
 
 	fails, err := db.TopFailers(ctx, 1, now.Add(-time.Hour), now.Add(time.Hour), 5)
 	if err != nil {
@@ -146,11 +146,11 @@ func TestEventUsers(t *testing.T) {
 
 	base := time.Now().Add(-time.Hour)
 	// Хронология: 300 прошёл первым, 100 — вторым (дважды), 200 забанен.
-	_ = db.RecordEvent(ctx, 1, 300, EventPass, base)
-	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute))
-	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute))
-	_ = db.RecordEvent(ctx, 1, 200, EventBan, base.Add(3*time.Minute))
-	_ = db.RecordEvent(ctx, 2, 999, EventPass, base) // другой чат — не должен попасть
+	_ = db.RecordEvent(ctx, 1, 300, EventPass, base, "")
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute), "")
+	_ = db.RecordEvent(ctx, 1, 200, EventBan, base.Add(3*time.Minute), "")
+	_ = db.RecordEvent(ctx, 2, 999, EventPass, base, "") // другой чат — не должен попасть
 
 	passed, err := db.EventUsers(ctx, 1, base.Add(-time.Minute), time.Now(), EventPass)
 	if err != nil {
@@ -187,15 +187,15 @@ func TestPassedUsers(t *testing.T) {
 
 	base := time.Now().Add(-time.Hour).Truncate(time.Second)
 	// 300: join → pass за 12 сек.
-	_ = db.RecordEvent(ctx, 1, 300, EventJoin, base)
-	_ = db.RecordEvent(ctx, 1, 300, EventPass, base.Add(12*time.Second))
+	_ = db.RecordEvent(ctx, 1, 300, EventJoin, base, "")
+	_ = db.RecordEvent(ctx, 1, 300, EventPass, base.Add(12*time.Second), "")
 	// 100: два прохождения (30 и 8 сек) — берётся лучшее.
-	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(time.Minute))
-	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute+30*time.Second))
-	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(2*time.Minute))
-	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute+8*time.Second))
+	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(time.Minute), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute+30*time.Second), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(2*time.Minute), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(2*time.Minute+8*time.Second), "")
 	// 200: pass без join (старые данные) — время неизвестно.
-	_ = db.RecordEvent(ctx, 1, 200, EventPass, base.Add(3*time.Minute))
+	_ = db.RecordEvent(ctx, 1, 200, EventPass, base.Add(3*time.Minute), "")
 
 	got, err := db.PassedUsers(ctx, 1, base.Add(-time.Minute), time.Now())
 	if err != nil {

@@ -238,6 +238,26 @@ func (b *Bot) banRevoke(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
+// kickRevoke — кик со стиранием ВСЕХ сообщений юзера (для админской команды
+// /kick): banRevoke, затем ретраящийся unban (как в kick), чтобы юзер мог
+// перезайти. banRevoke уже ретраится сам.
+func (b *Bot) kickRevoke(ctx context.Context, chatID, userID int64) error {
+	if err := b.banRevoke(ctx, chatID, userID); err != nil {
+		return err
+	}
+	err := retryWith(ctx, kickUnbanBackoffs, func() error {
+		return b.api.UnbanChatMember(ctx, &telego.UnbanChatMemberParams{
+			ChatID:       tu.ID(chatID),
+			UserID:       userID,
+			OnlyIfBanned: true,
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("unban (for kickRevoke) after retries: %w", err)
+	}
+	return nil
+}
+
 func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) error {
 	err := b.api.DeleteMessage(ctx, &telego.DeleteMessageParams{
 		ChatID:    tu.ID(chatID),

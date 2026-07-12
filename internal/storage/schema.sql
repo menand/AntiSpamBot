@@ -21,7 +21,10 @@ CREATE TABLE IF NOT EXISTS events (
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban'
-    at      INTEGER NOT NULL
+    at      INTEGER NOT NULL,
+    -- Причина кика/бана: 'captcha' | 'noreply' | 'mod:<adminID>' |
+    -- 'vote:<id,id,...>' | 'global'. NULL/'' — нет (join/pass и старые строки).
+    reason  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat_at ON events(chat_id, at);
 CREATE INDEX IF NOT EXISTS idx_events_chat_kind_at ON events(chat_id, kind, at);
@@ -99,11 +102,16 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     last_daily_stats_day    TEXT,
     captcha_mode            TEXT,
     greeting_text           TEXT, -- NULL = встроенное приветствие по умолчанию
+    -- JSON-массив telego.MessageEntity кастомного приветствия (жирный/курсив,
+    -- офсеты в UTF-16); NULL = шаблон плоский, рендер экранирует как раньше.
+    greeting_entities       TEXT,
     silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
     spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
     spam_threshold          INTEGER, -- NULL = 90; порог вероятности спама (%)
     spam_whitelist_msgs     INTEGER, -- NULL = 5; сообщений до белого списка
-    spam_vote_margin        INTEGER  -- NULL = 3; перевес голосов для вердикта
+    spam_vote_margin        INTEGER, -- NULL = 3; перевес голосов для вердикта
+    reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- режим «требовать ответа»
+    reply_check_seconds     INTEGER  -- NULL = 60; сколько секунд ждать ответа
 );
 
 -- Приветствия бота по (chat, user): помним message_id, чтобы при спам-бане
@@ -148,8 +156,20 @@ CREATE TABLE IF NOT EXISTS spam_banned (
     at      INTEGER NOT NULL
 );
 
+-- Ожидания «ответь на приветствие» (режим reply_check): после капчи юзер
+-- обязан написать что-нибудь до expires_at, иначе кик. Переживают рестарт
+-- по образцу pending_captchas; greeting_msg_id — приветствие-якорь, сносится
+-- при кике за молчание.
+CREATE TABLE IF NOT EXISTS pending_replies (
+    chat_id         INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    expires_at      INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
+
 -- Глобальные (не пер-чатовые) настройки владельцев бота (OWNER_IDS).
 CREATE TABLE IF NOT EXISTS owner_settings (
     owner_id    INTEGER PRIMARY KEY,
-    spam_notify INTEGER NOT NULL DEFAULT 0 -- слать в ЛС подозрения и вердикты
+    spam_notify INTEGER NOT NULL DEFAULT 0, -- слать в ЛС подозрения и вердикты
+    mod_notify  INTEGER NOT NULL DEFAULT 0  -- слать в ЛС кики/баны (капча, молчание, /kick, /ban)
 );

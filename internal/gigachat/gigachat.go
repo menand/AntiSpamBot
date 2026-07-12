@@ -111,20 +111,27 @@ func (c *Client) Model() string { return c.model }
 // errUnauthorized — chat ответил 401: токен отозван раньше expires_at.
 var errUnauthorized = errors.New("gigachat: unauthorized")
 
-// SpamProbability шлёт факты о сообщении и возвращает 0..100. На 401 от
-// chat-эндпоинта делает один принудительный рефреш токена и повторяет.
+// SpamProbability шлёт факты о сообщении с конструкторским системным
+// промптом (общим с groq-клиентом).
 func (c *Client) SpamProbability(ctx context.Context, facts string) (int, error) {
+	return c.Probability(ctx, c.systemPrompt, facts)
+}
+
+// Probability шлёт факты с произвольным системным промптом и возвращает
+// 0..100. На 401 от chat-эндпоинта делает один принудительный рефреш токена
+// и повторяет — устойчивость к протухшему токену общая для всех промптов.
+func (c *Client) Probability(ctx context.Context, system, facts string) (int, error) {
 	token, err := c.getToken(ctx, false)
 	if err != nil {
 		return 0, err
 	}
-	prob, err := c.chat(ctx, token, facts)
+	prob, err := c.chat(ctx, token, system, facts)
 	if errors.Is(err, errUnauthorized) {
 		token, err = c.getToken(ctx, true)
 		if err != nil {
 			return 0, err
 		}
-		prob, err = c.chat(ctx, token, facts)
+		prob, err = c.chat(ctx, token, system, facts)
 	}
 	return prob, err
 }
@@ -207,13 +214,13 @@ type chatResponse struct {
 
 // chat выполняет один запрос к chat/completions. 401 возвращается как
 // errUnauthorized, чтобы вызывающий мог сделать рефреш токена.
-func (c *Client) chat(ctx context.Context, token, facts string) (int, error) {
+func (c *Client) chat(ctx context.Context, token, system, facts string) (int, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:       c.model,
 		Temperature: 0,
 		MaxTokens:   64,
 		Messages: []chatMessage{
-			{Role: "system", Content: c.systemPrompt},
+			{Role: "system", Content: system},
 			{Role: "user", Content: facts},
 		},
 	})

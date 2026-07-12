@@ -32,12 +32,12 @@ func TestRenderGreeting(t *testing.T) {
 	mention := `<a href="tg://user?id=1">Вася</a>`
 
 	// Дефолт, когда кастомного шаблона нет.
-	if got := renderGreeting("", mention); !strings.Contains(got, mention) {
+	if got := renderGreeting("", "", mention); !strings.Contains(got, mention) {
 		t.Errorf("default greeting must mention the user: %q", got)
 	}
 
 	// Кастомный шаблон: {name} подставляется, пользовательский HTML экранируется.
-	got := renderGreeting("Привет, {name}! <b>Прочти правила</b>", mention)
+	got := renderGreeting("Привет, {name}! <b>Прочти правила</b>", "", mention)
 	if !strings.Contains(got, mention) {
 		t.Errorf("{name} not substituted: %q", got)
 	}
