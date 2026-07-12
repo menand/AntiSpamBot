@@ -8,6 +8,28 @@ import (
 	"time"
 )
 
+// MSKOffsetHours — смещение МСК от UTC. ЕДИНСТВЕННЫЙ источник «+3»: из него
+// собираются StatsLocation, SQL-сдвиг гейта дайджеста (ChatsNeedingDailyStats)
+// и подписи часов в меню (mskHourLabel/hourPresetRow). Разъезд этих мест —
+// это «день переворачивается не в тот час, что открывается гейт», поэтому
+// литерал 3 нигде больше не повторяется.
+const MSKOffsetHours = 3
+
+// StatsLocation — пояс, по которому режутся «календарные сутки» всей
+// статистики: и запись дневных агрегатов (IncMessage/RecordMessage), и
+// границы чтения (QueryStats/TopWriters), и окна statsRange/дайджеста в
+// internal/bot. МСК как FixedZone: в РФ нет переводов часов с 2014 года, а
+// системная tzdata в контейнере не нужна.
+var StatsLocation = time.FixedZone("MSK", MSKOffsetHours*60*60)
+
+// DayOf — календарный день момента t по StatsLocation, ключ дневных таблиц
+// (message_counts.day, user_message_counts.day). ЕДИНСТВЕННОЕ место
+// форматирования дня: события считаются по unix-времени, дни — этой функцией,
+// и только общий пояс держит оба счёта в одном окне.
+func DayOf(t time.Time) string {
+	return t.In(StatsLocation).Format("2006-01-02")
+}
+
 type EventKind string
 
 const (
@@ -58,9 +80,9 @@ func (d *DB) MemberJoinedAt(ctx context.Context, chatID, userID int64) (time.Tim
 }
 
 // IncMessage увеличивает дневной счётчик для данной классификации.
-// day форматируется как 'YYYY-MM-DD' UTC.
+// День режется по StatsLocation (см. DayOf).
 func (d *DB) IncMessage(ctx context.Context, chatID int64, when time.Time, newcomer bool) error {
-	day := when.UTC().Format("2006-01-02")
+	day := DayOf(when)
 	var newInc, oldInc int
 	if newcomer {
 		newInc = 1
@@ -132,8 +154,8 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 	// верхняя граница исключается, как и в запросе событий выше. Вызывающие
 	// передают выровненные по календарю диапазоны (см. statsRange /
 	// sendDailyDigest), так что полуночный `until` исключает этот день.
-	fromDay := from.UTC().Format("2006-01-02")
-	untilDay := until.UTC().Format("2006-01-02")
+	fromDay := DayOf(from)
+	untilDay := DayOf(until)
 	err = d.sql.QueryRowContext(ctx, `
 		SELECT COALESCE(SUM(newcomer_count), 0), COALESCE(SUM(oldtimer_count), 0)
 		FROM message_counts

@@ -6,6 +6,7 @@ import (
 	"html"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
@@ -21,7 +22,7 @@ import (
 //	menu:help               — справка
 //	menu:add                — инструкция «как добавить меня в группу»
 //	menu:chats              — список чатов
-//	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,week,month,all}
+//	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,yesterday,week,month,all}
 const (
 	cbMain  = "menu:main"
 	cbHelp  = "menu:help"
@@ -415,12 +416,12 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 			tu.InlineKeyboardButton("📄 Прислать лог").WithCallbackData("menu:logs"),
 			tu.InlineKeyboardButton("🔌 Проверить ИИ").WithCallbackData("menu:aicheck"),
 		})
-		notifyMark := "❌"
-		if on, err := b.db.SpamNotifyEnabled(b.runCtx, userID); err == nil && on {
-			notifyMark = "✅"
+		notifyOn, err := b.db.SpamNotifyEnabled(b.runCtx, userID)
+		if err != nil {
+			notifyOn = false // ошибка чтения — показываем «выключено», тумблер починит
 		}
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton("🔔 Спам-уведомления в ЛС: " + notifyMark).
+			tu.InlineKeyboardButton(toggleLabel("🔔 Спам-уведомления в ЛС", notifyOn)).
 				WithCallbackData("menu:spamnotify"),
 		})
 	}
@@ -524,7 +525,7 @@ func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error
 }
 
 func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatID int64, p statsPeriod) error {
-	from, until := statsRange(p)
+	from, until := statsRange(p, time.Now())
 	s, err := b.db.QueryStats(ctx, chatID, from, until)
 	if err != nil {
 		b.log.Warn("query stats (menu)", "err", err)
@@ -550,9 +551,12 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 	rows := [][]telego.InlineKeyboardButton{
 		{
 			periodButton(chatID, periodDay, p, "Сегодня"),
+			periodButton(chatID, periodYesterday, p, "Вчера"),
+		},
+		{
 			periodButton(chatID, periodWeek, p, "Неделя"),
 			periodButton(chatID, periodMonth, p, "Месяц"),
-			periodButton(chatID, periodAll, p, "Всё"),
+			periodButton(chatID, periodAll, p, "Всегда"),
 		},
 		{
 			tu.InlineKeyboardButton("⚙️ Настройки").
@@ -660,7 +664,7 @@ func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardB
 	for _, o := range opts {
 		label := o.label
 		if o.mode == current {
-			label = "• " + label + " •"
+			label = "• " + label
 		}
 		row = append(row,
 			tu.InlineKeyboardButton(label).
@@ -686,10 +690,10 @@ func captchaModeLabel(m captcha.Mode) string {
 func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.InlineKeyboardButton {
 	row := make([]telego.InlineKeyboardButton, 0, len(presetsUTC))
 	for _, utcHour := range presetsUTC {
-		msk := (utcHour + 3) % 24
+		msk := (utcHour + storage.MSKOffsetHours) % 24
 		label := fmt.Sprintf("%02d", msk)
 		if utcHour == currentUTC {
-			label = "• " + label + " •"
+			label = "• " + label
 		}
 		row = append(row,
 			tu.InlineKeyboardButton(label).
@@ -701,7 +705,7 @@ func hourPresetRow(chatID int64, currentUTC int, presetsUTC []int) []telego.Inli
 // mskHourLabel форматирует UTC-час как «HH:00» по Москве. Используется в
 // тексте настроек, где «:00» делает час суток очевидным.
 func mskHourLabel(utcHour int) string {
-	msk := (utcHour + 3) % 24
+	msk := (utcHour + storage.MSKOffsetHours) % 24
 	return fmt.Sprintf("%02d:00", msk)
 }
 
@@ -710,7 +714,7 @@ func intPresetRow(chatID int64, key string, current int, presets []int, suffix s
 	for _, v := range presets {
 		label := strconv.Itoa(v) + suffix
 		if v == current {
-			label = "• " + label + " •"
+			label = "• " + label
 		}
 		row = append(row,
 			tu.InlineKeyboardButton(label).
@@ -726,13 +730,15 @@ func onOffLabel(on bool) string {
 	return "❌"
 }
 
+// toggleLabel — статус ✅/❌ ПЕРВЫМ: на узких экранах Telegram обрезает конец
+// подписи, и галка в хвосте терялась бы первой.
 func toggleLabel(prefix string, on bool) string {
-	return prefix + " " + onOffLabel(on)
+	return onOffLabel(on) + " " + prefix
 }
 
 func periodButton(chatID int64, want, current statsPeriod, label string) telego.InlineKeyboardButton {
 	if want == current {
-		label = "• " + label + " •"
+		label = "• " + label
 	}
 	return tu.InlineKeyboardButton(label).
 		WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, want))

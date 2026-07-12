@@ -176,6 +176,25 @@ func TestAttempts(t *testing.T) {
 	}
 }
 
+func TestDayOf(t *testing.T) {
+	// День режется по МСК (UTC+3): поздний вечер UTC — уже следующие
+	// московские сутки, полночь МСК — их начало.
+	tests := []struct {
+		in   time.Time
+		want string
+	}{
+		{time.Date(2026, 7, 11, 23, 30, 0, 0, time.UTC), "2026-07-12"},
+		{time.Date(2026, 7, 11, 20, 59, 0, 0, time.UTC), "2026-07-11"},
+		{time.Date(2026, 7, 11, 21, 0, 0, 0, time.UTC), "2026-07-12"},
+		{time.Date(2026, 7, 12, 0, 0, 0, 0, StatsLocation), "2026-07-12"},
+	}
+	for _, tc := range tests {
+		if got := DayOf(tc.in); got != tc.want {
+			t.Errorf("DayOf(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
 func TestStats(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

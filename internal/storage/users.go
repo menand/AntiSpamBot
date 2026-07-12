@@ -72,7 +72,7 @@ func (d *DB) RecordMessage(ctx context.Context, chatID, userID int64, at time.Ti
 		return mr, fmt.Errorf("upsert user_activity: %w", err)
 	}
 
-	day := at.UTC().Format("2006-01-02")
+	day := DayOf(at)
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO user_message_counts (chat_id, user_id, day, count)
 		VALUES (?, ?, ?, 1)
@@ -236,8 +236,8 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 // (по дням, верхняя граница исключается — семантика та же, что у QueryStats),
 // по убыванию.
 func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
-	fromDay := from.UTC().Format("2006-01-02")
-	untilDay := until.UTC().Format("2006-01-02")
+	fromDay := DayOf(from)
+	untilDay := DayOf(until)
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, SUM(count) AS n FROM user_message_counts
 		WHERE chat_id = ? AND day >= ? AND day < ?

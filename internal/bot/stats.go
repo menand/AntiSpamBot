@@ -51,10 +51,11 @@ func (b *Bot) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, erro
 type statsPeriod string
 
 const (
-	periodDay   statsPeriod = "day"
-	periodWeek  statsPeriod = "week"
-	periodMonth statsPeriod = "month"
-	periodAll   statsPeriod = "all"
+	periodDay       statsPeriod = "day"
+	periodYesterday statsPeriod = "yesterday"
+	periodWeek      statsPeriod = "week"
+	periodMonth     statsPeriod = "month"
+	periodAll       statsPeriod = "all"
 )
 
 // parsePeriod валидирует токен периода из callback data. Всё неизвестное
@@ -62,28 +63,33 @@ const (
 // строка не должна дойти ни до statsRange, ни до рендеренного HTML.
 func parsePeriod(s string) statsPeriod {
 	switch p := statsPeriod(s); p {
-	case periodDay, periodWeek, periodMonth, periodAll:
+	case periodDay, periodYesterday, periodWeek, periodMonth, periodAll:
 		return p
 	}
 	return periodWeek
 }
 
-// statsRange возвращает календарно выровненные UTC-окна [from, until).
-// События считаются по unix-времени, сообщения — по календарным дням;
-// выравнивание обеих границ по полуночи держит оба счёта в одном диапазоне
-// (см. QueryStats):
+// statsRange возвращает выровненные по московским суткам окна [from, until).
+// События считаются по unix-времени, сообщения — по календарным дням
+// (storage.DayOf, тот же пояс storage.StatsLocation); только выравнивание
+// обеих границ по одной и той же полуночи держит оба счёта в одном диапазоне
+// (см. QueryStats). now — параметром, чтобы граница суток тестировалась:
 //
-//	day   — сегодня (с 00:00 UTC)
-//	week  — последние 7 календарных дней, включая сегодня
-//	month — последние 30 календарных дней, включая сегодня
-//	all   — с начала эпохи
-func statsRange(p statsPeriod) (from, until time.Time) {
-	now := time.Now().UTC()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	until = midnight.AddDate(0, 0, 1) // exclusive: next midnight
+//	day       — сегодня (с 00:00 МСК)
+//	yesterday — вчерашние сутки [вчера 00:00, сегодня 00:00) МСК
+//	week      — последние 7 календарных суток, включая сегодня
+//	month     — последние 30 календарных суток, включая сегодня
+//	all       — с начала эпохи
+func statsRange(p statsPeriod, now time.Time) (from, until time.Time) {
+	now = now.In(storage.StatsLocation)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, storage.StatsLocation)
+	until = midnight.AddDate(0, 0, 1) // не включается: следующая полночь
 	switch p {
 	case periodDay:
 		from = midnight
+	case periodYesterday:
+		// Единственный период, чей until — СЕГОДНЯШНЯЯ полночь, а не завтрашняя.
+		from, until = midnight.AddDate(0, 0, -1), midnight
 	case periodWeek:
 		from = midnight.AddDate(0, 0, -6)
 	case periodMonth:
@@ -98,6 +104,8 @@ func periodLabel(p statsPeriod) string {
 	switch p {
 	case periodDay:
 		return "сегодня"
+	case periodYesterday:
+		return "вчера"
 	case periodMonth:
 		return "месяц"
 	case periodAll:

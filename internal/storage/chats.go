@@ -341,16 +341,21 @@ func (d *DB) MarkDailyStatsSent(ctx context.Context, chatID int64, day string) e
 
 // ChatsNeedingDailyStats возвращает ID чатов, у которых:
 //   - ежедневная статистика включена,
-//   - действующий для чата час UTC (пер-чатовый override или defaultHour)
-//     уже наступил (currentHour >= действующего часа),
-//   - сегодняшний дайджест ещё не отправлен.
-func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentHour, defaultHour int, day string) ([]int64, error) {
+//   - действующий для чата час уже наступил (currentMSKHour >= действующего),
+//   - сегодняшний (МСК) дайджест ещё не отправлен.
+//
+// Час ХРАНИТСЯ в UTC (совместимость с пресетами меню/mskHourLabel), а гейт
+// сравнивается в МСК — SQL-сдвиг (+MSKOffsetHours)%24 ниже. Гейт-час и
+// day-маркер обязаны жить в одном поясе: при UTC-часе с МСК-днём маркер
+// переворачивался бы в 21:00 UTC при уже открытом гейте, и дайджесты
+// сползали бы на полночь МСК.
+func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentMSKHour, defaultHour int, day string) ([]int64, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT chat_id FROM chat_settings
 		WHERE daily_stats_enabled = 1
-		  AND COALESCE(daily_stats_utc_hour, ?) <= ?
+		  AND (COALESCE(daily_stats_utc_hour, ?) + ?) % 24 <= ?
 		  AND (last_daily_stats_day IS NULL OR last_daily_stats_day != ?)
-	`, defaultHour, currentHour, day)
+	`, defaultHour, MSKOffsetHours, currentMSKHour, day)
 	if err != nil {
 		return nil, fmt.Errorf("chats needing daily: %w", err)
 	}
