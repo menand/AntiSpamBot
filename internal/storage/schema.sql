@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS pending_captchas (
     message_id  INTEGER NOT NULL,
     correct_idx INTEGER NOT NULL,
     expires_at  INTEGER NOT NULL,
-    thread_id   INTEGER NOT NULL DEFAULT 0, -- forum topic the user joined in; 0 = no topic
+    thread_id   INTEGER NOT NULL DEFAULT 0, -- топик форума, в котором вошёл юзер; 0 = без топика
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -41,8 +41,8 @@ CREATE TABLE IF NOT EXISTS message_counts (
     PRIMARY KEY (chat_id, day)
 );
 
--- Per-user per-chat activity: cumulative counts + first/last message timestamps.
--- Used for silence detection and cumulative top lists.
+-- Активность по (chat, user): накопительные счётчики + время первого/последнего
+-- сообщения. Нужна для детекта тишины и накопительных топов.
 CREATE TABLE IF NOT EXISTS user_activity (
     chat_id          INTEGER NOT NULL,
     user_id          INTEGER NOT NULL,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS user_activity (
     PRIMARY KEY (chat_id, user_id)
 );
 
--- Per-user per-day message counts for top-writers queries over a time window.
+-- Дневные счётчики сообщений по юзерам — для запросов топа писателей за окно времени.
 CREATE TABLE IF NOT EXISTS user_message_counts (
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
@@ -65,7 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_umc_chat_user ON user_message_counts(chat_id, use
 -- Кросс-чатовое доверие антиспама: выборка по одному юзеру без chat_id.
 CREATE INDEX IF NOT EXISTS idx_umc_user ON user_message_counts(user_id, chat_id);
 
--- Cache of display names so we can render mentions without calling Telegram on every /stats.
+-- Кэш отображаемых имён, чтобы рендерить упоминания без похода в Telegram на каждый /stats.
 CREATE TABLE IF NOT EXISTS user_info (
     user_id    INTEGER PRIMARY KEY,
     first_name TEXT,
@@ -74,8 +74,8 @@ CREATE TABLE IF NOT EXISTS user_info (
     updated_at INTEGER NOT NULL
 );
 
--- Known chats: populated opportunistically from every chat_member and message
--- update we see. Used by the owner-only /chats menu to list chats.
+-- Известные чаты: пополняются попутно из каждого видимого нами chat_member-
+-- и message-апдейта. Используются меню /chats (только для владельца) для списка чатов.
 CREATE TABLE IF NOT EXISTS chats (
     chat_id    INTEGER PRIMARY KEY,
     title      TEXT,
@@ -83,11 +83,12 @@ CREATE TABLE IF NOT EXISTS chats (
     updated_at INTEGER NOT NULL
 );
 
--- Per-chat configurable behavior. Absent row = defaults (greeting enabled,
--- attempts/timeout fall back to global config, daily digests off).
+-- Настраиваемое пер-чатовое поведение. Нет строки = дефолты (приветствие
+-- включено, attempts/timeout берутся из глобального конфига, ежедневные
+-- дайджесты выключены).
 --
--- Nullable columns (max_attempts, captcha_timeout_seconds) mean "use the
--- global env default"; a non-null value overrides globally.
+-- Nullable-колонки (max_attempts, captcha_timeout_seconds) означают
+-- «использовать глобальный env-дефолт»; non-null значение его переопределяет.
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id                 INTEGER PRIMARY KEY,
     greeting_enabled        INTEGER NOT NULL DEFAULT 1,
@@ -97,7 +98,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     daily_stats_utc_hour    INTEGER,
     last_daily_stats_day    TEXT,
     captcha_mode            TEXT,
-    greeting_text           TEXT, -- NULL = built-in default greeting
+    greeting_text           TEXT, -- NULL = встроенное приветствие по умолчанию
     silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
     spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
     spam_threshold          INTEGER, -- NULL = 90; порог вероятности спама (%)

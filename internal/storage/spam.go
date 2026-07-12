@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -36,7 +37,7 @@ func (d *DB) GetSpamVote(ctx context.Context, chatID int64, botMsgID int) (SpamV
 		SELECT chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at
 		FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?
 	`, chatID, botMsgID).Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID, &v.Prob, &at)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return v, false, nil
 	}
 	if err != nil {
@@ -83,7 +84,7 @@ func (d *DB) HasPendingVoteForAuthor(ctx context.Context, chatID, authorID int64
 	err := d.sql.QueryRowContext(ctx,
 		`SELECT 1 FROM spam_votes WHERE chat_id = ? AND author_id = ? LIMIT 1`,
 		chatID, authorID).Scan(&one)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -186,7 +187,7 @@ func (d *DB) IsSpamBanned(ctx context.Context, userID int64) (bool, error) {
 	var one int
 	err := d.sql.QueryRowContext(ctx,
 		`SELECT 1 FROM spam_banned WHERE user_id = ?`, userID).Scan(&one)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -255,7 +256,7 @@ func (d *DB) SpamNotifyEnabled(ctx context.Context, ownerID int64) (bool, error)
 	var on int
 	err := d.sql.QueryRowContext(ctx,
 		`SELECT spam_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
@@ -323,7 +324,7 @@ func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bo
 	err := d.sql.QueryRowContext(ctx,
 		`SELECT message_id FROM greetings WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID).Scan(&msgID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {

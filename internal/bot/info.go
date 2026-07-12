@@ -43,9 +43,9 @@ func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
 	return nil
 }
 
-// formatUptimeRU renders a duration like "3 дня, 5 часов, 42 минуты".
-// Trailing zero components are omitted; seconds are shown only for very short
-// uptimes (less than a minute).
+// formatUptimeRU форматирует длительность вида «3 дня, 5 часов, 42 минуты».
+// Нулевые компоненты опускаются; секунды показываются только для совсем
+// короткого аптайма (меньше минуты).
 func formatUptimeRU(d time.Duration) string {
 	if d < time.Second {
 		d = time.Second

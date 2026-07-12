@@ -2,23 +2,23 @@ package captcha
 
 import "math/rand/v2"
 
-// Token is one emoji button on the captcha keyboard, paired with its
-// accusative-case noun phrase used in the prompt ("Выбери <b>%s</b> …").
+// Token — одна emoji-кнопка на клавиатуре капчи в паре с существительным
+// в винительном падеже, которое подставляется в задание («Выбери <b>%s</b> …»).
 type Token struct {
 	Emoji  string
 	Prompt string
 }
 
-// Mode selects which pool the captcha draws from.
+// Mode выбирает, из какого пула капча берёт варианты.
 type Mode string
 
 const (
-	ModeCircles Mode = "circles" // default: 6 colored circles
-	ModeEmoji   Mode = "emoji"   // one emoji from each of 6 categories
-	ModeImage   Mode = "image"   // emoji options + distorted glyph photo as the prompt
+	ModeCircles Mode = "circles" // по умолчанию: 6 цветных кружков
+	ModeEmoji   Mode = "emoji"   // по одному emoji из каждой из 6 категорий
+	ModeImage   Mode = "image"   // варианты-emoji + искажённое фото глифа в роли задания
 )
 
-// circles: the legacy "traffic-light" palette. All 6 are shown every time.
+// circles: легаси-палитра «светофор». Все 6 показываются каждый раз.
 var circles = []Token{
 	{"🔴", "красный кружок"},
 	{"🟢", "зелёный кружок"},
@@ -28,8 +28,8 @@ var circles = []Token{
 	{"🟠", "оранжевый кружок"},
 }
 
-// emojiCategories: 6 visually-distinct groups. For every captcha we pick one
-// random item from each → the keyboard always has one "world" per slot.
+// emojiCategories: 6 визуально различимых групп. Для каждой капчи берём по
+// одному случайному элементу из каждой → на клавиатуре всегда один «мир» на слот.
 var emojiCategories = [][]Token{
 	{ // Звери
 		{"🦊", "лису"},
@@ -97,10 +97,10 @@ func (c Challenge) Correct() Token {
 	return c.Options[c.CorrectIdx]
 }
 
-// New builds a fresh captcha challenge for the given mode. Unknown/empty
-// modes fall back to ModeCircles. ModeImage reuses the emoji pool — the
-// difference is only in presentation (the bot renders the correct glyph as
-// a distorted photo instead of naming it in text).
+// New собирает новое задание капчи для заданного режима. Неизвестный/пустой
+// режим откатывается к ModeCircles. ModeImage переиспользует пул emoji —
+// разница только в подаче (бот рендерит правильный глиф искажённым фото
+// вместо того, чтобы назвать его текстом).
 func New(mode Mode) Challenge {
 	switch mode {
 	case ModeEmoji, ModeImage:

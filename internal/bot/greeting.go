@@ -12,17 +12,18 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
-// Custom greeting templates are capped well below Telegram's 4096-char
-// message limit so the rendered text (template + mention markup) always fits.
+// Кастомные шаблоны приветствия ограничены сильно ниже телеграмного лимита
+// 4096 символов, чтобы итоговый текст (шаблон + разметка mention) влезал
+// всегда.
 const maxGreetingRunes = 500
 
-// greetInputTTL bounds how long an armed "send me the greeting text" prompt
-// stays live. Without it, an admin who tapped ✏️ and walked away would have
-// an unrelated private message days later silently become the greeting.
+// greetInputTTL ограничивает жизнь взведённого запроса «пришли мне текст
+// приветствия». Без него админ, нажавший ✏️ и ушедший, через несколько дней
+// молча превратил бы случайное личное сообщение в приветствие чата.
 const greetInputTTL = 15 * time.Minute
 
-// greetInputState is the armed prompt: which chat the text is for and when
-// the admin armed it.
+// greetInputState — взведённый запрос: для какого чата текст и когда админ
+// его взвёл.
 type greetInputState struct {
 	chatID  int64
 	armedAt time.Time
@@ -56,10 +57,10 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	}
 }
 
-// renderGreeting builds the greeting text. A non-empty custom template is
-// HTML-escaped (admins type plain text; unescaped input would break or abuse
-// our ModeHTML send) and its {name} placeholders are replaced with the
-// mention markup. Empty template = built-in default.
+// renderGreeting собирает текст приветствия. Непустой кастомный шаблон
+// HTML-экранируется (админы пишут обычный текст; неэкранированный ввод
+// сломал бы или заабьюзил нашу отправку в ModeHTML), затем плейсхолдеры
+// {name} заменяются разметкой mention. Пустой шаблон = встроенный дефолт.
 func renderGreeting(template, mention string) string {
 	tpl := strings.TrimSpace(template)
 	if tpl == "" {
@@ -68,24 +69,24 @@ func renderGreeting(template, mention string) string {
 	return strings.ReplaceAll(html.EscapeString(tpl), "{name}", mention)
 }
 
-// handleGreetingCommand is a no-op. Greeting toggles are done via the DM menu
-// (/chats → pick chat → "🎉 Приветствие" button). Kept registered so that if
-// someone types /greeting in a group the command is swallowed silently.
+// handleGreetingCommand — no-op. Приветствие тогглится через DM-меню
+// (/chats → выбрать чат → кнопка «🎉 Приветствие»). Хендлер зарегистрирован,
+// чтобы /greeting в группе молча проглатывался.
 func (b *Bot) handleGreetingCommand(_ *th.Context, _ telego.Message) error {
 	return nil
 }
 
-// setGreetingInputPending arms the "next private message is the new greeting
-// text for chatID" state for a user.
+// setGreetingInputPending взводит для юзера состояние «следующее личное
+// сообщение — новый текст приветствия чата chatID».
 func (b *Bot) setGreetingInputPending(userID, chatID int64) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
 	b.greetInput[userID] = greetInputState{chatID: chatID, armedAt: time.Now()}
 }
 
-// takeGreetingInput consumes the pending greeting-input state. expired=true
-// means the prompt existed but sat armed longer than greetInputTTL — the
-// caller should tell the admin their text was NOT saved, not stay silent.
+// takeGreetingInput забирает взведённое состояние ввода приветствия.
+// expired=true значит, что запрос был, но провисел дольше greetInputTTL —
+// вызывающий обязан сказать админу, что текст НЕ сохранён, а не промолчать.
 func (b *Bot) takeGreetingInput(userID int64) (chatID int64, ok, expired bool) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
@@ -100,9 +101,9 @@ func (b *Bot) takeGreetingInput(userID int64) (chatID int64, ok, expired bool) {
 	return st.chatID, true, false
 }
 
-// handlePrivateText receives non-command private messages. Its only job is
-// the greeting-text input flow; anything else is ignored (same silence as
-// before this flow existed).
+// handlePrivateText получает некомандные личные сообщения. Его единственная
+// работа — флоу ввода текста приветствия; всё остальное игнорируется (та же
+// тишина, что была до появления этого флоу).
 func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if message.From == nil {
 		return nil
@@ -124,8 +125,8 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 		return nil
 	}
 
-	// Re-check: rights could have been revoked between the button tap and
-	// this message.
+	// Перепроверка: права могли отозвать между нажатием кнопки и этим
+	// сообщением.
 	if !b.canManageChat(ctx, message.From.ID, chatID) {
 		reply("У тебя больше нет прав на этот чат — текст не сохранён.")
 		return nil
@@ -134,12 +135,12 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	text := strings.TrimSpace(message.Text)
 	switch {
 	case text == "":
-		// Media/sticker/empty — keep waiting for an actual text message.
+		// Медиа/стикер/пусто — продолжаем ждать настоящий текст.
 		b.setGreetingInputPending(message.From.ID, chatID)
 		reply("Нужно обычное текстовое сообщение. Пришли текст приветствия, «-» для сброса или /cancel для отмены.")
 		return nil
 	case strings.HasPrefix(text, "/"):
-		// Any command (incl. /cancel) aborts the input flow.
+		// Любая команда (включая /cancel) отменяет флоу ввода.
 		reply("Ок, ввод текста приветствия отменён.")
 		return nil
 	case text == "-":
@@ -167,8 +168,8 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	return nil
 }
 
-// previewMention renders the asking admin's own mention — used to preview the
-// greeting exactly as a new member would see it.
+// previewMention рендерит mention самого админа — предпросмотр приветствия
+// ровно таким, каким его увидит новичок.
 func (b *Bot) previewMention(u *telego.User) string {
 	if u == nil {
 		return "id0"

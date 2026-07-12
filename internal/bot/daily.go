@@ -10,17 +10,16 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// dailyDigestLoop runs as a background goroutine for the lifetime of the bot.
-// Every 5 minutes it checks for chats that have opted into daily stats and
-// haven't yet received today's digest, then posts one. The digest summarises
-// the last 24 hours and highlights top writers / top captcha-failers.
+// dailyDigestLoop — фоновая горутина на всё время жизни бота. Раз в 5 минут
+// проверяет, есть ли чаты с включённой ежедневной сводкой, ещё не получившие
+// сегодняшнюю, и постит её. Сводка охватывает последние сутки: топ писателей,
+// топ провалов капчи и т.д.
 //
-// The time of first post is controlled by DAILY_STATS_UTC_HOUR (default 06:00
-// UTC ≈ 09:00 MSK). The ticker runs unconditionally; the hour-of-day check
-// inside the handler acts as the gate.
+// Время первой отправки задаёт DAILY_STATS_UTC_HOUR (дефолт 06:00 UTC ≈
+// 09:00 МСК). Тикер крутится безусловно; гейтом служит проверка часа внутри.
 func (b *Bot) dailyDigestLoop(ctx context.Context) {
-	// Check quickly once at startup so freshly-enabled chats don't wait up to
-	// 5 minutes for the first tick.
+	// Один быстрый прогон на старте, чтобы свежевключённые чаты не ждали
+	// первого тика до 5 минут.
 	b.maybeSendDigests(ctx)
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
@@ -48,10 +47,10 @@ func (b *Bot) maybeSendDigests(ctx context.Context) {
 	}
 }
 
-// sendDailyDigest posts the digest for the calendar day before `until`
-// (today's UTC midnight, computed ONCE in maybeSendDigests from the same
-// clock reading as the gating `today` marker — recomputing time.Now() here
-// used to send the same day twice when the 5-min tick crossed midnight).
+// sendDailyDigest постит сводку за календарный день перед `until`
+// (сегодняшняя полночь UTC, вычисленная ОДИН раз в maybeSendDigests из того
+// же показания часов, что и гейт-маркер `today` — повторный time.Now() здесь
+// когда-то отправлял один день дважды, если 5-минутный тик пересекал полночь).
 func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time) {
 	today := until.Format("2006-01-02")
 	from := until.Add(-24 * time.Hour)
@@ -79,9 +78,9 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time
 		b.log.Warn("daily digest: banned users", "err", err, "chat", chatID)
 	}
 
-	// Skip entirely if nothing to report — chat went quiet, don't spam.
+	// Нечего рассказывать — чат затих, не спамим пустой сводкой.
 	if !digestHasContent(s, topWriters, topFailers, newMembers, banned) {
-		// Still mark as sent so we don't re-check dozens of times today.
+		// Но помечаем отправленной, чтобы не перепроверять десятки раз за день.
 		_ = b.db.MarkDailyStatsSent(ctx, chatID, today)
 		return
 	}
@@ -102,8 +101,8 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time
 			WithParseMode(telego.ModeHTML))
 	if err != nil {
 		b.log.Warn("daily digest: send", "err", err, "chat", chatID)
-		// Don't mark as sent — we'll retry on the next tick. If the chat
-		// permanently blocks the bot, my_chat_member cleanup will kick in.
+		// Не помечаем отправленной — ретрай на следующем тике. Если чат
+		// навсегда заблокировал бота, сработает чистка по my_chat_member.
 		return
 	}
 	if err := b.db.MarkDailyStatsSent(ctx, chatID, today); err != nil {
@@ -115,10 +114,11 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time
 		"joined", s.Joined)
 }
 
-// digestHasContent reports whether the digest would show anything at all.
-// It must cover every counter and list renderStats prints — a day whose only
-// activity was a captcha pass or a spam ban still deserves a digest (the
-// join may sit just outside the window: joined 23:59, passed 00:01).
+// digestHasContent отвечает, покажет ли сводка хоть что-нибудь. Обязан
+// покрывать каждый счётчик и список, которые печатает renderStats: день, где
+// единственное событие — прохождение капчи или спам-бан, всё равно
+// заслуживает сводки (join мог остаться за окном: вошёл в 23:59, прошёл
+// капчу в 00:01).
 func digestHasContent(s storage.Stats, topWriters, topFailers, newMembers, banned []storage.UserCount) bool {
 	return s.Joined+s.Passed+s.Kicked+s.Banned+s.SpamBanned+
 		s.MsgNewcomer+s.MsgOldtimer+

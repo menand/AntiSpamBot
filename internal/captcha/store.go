@@ -11,7 +11,7 @@ type Pending struct {
 	MessageID  int
 	CorrectIdx int
 	ExpiresAt  time.Time
-	ThreadID   int // forum topic the captcha was sent to; 0 = no topic
+	ThreadID   int // топик форума, куда отправлена капча; 0 = без топика
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -25,7 +25,7 @@ func (p *Pending) Done() <-chan struct{} {
 	return p.cancelCh
 }
 
-// capKey identifies a captcha by (chat, user).
+// capKey идентифицирует капчу парой (chat, user).
 type capKey struct {
 	chatID int64
 	userID int64
@@ -34,7 +34,7 @@ type capKey struct {
 type Store struct {
 	mu       sync.Mutex
 	items    map[capKey]*Pending
-	inflight map[capKey]bool // kickoffs currently in setup (pre-Put)
+	inflight map[capKey]bool // кикоффы в процессе подготовки (до Put)
 }
 
 func NewStore() *Store {
@@ -44,11 +44,11 @@ func NewStore() *Store {
 	}
 }
 
-// BeginKickoff marks (chatID, userID) as being set up for a captcha. Returns
-// true if we won the race and the caller is responsible for calling
-// FinishKickoff when done (regardless of whether Put was reached). Returns
-// false if another captcha is already active or another kickoff is already
-// in progress — the caller should bail out silently.
+// BeginKickoff помечает (chatID, userID) как капчу в стадии подготовки.
+// Возвращает true, если мы выиграли гонку, — тогда вызывающий обязан по
+// завершении вызвать FinishKickoff (независимо от того, дошло ли до Put).
+// Возвращает false, если уже активна другая капча или уже идёт другой
+// кикофф, — вызывающему следует молча выйти.
 func (s *Store) BeginKickoff(chatID, userID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,8 +63,8 @@ func (s *Store) BeginKickoff(chatID, userID int64) bool {
 	return true
 }
 
-// FinishKickoff clears the in-flight flag. Safe to call multiple times.
-// Must be called by the same caller that got `true` from BeginKickoff.
+// FinishKickoff снимает флаг in-flight. Безопасно вызывать несколько раз.
+// Вызывать должен тот же, кто получил `true` от BeginKickoff.
 func (s *Store) FinishKickoff(chatID, userID int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -92,9 +92,10 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 	return p
 }
 
-// IsCaptchaActive reports whether the user is either in the middle of a
-// captcha kickoff (pre-Put) or has an active pending captcha. Used to decide
-// whether to delete messages arriving from the user before they're restricted.
+// IsCaptchaActive сообщает, находится ли пользователь в середине кикоффа
+// капчи (до Put) либо у него есть активная ожидающая капча. Используется,
+// чтобы решить, удалять ли сообщения, прилетающие от пользователя до того,
+// как его успели ограничить.
 func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -116,10 +117,10 @@ func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 	return p, ok
 }
 
-// TakeChat removes and returns all pending captchas for a chat. Used when the
-// bot leaves a chat — the caller should Cancel each returned Pending so the
-// waitTimeout goroutines exit instead of firing kick/ban in a chat the bot no
-// longer belongs to.
+// TakeChat изымает и возвращает все ожидающие капчи чата. Используется, когда
+// бот покидает чат, — вызывающий должен вызвать Cancel у каждого возвращённого
+// Pending, чтобы горутины waitTimeout завершились, а не стреляли kick/ban в
+// чате, где бота больше нет.
 func (s *Store) TakeChat(chatID int64) []*Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()

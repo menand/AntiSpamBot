@@ -91,11 +91,11 @@ func TestTopWritersAndFailers(t *testing.T) {
 		t.Errorf("#3: %+v", top[2])
 	}
 
-	// Failers
+	// Провалившие капчу.
 	_ = db.RecordEvent(ctx, 1, 500, EventKick, now)
 	_ = db.RecordEvent(ctx, 1, 500, EventBan, now)
 	_ = db.RecordEvent(ctx, 1, 501, EventKick, now)
-	_ = db.RecordEvent(ctx, 1, 502, EventPass, now) // not a fail
+	_ = db.RecordEvent(ctx, 1, 502, EventPass, now) // не провал
 
 	fails, err := db.TopFailers(ctx, 1, now.Add(-time.Hour), now.Add(time.Hour), 5)
 	if err != nil {
@@ -133,7 +133,7 @@ func TestGetUserInfos(t *testing.T) {
 		t.Error("user 3 should be absent")
 	}
 
-	// Empty list
+	// Пустой список.
 	empty, err := db.GetUserInfos(ctx, nil)
 	if err != nil || len(empty) != 0 {
 		t.Errorf("empty: %v %v", empty, err)

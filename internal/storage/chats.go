@@ -32,7 +32,7 @@ func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 	return nil
 }
 
-// GetChat returns the registry row for a single chat, if known.
+// GetChat возвращает строку реестра для одного чата, если он известен.
 func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) {
 	var c ChatInfo
 	var title, ctype sql.NullString
@@ -50,35 +50,35 @@ func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) 
 	return c, true, nil
 }
 
-// ChatSettings is the per-chat configuration row. Nullable fields mean
-// "use global default" — callers should fall back to b.cfg.* when the
-// field is not set.
+// ChatSettings — строка пер-чатовых настроек. Nullable-поля означают
+// «использовать глобальный дефолт» — вызывающий должен откатываться к
+// b.cfg.*, когда поле не задано.
 type ChatSettings struct {
 	ChatID                int64
-	GreetingEnabled       bool          // defaults to true when no row exists
-	MaxAttempts           sql.NullInt64 // NULL = use global
-	CaptchaTimeoutSeconds sql.NullInt64 // NULL = use global
-	DailyStatsEnabled     bool          // defaults to false when no row exists
-	DailyStatsUTCHour     sql.NullInt64 // NULL = use global DAILY_STATS_UTC_HOUR
+	GreetingEnabled       bool          // по умолчанию true, когда строки нет
+	MaxAttempts           sql.NullInt64 // NULL = глобальный дефолт
+	CaptchaTimeoutSeconds sql.NullInt64 // NULL = глобальный дефолт
+	DailyStatsEnabled     bool          // по умолчанию false, когда строки нет
+	DailyStatsUTCHour     sql.NullInt64 // NULL = глобальный DAILY_STATS_UTC_HOUR
 	LastDailyStatsDay     sql.NullString
-	CaptchaMode           sql.NullString // NULL = default (circles)
-	GreetingText          sql.NullString // NULL = built-in default greeting
-	SilentAnnounceEnabled bool           // defaults to true when no row exists
-	SpamCheckEnabled      bool           // defaults to false when no row exists
+	CaptchaMode           sql.NullString // NULL = дефолт (circles)
+	GreetingText          sql.NullString // NULL = встроенное приветствие по умолчанию
+	SilentAnnounceEnabled bool           // по умолчанию true, когда строки нет
+	SpamCheckEnabled      bool           // по умолчанию false, когда строки нет
 	SpamThreshold         sql.NullInt64  // NULL = 90 (%)
 	SpamWhitelistMsgs     sql.NullInt64  // NULL = 5 сообщений до белого списка
 	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
 }
 
-// defaultChatSettings is the settings row used when a chat has no stored row —
-// and the safe fallback when loading fails.
+// defaultChatSettings — строка настроек для чата без сохранённой строки —
+// и безопасный фолбек, когда загрузка не удалась.
 func defaultChatSettings(chatID int64) ChatSettings {
 	return ChatSettings{ChatID: chatID, GreetingEnabled: true, SilentAnnounceEnabled: true}
 }
 
-// GetChatSettings loads the full settings row for a chat, applying defaults
-// when the row is absent. On error the returned struct still carries the
-// defaults, so callers may resolve against it without checking err first.
+// GetChatSettings загружает полную строку настроек чата, применяя дефолты,
+// когда строки нет. При ошибке возвращаемая структура всё равно несёт
+// дефолты, так что вызывающий может резолвить по ней, не проверяя err.
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
 	s := defaultChatSettings(chatID)
 
@@ -100,7 +100,7 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 		return s, nil
 	}
 	if err != nil {
-		// A failed Scan may have partially filled s — hand back clean defaults.
+		// Неудавшийся Scan мог частично заполнить s — отдаём чистые дефолты.
 		return defaultChatSettings(chatID), fmt.Errorf("get chat settings: %w", err)
 	}
 	s.GreetingEnabled = greetingInt != 0
@@ -126,8 +126,8 @@ func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool)
 	return nil
 }
 
-// SetSilentAnnounceEnabled toggles the "returned after long silence"
-// announcements for this chat.
+// SetSilentAnnounceEnabled включает/выключает объявления «вернулся после
+// долгого молчания» для этого чата.
 func (d *DB) SetSilentAnnounceEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	v := 0
 	if enabled {
@@ -144,7 +144,7 @@ func (d *DB) SetSilentAnnounceEnabled(ctx context.Context, chatID int64, enabled
 	return nil
 }
 
-// SetSpamCheckEnabled toggles the AI spam analysis for this chat.
+// SetSpamCheckEnabled включает/выключает ИИ-анализ спама для этого чата.
 func (d *DB) SetSpamCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	v := 0
 	if enabled {
@@ -161,7 +161,7 @@ func (d *DB) SetSpamCheckEnabled(ctx context.Context, chatID int64, enabled bool
 	return nil
 }
 
-// SetSpamThreshold overrides the spam probability threshold (%). Nil clears.
+// SetSpamThreshold переопределяет порог вероятности спама (%). nil сбрасывает.
 func (d *DB) SetSpamThreshold(ctx context.Context, chatID int64, value *int) error {
 	var v any
 	if value != nil {
@@ -178,8 +178,8 @@ func (d *DB) SetSpamThreshold(ctx context.Context, chatID int64, value *int) err
 	return nil
 }
 
-// SetSpamWhitelistMsgs overrides how many total messages whitelist a user
-// from spam analysis. Nil clears.
+// SetSpamWhitelistMsgs переопределяет, сколько всего сообщений выводит юзера
+// в белый список (без анализа спама). nil сбрасывает.
 func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int) error {
 	var v any
 	if value != nil {
@@ -196,7 +196,7 @@ func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int)
 	return nil
 }
 
-// SetSpamVoteMargin overrides the vote margin deciding a spam verdict. Nil clears.
+// SetSpamVoteMargin переопределяет перевес голосов, решающий спам-вердикт. nil сбрасывает.
 func (d *DB) SetSpamVoteMargin(ctx context.Context, chatID int64, value *int) error {
 	var v any
 	if value != nil {
@@ -213,8 +213,8 @@ func (d *DB) SetSpamVoteMargin(ctx context.Context, chatID int64, value *int) er
 	return nil
 }
 
-// SetMaxAttempts overrides the global MaxAttempts for this chat. Pass nil to
-// clear the override (falls back to global default again).
+// SetMaxAttempts переопределяет глобальный MaxAttempts для этого чата. nil
+// снимает переопределение (снова действует глобальный дефолт).
 func (d *DB) SetMaxAttempts(ctx context.Context, chatID int64, value *int) error {
 	var v any
 	if value != nil {
@@ -231,8 +231,8 @@ func (d *DB) SetMaxAttempts(ctx context.Context, chatID int64, value *int) error
 	return nil
 }
 
-// SetCaptchaTimeoutSec overrides the global captcha timeout for this chat.
-// Pass nil to clear the override.
+// SetCaptchaTimeoutSec переопределяет глобальный таймаут капчи для этого
+// чата. nil снимает переопределение.
 func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *int) error {
 	var v any
 	if seconds != nil {
@@ -249,10 +249,10 @@ func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *in
 	return nil
 }
 
-// SetCaptchaMode stores the captcha style for this chat. Pass nil to clear
-// the override (fall back to the default mode). The bot validates known
-// values before calling this; unknown strings round-trip as-is but the bot
-// falls back to default at use time.
+// SetCaptchaMode сохраняет стиль капчи для этого чата. nil снимает
+// переопределение (возврат к режиму по умолчанию). Известные значения бот
+// валидирует до вызова; неизвестные строки сохраняются и читаются как есть,
+// но в момент использования бот откатывается к дефолту.
 func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) error {
 	var v any
 	if mode != nil {
@@ -269,9 +269,9 @@ func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) err
 	return nil
 }
 
-// SetGreetingText stores a custom greeting template for this chat. The
-// template may contain the {name} placeholder, replaced with the new member's
-// mention at send time. Pass nil to reset to the built-in default.
+// SetGreetingText сохраняет кастомный шаблон приветствия для этого чата.
+// Шаблон может содержать плейсхолдер {name}, который при отправке заменяется
+// упоминанием нового участника. nil возвращает встроенный дефолт.
 func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text *string) error {
 	var v any
 	if text != nil {
@@ -288,8 +288,9 @@ func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text *string) er
 	return nil
 }
 
-// SetDailyStatsHour overrides the UTC hour (0-23) at which the daily digest
-// is posted for this chat. Pass nil to clear (fall back to the global default).
+// SetDailyStatsHour переопределяет час UTC (0-23), в который в этот чат
+// постится ежедневный дайджест. nil снимает переопределение (возврат к
+// глобальному дефолту).
 func (d *DB) SetDailyStatsHour(ctx context.Context, chatID int64, utcHour *int) error {
 	var v any
 	if utcHour != nil {
@@ -306,8 +307,8 @@ func (d *DB) SetDailyStatsHour(ctx context.Context, chatID int64, utcHour *int) 
 	return nil
 }
 
-// SetDailyStatsEnabled toggles whether the bot posts a daily digest to this
-// chat. Default is off.
+// SetDailyStatsEnabled включает/выключает ежедневный дайджест в этом чате.
+// По умолчанию выключено.
 func (d *DB) SetDailyStatsEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	v := 0
 	if enabled {
@@ -324,8 +325,8 @@ func (d *DB) SetDailyStatsEnabled(ctx context.Context, chatID int64, enabled boo
 	return nil
 }
 
-// MarkDailyStatsSent records that the daily digest for `day` was posted to
-// `chatID`. Used to skip chats already handled today.
+// MarkDailyStatsSent записывает, что ежедневный дайджест за `day` отправлен в
+// `chatID`. Нужен, чтобы пропускать чаты, уже обработанные сегодня.
 func (d *DB) MarkDailyStatsSent(ctx context.Context, chatID int64, day string) error {
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, last_daily_stats_day)
@@ -338,11 +339,11 @@ func (d *DB) MarkDailyStatsSent(ctx context.Context, chatID int64, day string) e
 	return nil
 }
 
-// ChatsNeedingDailyStats returns chat IDs where:
-//   - daily stats are enabled,
-//   - the chat's effective UTC hour (per-chat override or defaultHour) has
-//     been reached (currentHour >= effective hour),
-//   - today's digest hasn't been sent yet.
+// ChatsNeedingDailyStats возвращает ID чатов, у которых:
+//   - ежедневная статистика включена,
+//   - действующий для чата час UTC (пер-чатовый override или defaultHour)
+//     уже наступил (currentHour >= действующего часа),
+//   - сегодняшний дайджест ещё не отправлен.
 func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentHour, defaultHour int, day string) ([]int64, error) {
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT chat_id FROM chat_settings
@@ -365,7 +366,7 @@ func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentHour, defaultHou
 	return out, rows.Err()
 }
 
-// ListChats returns all chats the bot has seen, sorted by title.
+// ListChats возвращает все чаты, которые бот видел, отсортированные по названию.
 func (d *DB) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	rows, err := d.sql.QueryContext(ctx,
 		`SELECT chat_id, title, type FROM chats ORDER BY COALESCE(title, ''), chat_id`)

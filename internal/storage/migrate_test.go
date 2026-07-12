@@ -40,7 +40,7 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	// Old chat should have no traces left.
+	// От старого чата не должно остаться следов.
 	chats, _ := db.ListChats(ctx)
 	for _, c := range chats {
 		if c.ChatID == old {
@@ -51,7 +51,7 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 		t.Error("old member still present")
 	}
 
-	// New chat should have the migrated data.
+	// В новом чате должны оказаться перенесённые данные.
 	if _, ok, _ := db.MemberJoinedAt(ctx, neu, 1); !ok {
 		t.Error("member not migrated to new chat")
 	}
@@ -65,9 +65,9 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if s.MsgNewcomer != 1 {
 		t.Errorf("message_counts not migrated: %d", s.MsgNewcomer)
 	}
-	// ALL settings columns must survive the migration, not just
-	// greeting_enabled — this regressed once when new columns were added to
-	// chat_settings but not to the MigrateChat INSERT.
+	// Миграцию обязаны переживать ВСЕ колонки настроек, а не только
+	// greeting_enabled — это однажды регрессировало, когда новые колонки
+	// добавили в chat_settings, но не в INSERT внутри MigrateChat.
 	ms, err := db.GetChatSettings(ctx, neu)
 	if err != nil {
 		t.Fatal(err)
@@ -122,15 +122,15 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 	neu := int64(-100001)
 	now := time.Now()
 
-	// Pre-existing data on BOTH sides for same user/day.
-	_ = db.UpsertMember(ctx, old, 1, now.Add(-10*24*time.Hour)) // earlier join
-	_ = db.UpsertMember(ctx, neu, 1, now.Add(-5*24*time.Hour))  // later join
+	// Данные уже есть с ОБЕИХ сторон для одного юзера/дня.
+	_ = db.UpsertMember(ctx, old, 1, now.Add(-10*24*time.Hour)) // более ранний вход
+	_ = db.UpsertMember(ctx, neu, 1, now.Add(-5*24*time.Hour))  // более поздний вход
 
 	_ = db.RecordEvent(ctx, old, 1, EventJoin, now)
 	_ = db.RecordEvent(ctx, neu, 1, EventJoin, now)
 
-	_ = db.IncMessage(ctx, old, now, true) // old: 1 newcomer, 0 old
-	_ = db.IncMessage(ctx, neu, now, true) // new: 1 newcomer, 0 old
+	_ = db.IncMessage(ctx, old, now, true) // старый чат: 1 newcomer, 0 oldtimer
+	_ = db.IncMessage(ctx, neu, now, true) // новый чат: 1 newcomer, 0 oldtimer
 	_ = db.IncMessage(ctx, neu, now, false)
 
 	_, _ = db.RecordMessage(ctx, old, 1, now.Add(-1*time.Hour))
@@ -141,7 +141,7 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	// member joined_at should be the EARLIER one (from old chat).
+	// joined_at участника должен быть БОЛЕЕ РАННИМ (из старого чата).
 	joinedAt, ok, _ := db.MemberJoinedAt(ctx, neu, 1)
 	if !ok {
 		t.Fatal("member missing after merge")
@@ -151,27 +151,27 @@ func TestMigrateChat_MergesIntoExistingNewSide(t *testing.T) {
 		t.Errorf("joined_at should be earlier one: got %d want %d", joinedAt.Unix(), expected)
 	}
 
-	// events: summed (2 joins).
+	// events: суммируются (2 входа).
 	s, _ := db.QueryStats(ctx, neu, now.Add(-2*24*time.Hour), now.AddDate(0, 0, 1))
 	if s.Joined != 2 {
 		t.Errorf("joined events: got %d want 2", s.Joined)
 	}
 
-	// message_counts: summed (2 newcomer, 1 old).
+	// message_counts: суммируются (2 newcomer, 1 oldtimer).
 	if s.MsgNewcomer != 2 || s.MsgOldtimer != 1 {
 		t.Errorf("messages: %+v, want 2/1", s)
 	}
 
-	// user_activity merged (message_count summed).
+	// user_activity сливается (message_count суммируется).
 	top, _ := db.TopWriters(ctx, neu, now.Add(-2*24*time.Hour), now.AddDate(0, 0, 1), 10)
 	if len(top) != 1 {
 		t.Fatalf("top writers: %+v", top)
 	}
-	if top[0].Count != 3 { // 1 from old + 2 from new
+	if top[0].Count != 3 { // 1 из старого + 2 из нового
 		t.Errorf("top writer count: got %d want 3", top[0].Count)
 	}
 
-	// old side fully clean.
+	// Старая сторона полностью чиста.
 	s2, _ := db.QueryStats(ctx, old, time.Unix(0, 0), now.AddDate(0, 0, 1))
 	if s2.Joined != 0 || s2.MsgNewcomer != 0 {
 		t.Errorf("old chat still has data: %+v", s2)
@@ -182,7 +182,7 @@ func TestMigrateChat_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
 
-	// Running migrate twice should be safe (second run is a no-op).
+	// Повторный запуск миграции должен быть безопасен (второй прогон — no-op).
 	old := int64(-5000)
 	neu := int64(-100001)
 	_ = db.UpsertMember(ctx, old, 1, time.Now())
@@ -223,14 +223,14 @@ func TestDeleteChat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// chat removed from registry
+	// Чат удалён из реестра.
 	chats, _ := db.ListChats(ctx)
 	for _, c := range chats {
 		if c.ChatID == 1 {
 			t.Error("chat not removed from chats table")
 		}
 	}
-	// but historical data stays
+	// Но исторические данные остаются.
 	if _, ok, _ := db.MemberJoinedAt(ctx, 1, 100); !ok {
 		t.Error("DeleteChat should keep historical data intact")
 	}

@@ -77,7 +77,7 @@ func TestPendingThreadIDAndDeleteChat(t *testing.T) {
 		t.Errorf("default thread_id should be 0: %+v", byUser[3])
 	}
 
-	// DeletePendingChat wipes chat 1 only.
+	// DeletePendingChat вычищает только чат 1.
 	if err := db.DeletePendingChat(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -108,8 +108,8 @@ func TestQueryStatsExcludesUntilDay(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
 
-	// Messages on two consecutive days; querying [day1, day2) must count
-	// only day1 — the digest's "yesterday" window relies on this.
+	// Сообщения в два соседних дня; запрос [day1, day2) должен посчитать
+	// только day1 — на этом держится окно «вчера» у дайджеста.
 	day1 := time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)
 	day2 := time.Date(2026, 6, 11, 1, 0, 0, 0, time.UTC)
 	_ = db.IncMessage(ctx, 1, day1, false)
@@ -144,8 +144,8 @@ func TestAttempts(t *testing.T) {
 		t.Fatalf("after reset: n=%d want 1", n)
 	}
 
-	// TTL reset: directly poke the table backwards in time, then increment
-	// again — count should reset to 1.
+	// Сброс по TTL: руками отматываем запись в таблице назад во времени,
+	// затем инкрементируем снова — счётчик должен сброситься в 1.
 	n, _ = db.IncrementAttempt(ctx, 2, 20, time.Hour)
 	if n != 1 {
 		t.Fatalf("fresh: n=%d want 1", n)
@@ -161,7 +161,7 @@ func TestAttempts(t *testing.T) {
 		t.Fatalf("ttl-reset: n=%d want 1", n)
 	}
 
-	// SweepAttempts also clears records older than ttl.
+	// SweepAttempts тоже вычищает записи старше ttl.
 	if _, err := db.sql.ExecContext(ctx,
 		`UPDATE attempts SET updated_at = ? WHERE chat_id = 2 AND user_id = 20`,
 		pastUnix); err != nil {
@@ -216,7 +216,7 @@ func TestStats(t *testing.T) {
 		t.Errorf("MsgOldtimer=%d want 1", s.MsgOldtimer)
 	}
 
-	// Different chat — isolation
+	// Другой чат — изоляция.
 	s2, _ := db.QueryStats(ctx, 999, now.Add(-24*time.Hour), now.AddDate(0, 0, 1))
 	if s2.Joined != 0 || s2.MsgNewcomer != 0 {
 		t.Errorf("chat isolation broken: %+v", s2)

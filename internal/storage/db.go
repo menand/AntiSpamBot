@@ -23,9 +23,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	// Serialize writes; SQLite has a single writer and this avoids "database
-	// is locked" churn at low traffic. WAL (set in the DSN above) keeps reads
-	// from blocking behind them. Raise the pool if traffic ever grows.
+	// Сериализуем записи: у SQLite один писатель, и это убирает возню с
+	// «database is locked» на малом трафике. WAL (задан в DSN выше) не даёт
+	// чтениям блокироваться за ними. Если трафик когда-нибудь вырастет —
+	// поднять пул.
 	raw.SetMaxOpenConns(1)
 	if err := raw.PingContext(ctx); err != nil {
 		_ = raw.Close()
@@ -36,10 +37,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
 
-	// Additive migrations for existing DBs. Fresh DBs already have these
-	// columns via schema.sql; the ALTER TABLE here harmlessly fails with
-	// "duplicate column name" and we ignore it. Keep entries idempotent —
-	// add-column with a default or NULL, no data rewrites.
+	// Аддитивные миграции для существующих БД. В свежих БД эти колонки уже
+	// есть через schema.sql; ALTER TABLE здесь безвредно падает с
+	// "duplicate column name", и мы это игнорируем. Записи держать
+	// идемпотентными — add-column с дефолтом или NULL, без переписывания
+	// данных.
 	migrations := []string{
 		`ALTER TABLE chat_settings ADD COLUMN max_attempts INTEGER`,
 		`ALTER TABLE chat_settings ADD COLUMN captcha_timeout_seconds INTEGER`,

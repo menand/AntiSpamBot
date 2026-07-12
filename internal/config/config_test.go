@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// clearEnv resets every variable Load reads, so tests are hermetic no matter
-// what the developer's shell exports.
+// clearEnv сбрасывает все переменные, которые читает Load, — экспортированные
+// в шелле разработчика значения не должны протекать в тесты.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
@@ -15,6 +15,7 @@ func clearEnv(t *testing.T) {
 		"ALLOWED_CHATS", "DB_PATH", "NEWCOMER_DAYS", "SILENT_ANNOUNCE_DAYS",
 		"OWNER_IDS", "LOG_FILE", "CAPTCHA_DELAY_MS", "DAILY_STATS_UTC_HOUR",
 		"GROQ_API_KEY", "GROQ_MODEL",
+		"GIGACHAT_AUTH_KEY", "GIGACHAT_SCOPE", "GIGACHAT_MODEL",
 	} {
 		t.Setenv(name, "")
 	}

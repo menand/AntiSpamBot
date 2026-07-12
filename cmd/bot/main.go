@@ -16,14 +16,14 @@ import (
 	"github.com/menand/AntiSpamBot/internal/config"
 )
 
-// version is stamped at build time via -ldflags "-X main.version=...".
-// "dev" means a plain `go run` / untagged build.
+// version проставляется на этапе сборки через -ldflags "-X main.version=...".
+// "dev" означает обычный `go run` / сборку без тега.
 var version = "dev"
 
 func main() {
-	// Auto-load .env for local development. In Docker compose the env comes
-	// from env_file/environment, and this call is a silent no-op when .env
-	// doesn't exist.
+	// Автоподхват .env для локальной разработки. В Docker compose окружение
+	// приходит из env_file/environment, а когда .env не существует, этот
+	// вызов — молчаливый no-op.
 	_ = godotenv.Load()
 
 	cfg, err := config.Load()
@@ -36,9 +36,9 @@ func main() {
 	if cfg.LogFile != "" {
 		writers = append(writers, &lumberjack.Logger{
 			Filename:   cfg.LogFile,
-			MaxSize:    10, // MB per file before rotation
+			MaxSize:    10, // MB на файл до ротации
 			MaxBackups: 3,
-			MaxAge:     30, // days
+			MaxAge:     30, // дней
 			Compress:   false,
 		})
 	}

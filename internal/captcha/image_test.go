@@ -13,7 +13,7 @@ func TestGlyphFile(t *testing.T) {
 		want  string
 	}{
 		{"🦊", "emoji_u1f98a.png"},
-		{"☀️", "emoji_u2600.png"}, // FE0F variation selector dropped
+		{"☀️", "emoji_u2600.png"}, // variation selector FE0F отбрасывается
 		{"⭐", "emoji_u2b50.png"},
 		{"⚽", "emoji_u26bd.png"},
 	}
@@ -25,9 +25,9 @@ func TestGlyphFile(t *testing.T) {
 }
 
 func TestAllEmojiGlyphsPresent(t *testing.T) {
-	// Every token in the emoji-mode pool must have a vendored glyph — catches
-	// pool/assets drift when someone adds an emoji to emojiCategories without
-	// its PNG. Circles are text-only and intentionally not covered here.
+	// У каждого токена emoji-пула должен быть завендоренный глиф — ловит
+	// дрейф пула/ассетов, когда emoji добавили в emojiCategories без его
+	// PNG. Круги (circles) чисто текстовые и сюда сознательно не входят.
 	for ci, cat := range emojiCategories {
 		for _, tok := range cat {
 			if _, err := loadGlyph(tok.Emoji); err != nil {

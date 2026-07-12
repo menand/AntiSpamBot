@@ -8,10 +8,11 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// userChats returns the subset of known chats that this user is allowed to
-// manage: everything for OWNER_IDS, only chats where the user is admin/creator
-// for everyone else. Admin lookups go through the 6h cache, so only the first
-// menu open costs N API requests for a non-owner with N known chats.
+// userChats возвращает подмножество известных чатов, которыми юзер может
+// управлять: для OWNER_IDS — все, для остальных — только чаты, где юзер
+// админ/создатель. Проверки админства идут через 6-часовой кэш, поэтому
+// только первое открытие меню стоит не-владельцу N API-запросов при N
+// известных чатах.
 func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, error) {
 	all, err := b.db.ListChats(ctx)
 	if err != nil {
@@ -29,23 +30,24 @@ func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, 
 	return out, nil
 }
 
-// canManageChat reports whether the user may view stats and toggle settings
-// for a specific chat: either bot-wide owner, or chat admin/creator. Admin
-// status comes from the cache (invalidated on every chat_member event; in
-// chats where the bot is not an admin Telegram sends no such events, which is
-// why negative results get the short TTL) — the same staleness class already
-// accepted for the spam-vote golden voice.
+// canManageChat отвечает, может ли юзер смотреть статистику и крутить
+// настройки конкретного чата: либо владелец бота, либо админ/создатель чата.
+// Статус админа берётся из кэша (инвалидируется на каждом chat_member; в
+// чатах, где бот сам не админ, Telegram таких событий не шлёт — поэтому у
+// негативных ответов короткий TTL) — тот же класс устаревания, что уже
+// принят для золотого голоса в спам-голосовании.
 func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
 	return b.isOwner(userID) || b.isChatAdminCached(ctx, chatID, userID)
 }
 
-// chatSettings loads the per-chat settings row for RESOLUTION (captcha
-// parameters, greeting, spam thresholds): errors are logged here and the
-// returned struct still carries the defaults (GetChatSettings guarantees
-// that), so callers can resolve against it unconditionally. Do NOT use it for
-// read-modify-write (settings toggles) or for rendering the settings screen —
-// those must call GetChatSettings directly and abort on error, otherwise they
-// write/show the inverse of a default instead of the stored value.
+// chatSettings загружает пер-чатовые настройки для РЕЗОЛВИНГА (параметры
+// капчи, приветствие, пороги антиспама): ошибка логируется здесь, а
+// возвращённая структура всё равно несёт дефолты (это гарантирует
+// GetChatSettings), так что вызывающие резолвят по ней безусловно. НЕ
+// использовать для read-modify-write (тогглы настроек) и для отрисовки
+// экрана настроек — те обязаны звать GetChatSettings напрямую и прерываться
+// на ошибке, иначе запишут/покажут инверсию дефолта вместо сохранённого
+// значения.
 func (b *Bot) chatSettings(ctx context.Context, chatID int64) storage.ChatSettings {
 	s, err := b.db.GetChatSettings(ctx, chatID)
 	if err != nil {
@@ -54,8 +56,8 @@ func (b *Bot) chatSettings(ctx context.Context, chatID int64) storage.ChatSettin
 	return s
 }
 
-// effectiveMaxAttempts resolves the max-attempts value: per-chat override if
-// set, else the global default from config.
+// effectiveMaxAttempts резолвит число попыток: пер-чатовый override, если
+// задан, иначе глобальный дефолт из конфига.
 func (b *Bot) effectiveMaxAttempts(s storage.ChatSettings) int {
 	if s.MaxAttempts.Valid {
 		return int(s.MaxAttempts.Int64)
@@ -63,8 +65,8 @@ func (b *Bot) effectiveMaxAttempts(s storage.ChatSettings) int {
 	return b.cfg.MaxAttempts
 }
 
-// effectiveCaptchaTimeout resolves the captcha timeout: per-chat override if
-// set, else global default.
+// effectiveCaptchaTimeout резолвит таймаут капчи: пер-чатовый override, если
+// задан, иначе глобальный дефолт.
 func (b *Bot) effectiveCaptchaTimeout(s storage.ChatSettings) time.Duration {
 	if s.CaptchaTimeoutSeconds.Valid {
 		return time.Duration(s.CaptchaTimeoutSeconds.Int64) * time.Second
@@ -72,9 +74,9 @@ func (b *Bot) effectiveCaptchaTimeout(s storage.ChatSettings) time.Duration {
 	return b.cfg.CaptchaTimeout
 }
 
-// effectiveDailyHour resolves the UTC hour of the daily digest: per-chat
-// override if set, else global default. (The digest loop itself resolves this
-// in SQL via COALESCE — this helper is for Go-side display.)
+// effectiveDailyHour резолвит UTC-час ежедневной сводки: пер-чатовый
+// override, если задан, иначе глобальный дефолт. (Сам цикл сводок резолвит
+// это в SQL через COALESCE — этот хелпер для отображения на стороне Go.)
 func (b *Bot) effectiveDailyHour(s storage.ChatSettings) int {
 	if s.DailyStatsUTCHour.Valid {
 		return int(s.DailyStatsUTCHour.Int64)
@@ -82,8 +84,8 @@ func (b *Bot) effectiveDailyHour(s storage.ChatSettings) int {
 	return b.cfg.DailyStatsUTCHour
 }
 
-// effectiveCaptchaMode resolves the captcha style. Unknown values stored in
-// the DB (future / corrupt) fall back to ModeCircles.
+// effectiveCaptchaMode резолвит вид капчи. Неизвестные значения из БД
+// (будущие / битые) откатываются к ModeCircles.
 func effectiveCaptchaMode(s storage.ChatSettings) captcha.Mode {
 	if !s.CaptchaMode.Valid {
 		return captcha.ModeCircles

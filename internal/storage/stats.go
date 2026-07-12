@@ -28,7 +28,7 @@ func (d *DB) RecordEvent(ctx context.Context, chatID, userID int64, kind EventKi
 	return nil
 }
 
-// UpsertMember records (or refreshes) the join timestamp for a passed user.
+// UpsertMember записывает (или обновляет) время входа прошедшего капчу юзера.
 func (d *DB) UpsertMember(ctx context.Context, chatID, userID int64, joinedAt time.Time) error {
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO members (chat_id, user_id, joined_at)
@@ -41,8 +41,8 @@ func (d *DB) UpsertMember(ctx context.Context, chatID, userID int64, joinedAt ti
 	return nil
 }
 
-// MemberJoinedAt returns the join time for a user. Returns (zero, false, nil) if
-// the user has no record (pre-existing member).
+// MemberJoinedAt возвращает время входа юзера. Возвращает (zero, false, nil),
+// если записи о юзере нет (участник состоял в чате ещё до бота).
 func (d *DB) MemberJoinedAt(ctx context.Context, chatID, userID int64) (time.Time, bool, error) {
 	var unix int64
 	err := d.sql.QueryRowContext(ctx,
@@ -57,8 +57,8 @@ func (d *DB) MemberJoinedAt(ctx context.Context, chatID, userID int64) (time.Tim
 	return time.Unix(unix, 0), true, nil
 }
 
-// IncMessage bumps the per-day counter for the given classification.
-// day is formatted 'YYYY-MM-DD' UTC.
+// IncMessage увеличивает дневной счётчик для данной классификации.
+// day форматируется как 'YYYY-MM-DD' UTC.
 func (d *DB) IncMessage(ctx context.Context, chatID int64, when time.Time, newcomer bool) error {
 	day := when.UTC().Format("2006-01-02")
 	var newInc, oldInc int
@@ -128,9 +128,10 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 		return s, fmt.Errorf("events rows: %w", err)
 	}
 
-	// Day-granular tables use [fromDay, untilDay) — exclusive upper bound, same
-	// as the events query above. Callers pass calendar-aligned ranges (see
-	// statsRange / sendDailyDigest), so a midnight `until` excludes that day.
+	// Таблицы с дневной гранулярностью используют [fromDay, untilDay) —
+	// верхняя граница исключается, как и в запросе событий выше. Вызывающие
+	// передают выровненные по календарю диапазоны (см. statsRange /
+	// sendDailyDigest), так что полуночный `until` исключает этот день.
 	fromDay := from.UTC().Format("2006-01-02")
 	untilDay := until.UTC().Format("2006-01-02")
 	err = d.sql.QueryRowContext(ctx, `

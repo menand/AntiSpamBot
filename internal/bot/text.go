@@ -8,7 +8,7 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// pluralRU picks the right Russian form for count. E.g. pluralRU(n, "день", "дня", "дней").
+// pluralRU выбирает правильную русскую форму для count. Например: pluralRU(n, "день", "дня", "дней").
 func pluralRU(n int, one, few, many string) string {
 	mod100 := n % 100
 	if mod100 >= 11 && mod100 <= 19 {
@@ -24,7 +24,7 @@ func pluralRU(n int, one, few, many string) string {
 	}
 }
 
-// humanDaysRU renders a duration given in days as "N год/лет" / "N месяц/ев" / "N день/дней".
+// humanDaysRU форматирует срок в днях как «N год/лет» / «N месяц/ев» / «N день/дней».
 func humanDaysRU(days int) string {
 	if days < 0 {
 		days = 0
@@ -41,8 +41,8 @@ func humanDaysRU(days int) string {
 	}
 }
 
-// humanDaysGenRU is humanDaysRU in the genitive case, for "после N …"
-// phrases: "1 месяца", "2 месяцев", "1 года", "2 лет", "21 дня".
+// humanDaysGenRU — humanDaysRU в родительном падеже, для фраз «после N …»:
+// «1 месяца», «2 месяцев», «1 года», «2 лет», «21 дня».
 func humanDaysGenRU(days int) string {
 	if days < 0 {
 		days = 0
@@ -59,8 +59,8 @@ func humanDaysGenRU(days int) string {
 	}
 }
 
-// mentionFromInfo renders a clickable HTML mention using cached user info.
-// Falls back to id if no name is known.
+// mentionFromInfo рендерит кликабельный HTML-mention из закэшированной
+// информации о юзере. Если имя неизвестно — фолбэк на id.
 func mentionFromInfo(info storage.UserInfo) string {
 	name := strings.TrimSpace(info.FirstName + " " + info.LastName)
 	if name == "" && info.Username != "" {
@@ -72,7 +72,7 @@ func mentionFromInfo(info storage.UserInfo) string {
 	return fmt.Sprintf(`<a href="tg://user?id=%d">%s</a>`, info.UserID, html.EscapeString(name))
 }
 
-// mentionOrID renders a mention from a map lookup; if missing, shows the id.
+// mentionOrID рендерит mention по данным из карты; если юзера там нет — id.
 func mentionOrID(infos map[int64]storage.UserInfo, userID int64) string {
 	if info, ok := infos[userID]; ok {
 		return mentionFromInfo(info)
@@ -80,11 +80,11 @@ func mentionOrID(infos map[int64]storage.UserInfo, userID int64) string {
 	return fmt.Sprintf(`<a href="tg://user?id=%d">id%d</a>`, userID, userID)
 }
 
-// mentionWithUsername is mentionOrID plus a " - @username" tail when the
-// username is known. Stats lists use it: the tg://user link silently degrades
-// to plain text for deleted or privacy-restricted accounts, while a literal
-// @username stays clickable on its own. No tail when the display name IS the
-// username (no first/last name) — it would just duplicate.
+// mentionWithUsername — mentionOrID плюс хвост « - @username», когда ник
+// известен. Используется в списках статистики: ссылка tg://user молча
+// вырождается в обычный текст у удалённых и закрытых приватностью аккаунтов,
+// а литеральный @username остаётся кликабельным сам по себе. Хвоста нет,
+// когда отображаемое имя И ЕСТЬ ник (нет имени/фамилии) — было бы дублем.
 func mentionWithUsername(infos map[int64]storage.UserInfo, userID int64) string {
 	m := mentionOrID(infos, userID)
 	info, ok := infos[userID]

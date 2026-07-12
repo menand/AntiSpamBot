@@ -15,19 +15,19 @@ type Config struct {
 	CaptchaTimeout     time.Duration
 	MaxAttempts        int
 	LogLevel           slog.Level
-	AllowedChats       map[int64]struct{} // nil = allow all
+	AllowedChats       map[int64]struct{} // nil = разрешены все
 	DBPath             string
 	NewcomerDays       int
-	SilentAnnounceDays int                // 0 = disabled
-	OwnerIDs           map[int64]struct{} // Telegram user IDs with super-admin rights
-	LogFile            string             // empty = stdout only; set = tee to file (for /logs command)
-	CaptchaDelay       time.Duration      // delay between join and sending captcha
-	DailyStatsUTCHour  int                // hour of day (UTC) at/after which daily digests are posted
-	GroqAPIKey         string             // empty = Groq disabled
-	GroqModel          string             // empty = groq.DefaultModel
-	GigaChatAuthKey    string             // empty = GigaChat fallback disabled
-	GigaChatScope      string             // empty = gigachat.DefaultScope
-	GigaChatModel      string             // empty = gigachat.DefaultModel
+	SilentAnnounceDays int                // 0 = выключено
+	OwnerIDs           map[int64]struct{} // ID пользователей Telegram с правами суперадмина
+	LogFile            string             // пусто = только stdout; задано = дублировать в файл (для команды /logs)
+	CaptchaDelay       time.Duration      // пауза между вступлением и отправкой капчи
+	DailyStatsUTCHour  int                // час суток (UTC), в который/после которого постятся ежедневные дайджесты
+	GroqAPIKey         string             // пусто = Groq выключен
+	GroqModel          string             // пусто = groq.DefaultModel
+	GigaChatAuthKey    string             // пусто = фолбек GigaChat выключен
+	GigaChatScope      string             // пусто = gigachat.DefaultScope
+	GigaChatModel      string             // пусто = gigachat.DefaultModel
 }
 
 func Load() (*Config, error) {
@@ -125,8 +125,8 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-// parseDuration reads an integer env var expressed in the given unit
-// (seconds, milliseconds, …).
+// parseDuration читает целочисленную env-переменную, выраженную в заданной
+// единице (секунды, миллисекунды, …).
 func parseDuration(name string, def time.Duration, unit time.Duration) (time.Duration, error) {
 	v := os.Getenv(name)
 	if v == "" {
