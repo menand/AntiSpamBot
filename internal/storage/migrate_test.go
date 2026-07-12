@@ -27,7 +27,8 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetDailyStatsEnabled(ctx, old, true)
 	_ = db.SetDailyStatsHour(ctx, old, &hour)
 	_ = db.SetCaptchaMode(ctx, old, &mode)
-	_ = db.SetGreetingText(ctx, old, &greet, nil)
+	greetEnts := `[{"type":"bold","offset":0,"length":6}]`
+	_ = db.SetGreetingText(ctx, old, &greet, &greetEnts)
 	_ = db.SetSilentAnnounceEnabled(ctx, old, false)
 	sthr, swl, svm := 75, 10, 2
 	_ = db.SetSpamCheckEnabled(ctx, old, true)
@@ -95,6 +96,9 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.GreetingText.Valid || ms.GreetingText.String != "Привет, {name}!" {
 		t.Errorf("greeting_text did not migrate: %+v", ms.GreetingText)
+	}
+	if !ms.GreetingEntities.Valid || ms.GreetingEntities.String != greetEnts {
+		t.Errorf("greeting_entities did not migrate: %+v", ms.GreetingEntities)
 	}
 	if ms.SilentAnnounceEnabled {
 		t.Error("silent_announce_enabled=false did not migrate (still shows true default)")

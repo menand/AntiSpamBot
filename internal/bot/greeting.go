@@ -11,6 +11,8 @@ import (
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
+
+	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
 // Кастомные шаблоны приветствия ограничены сильно ниже телеграмного лимита
@@ -30,8 +32,11 @@ type greetInputState struct {
 	armedAt time.Time
 }
 
-func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threadID int) {
-	s := b.chatSettings(ctx, chatID)
+// maybeSendGreeting шлёт приветствие (s передан вызывающим, чтобы не читать
+// настройки дважды). Взвод reply-ожидания — НЕ здесь: onSuccess делает его
+// сразу после release, до этого сетевого round-trip'а, иначе юзер успел бы
+// написать в окне release→arm и был бы кикнут за молчание, хотя ответил.
+func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) {
 	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
 	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
 	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
@@ -54,7 +59,6 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	sent, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
-		// Требование без доставленного якоря несправедливо — ожидание не взводим.
 		return
 	}
 	// Помним id приветствия: при спам-бане юзера revoke стирает только его
@@ -62,8 +66,6 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, chatID, userID int64, threa
 	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
 		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
-	// Взводим ожидание ТОЛЬКО после успешной отправки якоря.
-	b.maybeArmReplyWait(s, chatID, userID)
 }
 
 // renderGreeting собирает текст приветствия. Шаблон с сохранёнными
