@@ -82,7 +82,7 @@ Write-through caches (`internal/bot/cache.go`): `rememberChat`/`rememberUser` sk
 
 ### Stats semantics (IMPORTANT)
 
-Events are counted by unix time (`at >= from AND at < until`), messages by calendar day (`day >= fromDay AND day < untilDay`) — **both upper bounds exclusive**. `statsRange` returns calendar-aligned UTC windows (day = today since 00:00 UTC, week = 7 calendar days, month = 30) precisely so both counts cover the same range. The daily digest passes [yesterday 00:00, today 00:00) and labels it «вчера» via `renderStats`'s label parameter. Don't reintroduce rolling `now-24h` windows — they desync event vs message counts.
+Events are counted by unix time (`at >= from AND at < until`), messages by calendar day (`day >= fromDay AND day < untilDay`) — **both upper bounds exclusive**. Days are cut in `storage.StatsLocation` (MSK = fixed UTC+3, no DST in Russia since 2014) via `storage.DayOf` — the ONLY day-formatting site; the offset lives ONLY in `storage.MSKOffsetHours` (feeds StatsLocation, the digest-gate SQL shift, and menu.go's MSK hour labels). `statsRange(p, now)` returns MSK-calendar-aligned windows (day = today since 00:00 MSK, yesterday = [yesterday 00:00, today 00:00) — the only period whose `until` is TODAY's midnight, week = 7 calendar days, month = 30) precisely so both counts cover the same range. The daily digest passes [yesterday 00:00, today 00:00) MSK and labels it «вчера» via `renderStats`'s label parameter. Don't reintroduce rolling `now-24h` windows — they desync event vs message counts. Historical rows written before the MSK switch are keyed by UTC days; messages sent 00:00–03:00 MSK in the past sit in the previous day — accepted one-off drift.
 
 ### DM menu (`internal/bot/menu.go`)
 
@@ -94,7 +94,7 @@ Button labels: always truncate with `truncateLabel` (rune-safe) — byte slicing
 
 ### Daily digest (`internal/bot/daily.go`)
 
-`dailyDigestLoop` ticks every 5 min; `ChatsNeedingDailyStats` gates on per-chat hour (override or `DAILY_STATS_UTC_HOUR`) + `last_daily_stats_day`. Empty digests are skipped but still marked sent. Hour presets in the menu are stored UTC, displayed MSK (UTC+3 hardcoded in `mskHourLabel`).
+`dailyDigestLoop` ticks every 5 min; `ChatsNeedingDailyStats` gates on per-chat hour (override or `DAILY_STATS_UTC_HOUR`) + `last_daily_stats_day`. The hour is STORED in UTC (menu presets/`mskHourLabel` compatibility) but the gate compares in MSK via the SQL shift `(hour+MSKOffsetHours)%24` (bound parameter) — the gate hour and the MSK day marker must live in the same zone, otherwise the day flips at 21:00 UTC while the gate is already open and every digest permanently drifts to midnight MSK. The digest window is `statsRange(periodYesterday, now)` — the same source as the menu's «Вчера» button, so the two can never diverge; the sent-marker is the day of `until`. Empty digests are skipped but still marked sent.
 
 ### Restart behavior
 

@@ -3,13 +3,14 @@ package bot
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
 func TestParsePeriod(t *testing.T) {
-	for _, p := range []statsPeriod{periodDay, periodWeek, periodMonth, periodAll} {
+	for _, p := range []statsPeriod{periodDay, periodYesterday, periodWeek, periodMonth, periodAll} {
 		if got := parsePeriod(string(p)); got != p {
 			t.Errorf("parsePeriod(%q) = %q, want %q", p, got, p)
 		}
@@ -20,6 +21,43 @@ func TestParsePeriod(t *testing.T) {
 		if got := parsePeriod(junk); got != periodWeek {
 			t.Errorf("parsePeriod(%q) = %q, want fallback %q", junk, got, periodWeek)
 		}
+	}
+}
+
+func TestStatsRange(t *testing.T) {
+	// 12 июля 01:30 МСК = 11 июля 22:30 UTC: «сегодня» уже 12-е по Москве,
+	// хотя по UTC ещё 11-е — ровно тот случай, ради которого статистика
+	// выровнена по storage.StatsLocation.
+	now := time.Date(2026, 7, 11, 22, 30, 0, 0, time.UTC)
+	msk := storage.StatsLocation
+	midnight := time.Date(2026, 7, 12, 0, 0, 0, 0, msk)
+
+	tests := []struct {
+		p           statsPeriod
+		from, until time.Time
+	}{
+		{periodDay, midnight, midnight.AddDate(0, 0, 1)},
+		{periodYesterday, midnight.AddDate(0, 0, -1), midnight},
+		{periodWeek, midnight.AddDate(0, 0, -6), midnight.AddDate(0, 0, 1)},
+		{periodMonth, midnight.AddDate(0, 0, -29), midnight.AddDate(0, 0, 1)},
+		{periodAll, time.Unix(0, 0), midnight.AddDate(0, 0, 1)},
+	}
+	for _, tc := range tests {
+		from, until := statsRange(tc.p, now)
+		if !from.Equal(tc.from) || !until.Equal(tc.until) {
+			t.Errorf("statsRange(%s) = [%v, %v), want [%v, %v)",
+				tc.p, from, until, tc.from, tc.until)
+		}
+	}
+
+	// «Вчера» и «сегодня» стыкуются без зазора и без пересечения.
+	yFrom, yUntil := statsRange(periodYesterday, now)
+	dFrom, _ := statsRange(periodDay, now)
+	if !yUntil.Equal(dFrom) {
+		t.Errorf("yesterday.until (%v) must equal day.from (%v)", yUntil, dFrom)
+	}
+	if got := dFrom.Sub(yFrom); got != 24*time.Hour {
+		t.Errorf("yesterday window = %v, want 24h", got)
 	}
 }
 

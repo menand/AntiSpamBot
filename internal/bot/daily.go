@@ -34,26 +34,30 @@ func (b *Bot) dailyDigestLoop(ctx context.Context) {
 }
 
 func (b *Bot) maybeSendDigests(ctx context.Context) {
-	now := time.Now().UTC()
-	today := now.Format("2006-01-02")
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	// Час хранится в UTC, но гейт сравнивается в МСК-часах — почему это
+	// обязательно, объяснено у SQL-сдвига в ChatsNeedingDailyStats.
+	now := time.Now().In(storage.StatsLocation)
+	today := storage.DayOf(now)
+	// Окно дайджеста — ровно то же «вчера», что у кнопки «Вчера» в меню:
+	// один источник, расхождение цифр структурно невозможно.
+	from, until := statsRange(periodYesterday, now)
 	chatIDs, err := b.db.ChatsNeedingDailyStats(ctx, now.Hour(), b.cfg.DailyStatsUTCHour, today)
 	if err != nil {
 		b.log.Warn("daily digest: query chats", "err", err)
 		return
 	}
 	for _, chatID := range chatIDs {
-		b.sendDailyDigest(ctx, chatID, midnight)
+		b.sendDailyDigest(ctx, chatID, from, until)
 	}
 }
 
-// sendDailyDigest постит сводку за календарный день перед `until`
-// (сегодняшняя полночь UTC, вычисленная ОДИН раз в maybeSendDigests из того
-// же показания часов, что и гейт-маркер `today` — повторный time.Now() здесь
-// когда-то отправлял один день дважды, если 5-минутный тик пересекал полночь).
-func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time) {
-	today := until.Format("2006-01-02")
-	from := until.Add(-24 * time.Hour)
+// sendDailyDigest постит сводку за московские сутки [from, until) —
+// окно вычислено ОДИН раз в maybeSendDigests из того же показания часов,
+// что и гейт-маркер (повторный time.Now() здесь когда-то отправлял один
+// день дважды, если 5-минутный тик пересекал полночь). Маркер отправки —
+// день `until`: полночь МСК принадлежит наступившим суткам.
+func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until time.Time) {
+	today := storage.DayOf(until)
 
 	s, err := b.db.QueryStats(ctx, chatID, from, until)
 	if err != nil {
@@ -93,7 +97,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, until time.Time
 	}
 
 	header := "🌅 <b>Сводка за сутки</b>\n\n"
-	body := renderStats(periodDay, "вчера", s, b.cfg.NewcomerDays,
+	body := renderStats(periodYesterday, "вчера", s, b.cfg.NewcomerDays,
 		newMembers, topWriters, topFailers, banned, infos)
 
 	_, err = b.api.SendMessage(ctx,

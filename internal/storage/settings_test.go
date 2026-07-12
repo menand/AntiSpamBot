@@ -151,9 +151,10 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 	_ = db.SetDailyStatsEnabled(ctx, 300, false) // не участвует
 	_ = db.MarkDailyStatsSent(ctx, 100, "2026-04-22")
 
-	// Глобальный дефолтный час 6; спрашиваем в 10 UTC — оба включённых чата
-	// проходят проверку часа, но 100 уже получил сегодняшний дайджест.
-	ids, err := db.ChatsNeedingDailyStats(ctx, 10, 6, "2026-04-22")
+	// Час ХРАНИТСЯ в UTC, гейт сравнивается в МСК: (utc+3)%24. Дефолт 6 UTC =
+	// 9 МСК. Спрашиваем в 12 МСК — оба включённых чата проходят проверку
+	// часа, но 100 уже получил сегодняшний дайджест.
+	ids, err := db.ChatsNeedingDailyStats(ctx, 12, 6, "2026-04-22")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,30 +162,38 @@ func TestChatsNeedingDailyStats(t *testing.T) {
 		t.Errorf("got %v, want [200]", ids)
 	}
 
-	// В 4 UTC (до дефолтных 6 UTC) ни один чат ещё не готов.
-	ids, _ = db.ChatsNeedingDailyStats(ctx, 4, 6, "2026-04-22")
+	// В 7 МСК (до дефолтных 9 МСК) ни один чат ещё не готов.
+	ids, _ = db.ChatsNeedingDailyStats(ctx, 7, 6, "2026-04-22")
 	if len(ids) != 0 {
 		t.Errorf("got %v, want 0 chats before default hour", ids)
 	}
 
-	// Пер-чатовый override: чат 200 хочет 21 UTC. В 20 UTC он ещё не готов;
-	// в 21 UTC — готов.
+	// Пер-чатовый override: чат 200 хочет 21 UTC = 0 МСК. В 0 МСК готов —
+	// граница «полночь МСК» работает без сползания.
 	v := 21
 	_ = db.SetDailyStatsHour(ctx, 200, &v)
-	ids, _ = db.ChatsNeedingDailyStats(ctx, 20, 6, "2026-04-22")
-	if len(ids) != 0 {
-		t.Errorf("chat 200 should wait until 21 UTC, got %v", ids)
-	}
-	ids, _ = db.ChatsNeedingDailyStats(ctx, 22, 6, "2026-04-22")
+	ids, _ = db.ChatsNeedingDailyStats(ctx, 0, 6, "2026-04-23")
 	if len(ids) != 1 || ids[0] != 200 {
-		t.Errorf("at 22 UTC chat 200 should be ready, got %v", ids)
+		t.Errorf("at 0 MSK chat 200 (21 UTC override) should be ready, got %v", ids)
 	}
 
-	// Следующий UTC-день в 22 UTC: оба чата снова в очереди (100 по дефолтным
-	// 6 UTC, 200 по override 21 UTC, за 23 апреля ещё никому не отправляли).
-	ids, _ = db.ChatsNeedingDailyStats(ctx, 22, 6, "2026-04-23")
+	// Override 10 UTC = 13 МСК: в 12 МСК ещё не готов, в 13 МСК — готов.
+	v = 10
+	_ = db.SetDailyStatsHour(ctx, 200, &v)
+	ids, _ = db.ChatsNeedingDailyStats(ctx, 12, 6, "2026-04-22")
+	if len(ids) != 0 {
+		t.Errorf("chat 200 should wait until 13 MSK (10 UTC), got %v", ids)
+	}
+	ids, _ = db.ChatsNeedingDailyStats(ctx, 13, 6, "2026-04-22")
+	if len(ids) != 1 || ids[0] != 200 {
+		t.Errorf("at 13 MSK chat 200 should be ready, got %v", ids)
+	}
+
+	// Следующий день в 23 МСК: оба чата снова в очереди (100 по дефолтным
+	// 9 МСК, 200 по override 13 МСК, за 23 апреля ещё никому не отправляли).
+	ids, _ = db.ChatsNeedingDailyStats(ctx, 23, 6, "2026-04-23")
 	if len(ids) != 2 {
-		t.Errorf("new day at 22 UTC: got %v, want 2 chats", ids)
+		t.Errorf("new day at 23 MSK: got %v, want 2 chats", ids)
 	}
 }
 
