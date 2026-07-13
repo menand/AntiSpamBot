@@ -34,25 +34,36 @@ func (b *Bot) modNotifyTargets(ctx context.Context) []int64 {
 // действие, человекочитаемая причина. Vote-вердикты сюда НЕ идут — они уже
 // покрыты spam_notify (notifySpamVerdict); reason им передаётся только для
 // events, а дубль-уведомление было бы шумом.
-func (b *Bot) notifyModAction(chatID, targetID int64, kind storage.EventKind, reason string) {
-	targets := b.modNotifyTargets(b.runCtx)
-	if len(targets) == 0 {
-		return
-	}
-	action := "👢 Кик"
-	if kind == storage.EventBan || kind == storage.EventSpamBan {
-		action = "🚫 Бан"
-	}
-	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
-	text := fmt.Sprintf("%s в «%s»\nКого: %s\nПричина: %s",
-		action, html.EscapeString(b.chatTitle(b.runCtx, chatID)),
-		mentionWithUsername(infos, targetID), b.humanReason(reason))
-	for _, ownerID := range targets {
-		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
-			WithParseMode(telego.ModeHTML)); err != nil {
-			b.log.Warn("notify mod action", "err", err, "owner", ownerID)
+// detail — необязательное уточнение к причине («таймаут», «неверный ответ:
+// выбрал 3-й (🐸), верный 5-й (🎁)»); в events не пишется, живёт только здесь.
+// Уведомление уходит в горутине (как spamVerdictFanout): вызывающие стоят на
+// карательном пути (onFail/waitReplyTimeout с 10-секундным cleanup-ctx), и
+// зависший SendMessage не должен съедать бюджет kick/ban.
+func (b *Bot) notifyModAction(chatID, targetID int64, kind storage.EventKind, reason string, detail ...string) {
+	b.goSafe("notifyModAction", func() {
+		targets := b.modNotifyTargets(b.runCtx)
+		if len(targets) == 0 {
+			return
 		}
-	}
+		action := "👢 Кик"
+		if kind == storage.EventBan || kind == storage.EventSpamBan {
+			action = "🚫 Бан"
+		}
+		why := b.humanReason(reason)
+		if len(detail) > 0 && detail[0] != "" {
+			why += " (" + html.EscapeString(detail[0]) + ")"
+		}
+		infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
+		text := fmt.Sprintf("%s в «%s»\nКого: %s\nПричина: %s",
+			action, html.EscapeString(b.chatTitle(b.runCtx, chatID)),
+			mentionWithUsername(infos, targetID), why)
+		for _, ownerID := range targets {
+			if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
+				WithParseMode(telego.ModeHTML)); err != nil {
+				b.log.Warn("notify mod action", "err", err, "owner", ownerID)
+			}
+		}
+	})
 }
 
 // humanReason разворачивает reason события (см. storage.Reason*) в
