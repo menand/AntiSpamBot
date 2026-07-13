@@ -13,7 +13,8 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// modNotifyTargets — владельцы, включившие ЛС-уведомления о киках/банах.
+// modNotifyTargets — владельцы, включившие ЛС-уведомления о киках/банах и
+// проходах капчи.
 // Пересечение с OWNER_IDS отсеивает строки бывших владельцев (как у спама).
 func (b *Bot) modNotifyTargets(ctx context.Context) []int64 {
 	ids, err := b.db.ModNotifyOwners(ctx)
@@ -30,12 +31,14 @@ func (b *Bot) modNotifyTargets(ctx context.Context) []int64 {
 	return out
 }
 
-// notifyModAction шлёт подписанным владельцам карточку кика/бана: чат, цель,
-// действие, человекочитаемая причина. Vote-вердикты сюда НЕ идут — они уже
-// покрыты spam_notify (notifySpamVerdict); reason им передаётся только для
-// events, а дубль-уведомление было бы шумом.
+// notifyModAction шлёт подписанным владельцам карточку кика/бана (а для
+// EventPass — прохода капчи): чат, цель, действие, человекочитаемая причина.
+// Vote-вердикты сюда НЕ идут — они уже покрыты spam_notify
+// (notifySpamVerdict); reason им передаётся только для events, а
+// дубль-уведомление было бы шумом.
 // detail — необязательное уточнение к причине («таймаут», «неверный ответ:
-// выбрал 3-й (🐸), верный 5-й (🎁)»); в events не пишется, живёт только здесь.
+// выбрал 3-й (🐸), верный 5-й (🎁)», для pass — «выбрал 2-й (🟢)»); в events
+// не пишется, живёт только здесь.
 // Уведомление уходит в горутине (как spamVerdictFanout): вызывающие стоят на
 // карательном пути (onFail/waitReplyTimeout с 10-секундным cleanup-ctx), и
 // зависший SendMessage не должен съедать бюджет kick/ban.
@@ -45,18 +48,26 @@ func (b *Bot) notifyModAction(chatID, targetID int64, kind storage.EventKind, re
 		if len(targets) == 0 {
 			return
 		}
-		action := "👢 Кик"
-		if kind == storage.EventBan || kind == storage.EventSpamBan {
+		action, whoLabel, whyLabel := "👢 Кик", "Кого", "Причина"
+		switch kind {
+		case storage.EventPass:
+			action, whoLabel, whyLabel = "✅ Капча пройдена", "Кто", "Ответ"
+		case storage.EventBan, storage.EventSpamBan:
 			action = "🚫 Бан"
 		}
 		why := b.humanReason(reason)
 		if len(detail) > 0 && detail[0] != "" {
-			why += " (" + html.EscapeString(detail[0]) + ")"
+			d := html.EscapeString(detail[0])
+			if why == "" {
+				why = d
+			} else {
+				why += " (" + d + ")"
+			}
 		}
 		infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
-		text := fmt.Sprintf("%s в «%s»\nКого: %s\nПричина: %s",
+		text := fmt.Sprintf("%s в «%s»\n%s: %s\n%s: %s",
 			action, html.EscapeString(b.chatTitle(b.runCtx, chatID)),
-			mentionWithUsername(infos, targetID), why)
+			whoLabel, mentionWithUsername(infos, targetID), whyLabel, why)
 		for _, ownerID := range targets {
 			if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
 				WithParseMode(telego.ModeHTML)); err != nil {

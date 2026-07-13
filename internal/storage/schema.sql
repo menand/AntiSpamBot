@@ -171,5 +171,5 @@ CREATE TABLE IF NOT EXISTS pending_replies (
 CREATE TABLE IF NOT EXISTS owner_settings (
     owner_id    INTEGER PRIMARY KEY,
     spam_notify INTEGER NOT NULL DEFAULT 0, -- слать в ЛС подозрения и вердикты
-    mod_notify  INTEGER NOT NULL DEFAULT 0  -- слать в ЛС кики/баны (капча, молчание, /kick, /ban)
+    mod_notify  INTEGER NOT NULL DEFAULT 0  -- слать в ЛС кики/баны (капча, молчание, /kick, /ban) и проходы капчи
 );

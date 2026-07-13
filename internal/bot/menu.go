@@ -82,7 +82,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 	case "modnotify":
 		// Глобальный тумблер владельца: слать ли ему в ЛС кики/баны
-		// (капча, молчание, /kick, /ban, глобальная база).
+		// (капча, молчание, /kick, /ban, глобальная база) и проходы капчи.
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
@@ -486,7 +486,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 				WithCallbackData("menu:spamnotify"),
 		})
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(toggleLabel("🛡 Кики и баны в ЛС", modOn)).
+			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и капча в ЛС", modOn)).
 				WithCallbackData("menu:modnotify"),
 		})
 	}

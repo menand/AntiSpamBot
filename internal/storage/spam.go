@@ -299,7 +299,8 @@ func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
 	return nil
 }
 
-// ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах.
+// ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах
+// и проходах капчи.
 func (d *DB) ModNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
 	var on int
 	err := d.sql.QueryRowContext(ctx,
