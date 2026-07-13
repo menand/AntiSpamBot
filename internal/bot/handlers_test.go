@@ -82,9 +82,9 @@ func TestPickedVsCorrect(t *testing.T) {
 	}{
 		{"with keyboard", kb, 0, 2, ": выбрал 1-й (🔴), верный 3-й (🔵)"},
 		{"nil message", nil, 1, 2, ": выбрал 2-й, верный 3-й"},
-		{"picked out of row", kb, 5, 2, ": выбрал 6-й, верный 3-й"},
-		{"correct out of row", kb, 1, 5, ": выбрал 2-й, верный 6-й"},
-		{"negative picked", kb, -1, 2, ": выбрал 0-й, верный 3-й"},
+		{"picked out of row", kb, 5, 2, ": выбрал 6-й, верный 3-й (🔵)"},
+		{"correct out of row", kb, 1, 5, ": выбрал 2-й (🟢), верный 6-й"},
+		{"negative picked", kb, -1, 2, ": выбрал 0-й, верный 3-й (🔵)"},
 		{"no markup", &telego.Message{}, 0, 1, ": выбрал 1-й, верный 2-й"},
 		{"empty keyboard", &telego.Message{ReplyMarkup: &telego.InlineKeyboardMarkup{}}, 0, 1, ": выбрал 1-й, верный 2-й"},
 	}

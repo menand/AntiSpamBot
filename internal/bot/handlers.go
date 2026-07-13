@@ -359,22 +359,22 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 	p.Cancel()
 	_ = b.db.DeletePending(b.runCtx, chatID, query.From.ID)
 
+	capMsg := query.Message.Message()
+	if capMsg != nil && capMsg.MessageID != p.MessageID {
+		// Callback приехал не на живом сообщении капчи (stale-сообщение
+		// после неудавшегося delete или подделанный data) — его клавиатура
+		// не наша, эмодзи из неё врали бы; остаёмся на номерах кнопок.
+		capMsg = nil
+	}
 	if optIdx == p.CorrectIdx {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Правильно, добро пожаловать!"))
-		if err := b.onSuccess(b.runCtx, p); err != nil {
+		if err := b.onSuccess(b.runCtx, p, "выбрал "+buttonLabel(capMsg, optIdx)); err != nil {
 			b.log.Error("on success", "err", err, "chat", chatID, "user", query.From.ID)
 		}
 	} else {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Неверно.").WithShowAlert())
-		capMsg := query.Message.Message()
-		if capMsg != nil && capMsg.MessageID != p.MessageID {
-			// Callback приехал не на живом сообщении капчи (stale-сообщение
-			// после неудавшегося delete или подделанный data) — его клавиатура
-			// не наша, эмодзи из неё врали бы; остаёмся на номерах кнопок.
-			capMsg = nil
-		}
 		reason := "неверный ответ" + pickedVsCorrect(capMsg, optIdx, p.CorrectIdx)
 		if err := b.onFail(b.runCtx, p, reason); err != nil {
 			b.log.Error("on fail", "err", err, "chat", chatID, "user", query.From.ID)
@@ -417,7 +417,7 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
 	b.log.Info("captcha approved by admin",
 		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
-	if err := b.onSuccess(b.runCtx, p); err != nil {
+	if err := b.onSuccess(b.runCtx, p, ""); err != nil {
 		b.log.Error("on success (admin approve)", "err", err, "chat", chatID, "user", targetUserID)
 	}
 	return nil
@@ -777,8 +777,8 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	}
 
 	// Контракт раскладки: ряд 0 — варианты в порядке индексов, ряд 1 — кнопка
-	// админа. pickedVsCorrect читает row 0 по этому контракту — при
-	// перестановке рядов обнови и его.
+	// админа. buttonLabel читает row 0 по этому контракту — при перестановке
+	// рядов обнови и его.
 	buttons := make([]telego.InlineKeyboardButton, 0, len(ch.Options))
 	for i, c := range ch.Options {
 		buttons = append(buttons,
@@ -899,7 +899,10 @@ func (b *Bot) waitTimeout(p *captcha.Pending) {
 	}
 }
 
-func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
+// onSuccess завершает капчу победой. answer — «выбрал N-й (эмодзи)» с кнопки,
+// которую нажал юзер; пустая строка на admin-approve пути (выбора не было —
+// уведомление владельцам пропускается, лог-поле answer остаётся пустым).
+func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) error {
 	_ = b.db.ResetAttempts(ctx, p.ChatID, p.UserID)
 	if err := b.db.UpsertMember(ctx, p.ChatID, p.UserID, time.Now()); err != nil {
 		b.log.Warn("upsert member", "err", err)
@@ -907,7 +910,10 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending) error {
 	if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
 		b.log.Warn("record pass event", "err", err)
 	}
-	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID)
+	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID, "answer", answer)
+	if answer != "" {
+		b.notifyModAction(p.ChatID, p.UserID, storage.EventPass, "", answer)
+	}
 	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
 		b.log.Warn("delete captcha on pass",
 			"err", err, "chat", p.ChatID, "msg", p.MessageID)
@@ -957,21 +963,24 @@ func (b *Bot) chatAllowed(chatID int64) bool {
 	return ok
 }
 
-// pickedVsCorrect строит суффикс причины «: выбрал N-й (X), верный M-й (Y)»
-// по клавиатуре капчи (row 0 — эмодзи-варианты). Если сообщение недоступно
-// (inaccessible callback) или индексы не влезают в ряд — деградирует до
-// одних номеров кнопок (1-based).
-func pickedVsCorrect(msg *telego.Message, picked, correct int) string {
-	suffix := fmt.Sprintf(": выбрал %d-й, верный %d-й", picked+1, correct+1)
+// buttonLabel — «N-й (эмодзи)» для кнопки idx клавиатуры капчи (row 0 —
+// эмодзи-варианты). Если сообщение недоступно (inaccessible callback) или
+// индекс не влезает в ряд — деградирует до номера кнопки (1-based).
+func buttonLabel(msg *telego.Message, idx int) string {
+	label := fmt.Sprintf("%d-й", idx+1)
 	if msg == nil || msg.ReplyMarkup == nil || len(msg.ReplyMarkup.InlineKeyboard) == 0 {
-		return suffix
+		return label
 	}
 	row := msg.ReplyMarkup.InlineKeyboard[0]
-	if picked < 0 || correct < 0 || picked >= len(row) || correct >= len(row) {
-		return suffix
+	if idx < 0 || idx >= len(row) {
+		return label
 	}
-	return fmt.Sprintf(": выбрал %d-й (%s), верный %d-й (%s)",
-		picked+1, row[picked].Text, correct+1, row[correct].Text)
+	return label + " (" + row[idx].Text + ")"
+}
+
+// pickedVsCorrect строит суффикс причины «: выбрал N-й (X), верный M-й (Y)».
+func pickedVsCorrect(msg *telego.Message, picked, correct int) string {
+	return ": выбрал " + buttonLabel(msg, picked) + ", верный " + buttonLabel(msg, correct)
 }
 
 func parseCallback(data string) (userID int64, optIdx int, ok bool) {
