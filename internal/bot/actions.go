@@ -84,36 +84,41 @@ func isNotModified(err error) bool {
 func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
 	// Ретраится: сетевой чих (DNS/TCP) на этом вызове означает, что юзер НЕ
 	// ограничен и капча не уйдёт. Это хуже, чем задержка на ретрай.
-	err := retryTG(ctx, func() error {
-		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
-			ChatID:      tu.ID(chatID),
-			UserID:      userID,
-			Permissions: telego.ChatPermissions{},
-		})
-	})
-	if err != nil {
+	if err := b.restrictFor(ctx, chatID, userID, 0); err != nil {
 		return fmt.Errorf("restrict after retries: %w", err)
 	}
 	return nil
 }
 
-// mute — рид-онли до заданного момента. Telegram снимает ограничение по
-// until_date сам, серверно: рестарт бота на размьют не влияет, хранить
-// нечего. Ограничения API: until < 30 сек или > 366 дней от текущего момента
-// означает «навсегда» — сроки валидирует вызывающий (parseMuteDuration).
-func (b *Bot) mute(ctx context.Context, chatID, userID int64, until time.Time) error {
-	err := retryTG(ctx, func() error {
-		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
-			ChatID:      tu.ID(chatID),
-			UserID:      userID,
-			Permissions: telego.ChatPermissions{},
-			UntilDate:   until.Unix(),
-		})
-	})
-	if err != nil {
+// mute — рид-онли на срок d. Telegram снимает ограничение по until_date сам,
+// серверно: рестарт бота на размьют не влияет, хранить нечего. Ограничения
+// API: until < 30 сек или > 366 дней от текущего момента означает «навсегда»
+// — верхнюю границу валидирует вызывающий (parseMuteDuration), нижнюю
+// защищает пересчёт until на каждой попытке в restrictFor.
+func (b *Bot) mute(ctx context.Context, chatID, userID int64, d time.Duration) error {
+	if err := b.restrictFor(ctx, chatID, userID, d); err != nil {
 		return fmt.Errorf("mute after retries: %w", err)
 	}
 	return nil
+}
+
+// restrictFor — общее ядро restrict/mute: d == 0 — бессрочно (капча), d > 0 —
+// until_date. until вычисляется в момент КАЖДОЙ попытки: retryTG честно ждёт
+// весь retry_after на 429 (бывают минуты), и посчитанный заранее until мог бы
+// к моменту успешного вызова опуститься ниже 30-секундного порога Telegram
+// «меньше 30 сек = навсегда» — минутный мьют стал бы вечным.
+func (b *Bot) restrictFor(ctx context.Context, chatID, userID int64, d time.Duration) error {
+	return retryTG(ctx, func() error {
+		p := &telego.RestrictChatMemberParams{
+			ChatID:      tu.ID(chatID),
+			UserID:      userID,
+			Permissions: telego.ChatPermissions{},
+		}
+		if d > 0 {
+			p.UntilDate = time.Now().Add(d).Unix()
+		}
+		return b.api.RestrictChatMember(ctx, p)
+	})
 }
 
 // release снимает капча-ограничение. Применяет собственные дефолтные права

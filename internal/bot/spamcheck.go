@@ -93,17 +93,27 @@ type adminCacheEntry struct {
 // не-вайтлистнутых юзеров, на каждом голосе и во всём DM-меню — без кэша
 // каждая такая проверка была бы API-вызовом.
 func (b *Bot) isChatAdminCached(ctx context.Context, chatID, userID int64) bool {
+	isAdmin, _ := b.isChatAdminVerified(ctx, chatID, userID)
+	return isAdmin
+}
+
+// isChatAdminVerified — как isChatAdminCached, но отличает подтверждённый
+// ответ (sure=true — из кэша или удачного getChatMember) от неизвестности
+// из-за ошибки API (false, false). Наказание за админскую команду допустимо
+// только по подтверждённому «не админ» — иначе один 429 на getChatMember
+// превращал бы настоящего админа в «нарушителя».
+func (b *Bot) isChatAdminVerified(ctx context.Context, chatID, userID int64) (isAdmin, sure bool) {
 	k := chatUser{chatID, userID}
 	b.adminMu.Lock()
 	e, ok := b.adminCache[k]
 	b.adminMu.Unlock()
 	if ok && time.Now().Before(e.until) {
-		return e.isAdmin
+		return e.isAdmin, true
 	}
 	isAdmin, err := b.isChatAdmin(ctx, chatID, userID)
 	if err != nil {
 		// Ошибку не кэшируем: следующий вызов попробует снова.
-		return false
+		return false, false
 	}
 	ttl := adminCacheTTL
 	if !isAdmin {
@@ -112,7 +122,7 @@ func (b *Bot) isChatAdminCached(ctx context.Context, chatID, userID int64) bool 
 	b.adminMu.Lock()
 	b.adminCache[k] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(ttl)}
 	b.adminMu.Unlock()
-	return isAdmin
+	return isAdmin, true
 }
 
 func (b *Bot) invalidateAdminCache(chatID, userID int64) {
