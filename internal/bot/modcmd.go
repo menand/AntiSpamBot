@@ -43,7 +43,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 		return nil
 	}
 
-	targetID, ok := b.resolveModTarget(message)
+	targetID, targetMsgID, ok := b.resolveModTarget(message)
 	if !ok {
 		b.replyTo(ctx, message,
 			"Не понял, кого "+action+"ать. Ответь командой на сообщение юзера "+
@@ -88,6 +88,14 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	}
 	_ = b.db.RecordEvent(b.runCtx, chatID, targetID, kind, time.Now(), reason)
 	b.cleanupTargetTraces(chatID, targetID)
+	// revoke обычно уже стирает исходное сообщение цели; ручное удаление —
+	// страховка на случай, если конкретно оно осталось (тот же приём, что и
+	// удаление TargetMsgID в resolveSpamVote), поэтому ошибку глушим тихо.
+	if targetMsgID != 0 {
+		if err := b.deleteMessage(b.runCtx, chatID, targetMsgID); err != nil {
+			b.log.Debug("delete mod target message (already gone?)", "err", err, "chat", chatID)
+		}
+	}
 
 	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
 	mention := mentionOrID(infos, targetID)
@@ -105,17 +113,21 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 // resolveModTarget вычисляет цель команды по приоритету: text_mention (админ
 // выбрал юзера автокомплитом) → @username в аргументе (по нашему кэшу) →
 // reply на сообщение цели → reply на приветствие бота о цели.
-func (b *Bot) resolveModTarget(message telego.Message) (int64, bool) {
+// targetMsgID — id реплай-сообщения САМОЙ цели (кейс «reply на сообщение
+// цели»), нужен как страховка на удаление, если revoke его не стёр. Для
+// остальных путей резолва конкретного сообщения нет — 0 (не путать с
+// приветствием бота, его чистит cleanupTargetTraces по таблице greetings).
+func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMsgID int, ok bool) {
 	// 1. text_mention — id прямо в entity.
 	for _, e := range message.Entities {
 		if e.Type == telego.EntityTypeTextMention && e.User != nil {
-			return e.User.ID, true
+			return e.User.ID, 0, true
 		}
 	}
 	// 2. @username из аргумента команды.
 	if uname := firstUsernameArg(message.Text); uname != "" {
 		if id, ok, err := b.db.UserIDByUsername(b.runCtx, uname); err == nil && ok {
-			return id, true
+			return id, 0, true
 		}
 	}
 	// 3/4. reply: на сообщение цели или на приветствие бота о цели.
@@ -123,14 +135,14 @@ func (b *Bot) resolveModTarget(message telego.Message) (int64, bool) {
 		if b.me != nil && r.From != nil && r.From.ID == b.me.ID {
 			// Реплай на наше приветствие — цель по таблице greetings.
 			if id, ok, err := b.db.GreetingUserByMsg(b.runCtx, message.Chat.ID, r.MessageID); err == nil && ok {
-				return id, true
+				return id, 0, true
 			}
 		}
 		if r.From != nil && !r.From.IsBot {
-			return r.From.ID, true
+			return r.From.ID, r.MessageID, true
 		}
 	}
-	return 0, false
+	return 0, 0, false
 }
 
 // firstUsernameArg вытаскивает первый @username из текста команды (без «@»).
