@@ -97,6 +97,25 @@ func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
+// mute — рид-онли до заданного момента. Telegram снимает ограничение по
+// until_date сам, серверно: рестарт бота на размьют не влияет, хранить
+// нечего. Ограничения API: until < 30 сек или > 366 дней от текущего момента
+// означает «навсегда» — сроки валидирует вызывающий (parseMuteDuration).
+func (b *Bot) mute(ctx context.Context, chatID, userID int64, until time.Time) error {
+	err := retryTG(ctx, func() error {
+		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
+			ChatID:      tu.ID(chatID),
+			UserID:      userID,
+			Permissions: telego.ChatPermissions{},
+			UntilDate:   until.Unix(),
+		})
+	})
+	if err != nil {
+		return fmt.Errorf("mute after retries: %w", err)
+	}
+	return nil
+}
+
 // release снимает капча-ограничение. Применяет собственные дефолтные права
 // чата (getChat), чтобы прошедший капчу получил ровно те же права, что у
 // всех, — не больше. Если чат по умолчанию запрещает, скажем, опросы или
