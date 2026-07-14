@@ -40,6 +40,16 @@ func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
 	return b.isOwner(userID) || b.isChatAdminCached(ctx, chatID, userID)
 }
 
+// canManageChatVerified — canManageChat, отличающий подтверждённое «не
+// админ» (sure=true) от неизвестности из-за ошибки getChatMember (sure=false).
+// Модкоманды наказывают самозванцев только при sure — см. modPrologue.
+func (b *Bot) canManageChatVerified(ctx context.Context, userID, chatID int64) (allowed, sure bool) {
+	if b.isOwner(userID) {
+		return true, true
+	}
+	return b.isChatAdminVerified(ctx, chatID, userID)
+}
+
 // chatSettings загружает пер-чатовые настройки для РЕЗОЛВИНГА (параметры
 // капчи, приветствие, пороги антиспама): ошибка логируется здесь, а
 // возвращённая структура всё равно несёт дефолты (это гарантирует

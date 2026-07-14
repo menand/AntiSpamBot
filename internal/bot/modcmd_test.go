@@ -3,6 +3,8 @@ package bot
 import (
 	"testing"
 	"time"
+
+	"github.com/mymmrac/telego"
 )
 
 func TestParseMuteDuration(t *testing.T) {
@@ -42,14 +44,42 @@ func TestMuteLabel(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{5 * time.Minute, "5 мин"},
-		{90 * time.Minute, "90 мин"},
-		{3 * time.Hour, "3 ч"},
-		{5 * 24 * time.Hour, "5 дн"},
+		{1 * time.Minute, "1 минуту"},
+		{5 * time.Minute, "5 минут"},
+		{90 * time.Minute, "90 минут"},
+		{2 * time.Hour, "2 часа"},
+		{3 * time.Hour, "3 часа"},
+		{21 * time.Hour, "21 час"},
+		{1 * 24 * time.Hour, "1 день"},
+		{5 * 24 * time.Hour, "5 дней"},
 	}
 	for _, tt := range tests {
 		if got := muteLabel(tt.d); got != tt.want {
 			t.Errorf("muteLabel(%v) = %q, want %q", tt.d, got, tt.want)
 		}
+	}
+}
+
+func TestCommandForUs(t *testing.T) {
+	b := &Bot{me: &telego.User{Username: "TestBot"}}
+	tests := []struct {
+		text string
+		want bool
+	}{
+		{"/mute 5", true},
+		{"/mute@TestBot 5", true},
+		{"/mute@testbot 5", true}, // регистр не важен
+		{"/mute@OtherBot 5", false},
+		{"/del@combot", false},
+		{"", true},
+	}
+	for _, tt := range tests {
+		if got := b.commandForUs(tt.text); got != tt.want {
+			t.Errorf("commandForUs(%q) = %v, want %v", tt.text, got, tt.want)
+		}
+	}
+	nilMe := &Bot{}
+	if !nilMe.commandForUs("/mute@OtherBot 5") {
+		t.Error("commandForUs with nil me should fall back to true")
 	}
 }

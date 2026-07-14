@@ -15,9 +15,9 @@ import (
 
 // handleKickCommand / handleBanCommand — админские команды модерации в чате.
 // /ban банит навсегда, /kick кикает (с возможностью перезайти); обе стирают
-// все сообщения цели. Доступ — админ чата или владелец бота; остальным ответ
-// «не для тебя». В SetMyCommands НЕ регистрируются — «/»-меню в группах
-// остаётся пустым, новые кнопки в поле ввода не появляются.
+// все сообщения цели. Доступ — админ чата (в т.ч. анонимный) или владелец
+// бота; самозванцам — punishNonAdmin. В SetMyCommands НЕ регистрируются —
+// «/»-меню в группах остаётся пустым, новые кнопки в поле ввода не появляются.
 func (b *Bot) handleKickCommand(ctx *th.Context, message telego.Message) error {
 	return b.handleModCommand(ctx, message, false)
 }
@@ -27,21 +27,13 @@ func (b *Bot) handleBanCommand(ctx *th.Context, message telego.Message) error {
 }
 
 func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanent bool) error {
-	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+	chatID, ok := b.modPrologue(ctx, message)
+	if !ok {
 		return nil
 	}
-	if !b.chatAllowed(message.Chat.ID) || message.From == nil {
-		return nil
-	}
-	chatID := message.Chat.ID
 	action := "кик"
 	if permanent {
 		action = "бан"
-	}
-
-	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		b.punishNonAdmin(ctx, message)
-		return nil
 	}
 
 	targetID, targetMsgID, ok := b.resolveModTarget(message)
@@ -69,7 +61,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	}
 	if actErr != nil {
 		b.log.Warn("mod command action failed", "err", actErr, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, "Не получилось — проверь мои права на блокировку.")
+		b.sendPlain(chatID, threadOf(message), "Не получилось — проверь мои права на блокировку.")
 		return nil
 	}
 
@@ -88,12 +80,11 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 		}
 	}
 
-	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
-	mention := mentionOrID(infos, targetID)
+	mention := b.mentionFor(targetID)
 	if permanent {
-		b.sendHTML(chatID, "🚫 "+mention+" забанен.")
+		b.sendHTML(chatID, threadOf(message), "🚫 "+mention+" забанен.")
 	} else {
-		b.sendHTML(chatID, "👢 "+mention+" кикнут.")
+		b.sendHTML(chatID, threadOf(message), "👢 "+mention+" кикнут.")
 	}
 	b.log.Info("mod command", "action", action, "chat", chatID,
 		"target", targetID, "by", message.From.ID)
@@ -106,18 +97,13 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 // подтверждений и событий — ноль флуда по требованию. Без реплая удаляется
 // только сама команда.
 func (b *Bot) handleDeleteCommand(ctx *th.Context, message telego.Message) error {
-	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+	chatID, ok := b.modPrologue(ctx, message)
+	if !ok {
 		return nil
 	}
-	if !b.chatAllowed(message.Chat.ID) || message.From == nil {
-		return nil
-	}
-	chatID := message.Chat.ID
-	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		b.punishNonAdmin(ctx, message)
-		return nil
-	}
-	if r := message.ReplyToMessage; r != nil {
+	// ForumTopicCreated: в форумах сообщение без явного реплая несёт неявный
+	// reply_to_message на корень топика — его удалять нельзя.
+	if r := message.ReplyToMessage; r != nil && r.ForumTopicCreated == nil {
 		if err := b.deleteMessage(b.runCtx, chatID, r.MessageID); err != nil {
 			b.log.Debug("delete target via /del", "err", err, "chat", chatID)
 		}
@@ -133,15 +119,14 @@ func (b *Bot) handleDeleteCommand(ctx *th.Context, message telego.Message) error
 // @username (тот же резолв, что у /kick|/ban). Размьючивает сам Telegram по
 // until_date — рестарты бота на это не влияют.
 func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
-	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+	chatID, ok := b.modPrologue(ctx, message)
+	if !ok {
 		return nil
 	}
-	if !b.chatAllowed(message.Chat.ID) || message.From == nil {
-		return nil
-	}
-	chatID := message.Chat.ID
-	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		b.punishNonAdmin(ctx, message)
+	// RestrictChatMember работает только в супергруппах — честный отказ
+	// вместо «проверь права» после бесполезной лестницы ретраев.
+	if message.Chat.Type != "supergroup" {
+		b.replyTo(ctx, message, "Мьют работает только в супергруппах.")
 		return nil
 	}
 	d, ok := parseMuteDuration(message.Text)
@@ -165,27 +150,89 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
 		b.log.Debug("delete mute command", "err", err, "chat", chatID)
 	}
-	if err := b.mute(b.runCtx, chatID, targetID, time.Now().Add(d)); err != nil {
+	if err := b.mute(b.runCtx, chatID, targetID, d); err != nil {
 		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, "Не получилось — проверь мои права на ограничение участников.")
+		b.sendPlain(chatID, threadOf(message), "Не получилось — проверь мои права на ограничение участников.")
 		return nil
 	}
-	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
-	b.sendHTML(chatID, "🔇 "+mentionOrID(infos, targetID)+" в рид-онли на "+muteLabel(d)+".")
+	// Замьюченный физически не может выполнить «напиши что-нибудь» — снимаем
+	// ожидание реплая тихо, иначе таймер кикнул бы его за молчание.
+	b.cancelReplyWait(chatID, targetID)
+	b.sendHTML(chatID, threadOf(message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
 	b.log.Info("mute command", "chat", chatID, "target", targetID,
 		"minutes", int(d.Minutes()), "by", message.From.ID)
 	return nil
+}
+
+// modPrologue — общие ворота всех админских команд в группе: тип чата,
+// chatAllowed, отсев чужих адресатов (/cmd@ДругойБот), доступ. Возвращает
+// ok=false, если команду надо проигнорировать или отказ уже отправлен.
+func (b *Bot) modPrologue(ctx *th.Context, message telego.Message) (int64, bool) {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return 0, false
+	}
+	chatID := message.Chat.ID
+	if !b.chatAllowed(chatID) || message.From == nil {
+		return 0, false
+	}
+	if !b.commandForUs(message.Text) {
+		return 0, false
+	}
+	// Анонимный админ пишет от имени самого чата (sender_chat == чат) —
+	// getChatMember его не различает, но право модерации у него есть.
+	if sc := message.SenderChat; sc != nil && sc.ID == chatID {
+		return chatID, true
+	}
+	allowed, sure := b.canManageChatVerified(ctx, message.From.ID, chatID)
+	if !allowed {
+		// Наказываем только по подтверждённому «не админ»: на ошибке
+		// getChatMember молча игнорируем — настоящий админ повторит команду.
+		if sure {
+			b.punishNonAdmin(ctx, message)
+		}
+		return 0, false
+	}
+	return chatID, true
+}
+
+// commandForUs — false, если команда явно адресована другому боту
+// (/mute@ДругойБот): telego CommandEqual сравнивает только имя команды,
+// а наказывать юзера за чужую команду нельзя.
+func (b *Bot) commandForUs(text string) bool {
+	f := strings.Fields(text)
+	if len(f) == 0 || b.me == nil {
+		return true
+	}
+	if i := strings.IndexByte(f[0], '@'); i >= 0 {
+		return strings.EqualFold(f[0][i+1:], b.me.Username)
+	}
+	return true
 }
 
 // punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ.
 // Мьют best-effort: в обычной group рестрикт недоступен, без прав не пройдёт
 // — тогда остаётся только ответ.
 func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
-	if err := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Now().Add(time.Minute)); err != nil {
+	if err := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute); err != nil {
 		b.log.Debug("punish mute failed", "err", err, "chat", message.Chat.ID)
 	}
 	b.replyTo(ctx, message, "🙅 Это админская команда, не балуйся. Вот тебе мьют на 1 минуту, раз хотел.")
 	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID, "user", message.From.ID)
+}
+
+// mentionFor — HTML-упоминание юзера по кэшу user_info (или голый ID).
+func (b *Bot) mentionFor(targetID int64) string {
+	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
+	return mentionOrID(infos, targetID)
+}
+
+// threadOf — топик команды для ответных сообщений (0 — не форум): без него
+// подтверждение улетело бы в General вместо топика команды.
+func threadOf(message telego.Message) int {
+	if message.IsTopicMessage {
+		return message.MessageThreadID
+	}
+	return 0
 }
 
 // guardModTarget — общие защиты модкоманд: не бот, не сам вызывающий, не
@@ -243,16 +290,20 @@ func parseMuteDuration(text string) (time.Duration, bool) {
 	return 0, false
 }
 
-// muteLabel — срок для подтверждения: «45 мин» / «3 ч» / «5 дн», без склонений.
+// muteLabel — срок для подтверждения «в рид-онли на …», винительный падеж
+// через pluralRU (как остальные пользовательские строки бота).
 func muteLabel(d time.Duration) string {
 	day := 24 * time.Hour
 	switch {
-	case d >= day && d%day == 0:
-		return fmt.Sprintf("%d дн", d/day)
-	case d >= time.Hour && d%time.Hour == 0:
-		return fmt.Sprintf("%d ч", d/time.Hour)
+	case d%day == 0:
+		n := int(d / day)
+		return fmt.Sprintf("%d %s", n, pluralRU(n, "день", "дня", "дней"))
+	case d%time.Hour == 0:
+		n := int(d / time.Hour)
+		return fmt.Sprintf("%d %s", n, pluralRU(n, "час", "часа", "часов"))
 	default:
-		return fmt.Sprintf("%d мин", d/time.Minute)
+		n := int(d / time.Minute)
+		return fmt.Sprintf("%d %s", n, pluralRU(n, "минуту", "минуты", "минут"))
 	}
 }
 
@@ -277,7 +328,10 @@ func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMs
 		}
 	}
 	// 3/4. reply: на сообщение цели или на приветствие бота о цели.
-	if r := message.ReplyToMessage; r != nil {
+	// ForumTopicCreated: в форумах сообщение без явного реплая несёт неявный
+	// reply_to_message на корень топика — иначе голая команда в топике молча
+	// нацелилась бы на создателя топика.
+	if r := message.ReplyToMessage; r != nil && r.ForumTopicCreated == nil {
 		if b.me != nil && r.From != nil && r.From.ID == b.me.ID {
 			// Реплай на наше приветствие — цель по таблице greetings.
 			if id, ok, err := b.db.GreetingUserByMsg(b.runCtx, message.Chat.ID, r.MessageID); err == nil && ok {
@@ -327,13 +381,20 @@ func (b *Bot) replyTo(ctx *th.Context, message telego.Message, text string) {
 	_, _ = b.api.SendMessage(ctx, params)
 }
 
-func (b *Bot) sendPlain(chatID int64, text string) {
-	_, _ = b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID), text))
+func (b *Bot) sendPlain(chatID int64, threadID int, text string) {
+	params := tu.Message(tu.ID(chatID), text)
+	if threadID != 0 {
+		params = params.WithMessageThreadID(threadID)
+	}
+	_, _ = b.api.SendMessage(b.runCtx, params)
 }
 
-func (b *Bot) sendHTML(chatID int64, text string) {
-	_, _ = b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID), text).
-		WithParseMode(telego.ModeHTML))
+func (b *Bot) sendHTML(chatID int64, threadID int, text string) {
+	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
+	if threadID != 0 {
+		params = params.WithMessageThreadID(threadID)
+	}
+	_, _ = b.api.SendMessage(b.runCtx, params)
 }
 
 // notifyModAction определён в notify.go (часть mod-уведомлений).
