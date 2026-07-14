@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	}
 
 	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		b.replyTo(ctx, message, "🙅 Не балуйся, эта команда только для админов.")
+		b.punishNonAdmin(ctx, message)
 		return nil
 	}
 
@@ -50,17 +51,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 				"или на моё приветствие о нём, либо укажи @username (я должен был его видеть).")
 		return nil
 	}
-	// Защиты: не себя, не вызывающего, не другого админа/владельца.
-	if b.me != nil && targetID == b.me.ID {
-		b.replyTo(ctx, message, "Себя банить не дам 🙂")
-		return nil
-	}
-	if targetID == message.From.ID {
-		b.replyTo(ctx, message, "Себя-то за что? 🙂")
-		return nil
-	}
-	if b.canManageChat(ctx, targetID, chatID) {
-		b.replyTo(ctx, message, "Это админ — не трону.")
+	if !b.guardModTarget(ctx, message, targetID) {
 		return nil
 	}
 
@@ -108,6 +99,161 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 		"target", targetID, "by", message.From.ID)
 	b.notifyModAction(chatID, targetID, kind, reason)
 	return nil
+}
+
+// handleDeleteCommand — /del и /delete: тихо удалить сообщение, на которое
+// реплайнули, и саму команду. Только админ чата / владелец бота; никаких
+// подтверждений и событий — ноль флуда по требованию. Без реплая удаляется
+// только сама команда.
+func (b *Bot) handleDeleteCommand(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+	if !b.chatAllowed(message.Chat.ID) || message.From == nil {
+		return nil
+	}
+	chatID := message.Chat.ID
+	if !b.canManageChat(ctx, message.From.ID, chatID) {
+		b.punishNonAdmin(ctx, message)
+		return nil
+	}
+	if r := message.ReplyToMessage; r != nil {
+		if err := b.deleteMessage(b.runCtx, chatID, r.MessageID); err != nil {
+			b.log.Debug("delete target via /del", "err", err, "chat", chatID)
+		}
+	}
+	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
+		b.log.Debug("delete /del command", "err", err, "chat", chatID)
+	}
+	b.log.Info("del command", "chat", chatID, "by", message.From.ID)
+	return nil
+}
+
+// handleMuteCommand — /mute <N[m|h|d]>: рид-онли на срок, цель — реплаем или
+// @username (тот же резолв, что у /kick|/ban). Размьючивает сам Telegram по
+// until_date — рестарты бота на это не влияют.
+func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+	if !b.chatAllowed(message.Chat.ID) || message.From == nil {
+		return nil
+	}
+	chatID := message.Chat.ID
+	if !b.canManageChat(ctx, message.From.ID, chatID) {
+		b.punishNonAdmin(ctx, message)
+		return nil
+	}
+	d, ok := parseMuteDuration(message.Text)
+	if !ok {
+		b.replyTo(ctx, message,
+			"Не понял срок. Примеры: /mute 45, /mute 45m, /mute 3h, /mute 5d — "+
+				"реплаем на сообщение юзера или с @username.")
+		return nil
+	}
+	targetID, _, ok := b.resolveModTarget(message)
+	if !ok {
+		b.replyTo(ctx, message,
+			"Не понял, кого мьютить. Ответь командой на сообщение юзера "+
+				"или укажи @username (я должен был его видеть).")
+		return nil
+	}
+	if !b.guardModTarget(ctx, message, targetID) {
+		return nil
+	}
+
+	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
+		b.log.Debug("delete mute command", "err", err, "chat", chatID)
+	}
+	if err := b.mute(b.runCtx, chatID, targetID, time.Now().Add(d)); err != nil {
+		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
+		b.sendPlain(chatID, "Не получилось — проверь мои права на ограничение участников.")
+		return nil
+	}
+	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
+	b.sendHTML(chatID, "🔇 "+mentionOrID(infos, targetID)+" в рид-онли на "+muteLabel(d)+".")
+	b.log.Info("mute command", "chat", chatID, "target", targetID,
+		"minutes", int(d.Minutes()), "by", message.From.ID)
+	return nil
+}
+
+// punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ.
+// Мьют best-effort: в обычной group рестрикт недоступен, без прав не пройдёт
+// — тогда остаётся только ответ.
+func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
+	if err := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Now().Add(time.Minute)); err != nil {
+		b.log.Debug("punish mute failed", "err", err, "chat", message.Chat.ID)
+	}
+	b.replyTo(ctx, message, "🙅 Это админская команда, не балуйся. Вот тебе мьют на 1 минуту, раз хотел.")
+	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID, "user", message.From.ID)
+}
+
+// guardModTarget — общие защиты модкоманд: не бот, не сам вызывающий, не
+// другой админ/владелец. false = цель трогать нельзя, отказ уже отправлен.
+func (b *Bot) guardModTarget(ctx *th.Context, message telego.Message, targetID int64) bool {
+	if b.me != nil && targetID == b.me.ID {
+		b.replyTo(ctx, message, "Себя трогать не дам 🙂")
+		return false
+	}
+	if targetID == message.From.ID {
+		b.replyTo(ctx, message, "Себя-то за что? 🙂")
+		return false
+	}
+	if b.canManageChat(ctx, targetID, message.Chat.ID) {
+		b.replyTo(ctx, message, "Это админ — не трону.")
+		return false
+	}
+	return true
+}
+
+// parseMuteDuration ищет в тексте команды первый токен вида N, Nm, Nh или Nd
+// (голое число — минуты). Кап 365 дней: у Telegram until_date дальше 366 дней
+// означает «навсегда», а минимум у нас минута — больше его нижней границы
+// в 30 секунд.
+func parseMuteDuration(text string) (time.Duration, bool) {
+	fields := strings.Fields(text)
+	if len(fields) < 2 {
+		return 0, false
+	}
+	for _, f := range fields[1:] { // fields[0] — сама команда
+		num, unit := f, "m"
+		if last := f[len(f)-1]; last == 'm' || last == 'h' || last == 'd' {
+			num, unit = f[:len(f)-1], string(last)
+		}
+		v, err := strconv.Atoi(num)
+		if err != nil || v <= 0 {
+			continue
+		}
+		const capMinutes = 365 * 24 * 60
+		if v > capMinutes { // до умножения — защита от overflow
+			v = capMinutes
+		}
+		mins := v
+		switch unit {
+		case "h":
+			mins = v * 60
+		case "d":
+			mins = v * 60 * 24
+		}
+		if mins > capMinutes {
+			mins = capMinutes
+		}
+		return time.Duration(mins) * time.Minute, true
+	}
+	return 0, false
+}
+
+// muteLabel — срок для подтверждения: «45 мин» / «3 ч» / «5 дн», без склонений.
+func muteLabel(d time.Duration) string {
+	day := 24 * time.Hour
+	switch {
+	case d >= day && d%day == 0:
+		return fmt.Sprintf("%d дн", d/day)
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%d ч", d/time.Hour)
+	default:
+		return fmt.Sprintf("%d мин", d/time.Minute)
+	}
 }
 
 // resolveModTarget вычисляет цель команды по приоритету: text_mention (админ

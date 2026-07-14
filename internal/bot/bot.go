@@ -213,6 +213,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
 	bh.HandleMessage(b.handleKickCommand, th.CommandEqual("kick"))
 	bh.HandleMessage(b.handleBanCommand, th.CommandEqual("ban"))
+	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("del"))
+	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("delete"))
+	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия
