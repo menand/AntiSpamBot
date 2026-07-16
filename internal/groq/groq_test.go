@@ -18,59 +18,49 @@ func testClient(t *testing.T, handler http.HandlerFunc) *Client {
 	return c
 }
 
-func TestSpamProbabilityOK(t *testing.T) {
+func TestIsSpamOK(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Errorf("missing auth header")
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"spam_probability\": 93}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SPAM"}}]}`))
 	})
-	p, err := c.SpamProbability(context.Background(), "текст")
-	if err != nil || p != 93 {
-		t.Fatalf("want 93, got %d err=%v", p, err)
+	spam, err := c.IsSpam(context.Background(), "текст")
+	if err != nil || !spam {
+		t.Fatalf("want spam=true, got %v err=%v", spam, err)
 	}
 }
 
-func TestSpamProbabilityClamp(t *testing.T) {
+func TestIsSpamGarbageVerdict(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"spam_probability\": 250}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"не могу оценить"}}]}`))
 	})
-	p, err := c.SpamProbability(context.Background(), "x")
-	if err != nil || p != 100 {
-		t.Fatalf("want clamp to 100, got %d err=%v", p, err)
-	}
-}
-
-func TestSpamProbabilityBadJSON(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"это не json"}}]}`))
-	})
-	if _, err := c.SpamProbability(context.Background(), "x"); err == nil {
+	if _, err := c.IsSpam(context.Background(), "x"); err == nil {
 		t.Fatal("want parse error (fail-open at caller), got nil")
 	}
 }
 
-func TestSpamProbability429(t *testing.T) {
+func TestIsSpam429(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 	})
-	if _, err := c.SpamProbability(context.Background(), "x"); err == nil {
+	if _, err := c.IsSpam(context.Background(), "x"); err == nil {
 		t.Fatal("want error on 429, got nil")
 	}
 }
 
-func TestSpamProbabilityTimeout(t *testing.T) {
+func TestIsSpamTimeout(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(200 * time.Millisecond)
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if _, err := c.SpamProbability(ctx, "x"); err == nil {
+	if _, err := c.IsSpam(ctx, "x"); err == nil {
 		t.Fatal("want timeout error, got nil")
 	}
 }
 
-func TestProbabilityCustomSystem(t *testing.T) {
+func TestClassifyCustomSystem(t *testing.T) {
 	// Кастомный системный промпт (профиль-чек) должен дойти до API как есть.
 	var gotSystem string
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -81,14 +71,56 @@ func TestProbabilityCustomSystem(t *testing.T) {
 		if len(req.Messages) > 0 {
 			gotSystem = req.Messages[0].Content
 		}
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"spam_probability\": 42}"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
 	})
-	p, err := c.Probability(context.Background(), "МОЙ ПРОМПТ", "факты")
-	if err != nil || p != 42 {
-		t.Fatalf("want 42, got %d err=%v", p, err)
+	spam, err := c.Classify(context.Background(), "МОЙ ПРОМПТ", "факты")
+	if err != nil || spam {
+		t.Fatalf("want spam=false, got %v err=%v", spam, err)
 	}
 	if gotSystem != "МОЙ ПРОМПТ" {
 		t.Fatalf("system prompt not passed through: %q", gotSystem)
+	}
+}
+
+func TestParseVerdict(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+		wantErr bool
+	}{
+		{"bare spam", `SPAM`, true, false},
+		{"bare ok", `OK`, false, false},
+		{"lowercase", `spam`, true, false},
+		{"russian spam", `СПАМ`, true, false},
+		{"russian ok", `ок`, false, false},
+		{"trailing dot", `SPAM.`, true, false},
+		{"quoted", `"OK"`, false, false},
+		{"whitespace", "\n OK \n", false, false},
+		{"framed spam", `Verdict: SPAM`, true, false},
+		{"framed ok", `Ответ: OK.`, false, false},
+		// Отрицание перед словом — это OK, а не SPAM: инверсия означала бы
+		// ложный глобальный бан.
+		{"negated russian", `Не спам`, false, false},
+		{"negated english", `NOT SPAM`, false, false},
+		{"negated sentence", `Это не спам.`, false, false},
+		{"ok with negated spam", `OK, это не SPAM`, false, false},
+		// Неоднозначность — ошибка, а не догадка (fail-open у вызывающего).
+		{"both words", `SPAM или OK — решай сам`, false, true},
+		{"garbage", `не могу оценить`, false, true},
+		{"empty", ``, false, true},
+		{"old json format", `{"spam_probability": 93}`, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spam, err := ParseVerdict(tc.content)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v (spam=%v)", err, tc.wantErr, spam)
+			}
+			if !tc.wantErr && spam != tc.want {
+				t.Errorf("got %v, want %v", spam, tc.want)
+			}
+		})
 	}
 }
 

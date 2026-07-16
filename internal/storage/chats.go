@@ -199,23 +199,6 @@ func (d *DB) SetSpamCheckEnabled(ctx context.Context, chatID int64, enabled bool
 	return nil
 }
 
-// SetSpamThreshold переопределяет порог вероятности спама (%). nil сбрасывает.
-func (d *DB) SetSpamThreshold(ctx context.Context, chatID int64, value *int) error {
-	var v any
-	if value != nil {
-		v = int64(*value)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, spam_threshold)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET spam_threshold = excluded.spam_threshold
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set spam_threshold: %w", err)
-	}
-	return nil
-}
-
 // SetSpamWhitelistMsgs переопределяет, сколько всего сообщений выводит юзера
 // в белый список (без анализа спама). nil сбрасывает.
 func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int) error {

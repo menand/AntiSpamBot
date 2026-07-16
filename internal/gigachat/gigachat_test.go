@@ -31,7 +31,7 @@ type testServer struct {
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
-	ts := &testServer{tokenTTL: 30 * time.Minute, chatContent: `{"spam_probability": 93}`}
+	ts := &testServer{tokenTTL: 30 * time.Minute, chatContent: "SPAM"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/oauth", func(w http.ResponseWriter, r *http.Request) {
 		ts.oauthCalls.Add(1)
@@ -80,12 +80,12 @@ func newTestClient(ts *testServer) *Client {
 	return c
 }
 
-func TestSpamProbabilityOK(t *testing.T) {
+func TestIsSpamOK(t *testing.T) {
 	ts := newTestServer(t)
 	c := newTestClient(ts)
-	p, err := c.SpamProbability(context.Background(), "текст")
-	if err != nil || p != 93 {
-		t.Fatalf("want 93, got %d err=%v", p, err)
+	spam, err := c.IsSpam(context.Background(), "текст")
+	if err != nil || !spam {
+		t.Fatalf("want spam=true, got %v err=%v", spam, err)
 	}
 	if ts.oauthCalls.Load() != 1 || ts.chatCalls.Load() != 1 {
 		t.Fatalf("oauth=%d chat=%d, want 1/1", ts.oauthCalls.Load(), ts.chatCalls.Load())
@@ -96,7 +96,7 @@ func TestTokenCachedBetweenCalls(t *testing.T) {
 	ts := newTestServer(t)
 	c := newTestClient(ts)
 	for i := 0; i < 3; i++ {
-		if _, err := c.SpamProbability(context.Background(), "x"); err != nil {
+		if _, err := c.IsSpam(context.Background(), "x"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,8 +113,8 @@ func TestTokenRefetchedWhenExpired(t *testing.T) {
 	// TTL меньше страховочной минуты — токен «протухает» сразу.
 	ts.tokenTTL = time.Second
 	c := newTestClient(ts)
-	_, _ = c.SpamProbability(context.Background(), "x")
-	_, _ = c.SpamProbability(context.Background(), "x")
+	_, _ = c.IsSpam(context.Background(), "x")
+	_, _ = c.IsSpam(context.Background(), "x")
 	if ts.oauthCalls.Load() != 2 {
 		t.Fatalf("expired token must be refetched: oauth called %d times", ts.oauthCalls.Load())
 	}
@@ -124,9 +124,9 @@ func TestTokenRefreshOn401(t *testing.T) {
 	ts := newTestServer(t)
 	ts.failNextChat.Store(http.StatusUnauthorized) // первый chat — 401
 	c := newTestClient(ts)
-	p, err := c.SpamProbability(context.Background(), "x")
-	if err != nil || p != 93 {
-		t.Fatalf("after 401+refresh want 93, got %d err=%v", p, err)
+	spam, err := c.IsSpam(context.Background(), "x")
+	if err != nil || !spam {
+		t.Fatalf("after 401+refresh want spam=true, got %v err=%v", spam, err)
 	}
 	if ts.oauthCalls.Load() != 2 || ts.chatCalls.Load() != 2 {
 		t.Fatalf("oauth=%d chat=%d, want 2/2 (forced refresh + retry)",
@@ -138,7 +138,7 @@ func TestOAuthErrorPropagates(t *testing.T) {
 	ts := newTestServer(t)
 	c := newTestClient(ts)
 	c.oauthEndpoint = ts.URL + "/nope"
-	if _, err := c.SpamProbability(context.Background(), "x"); err == nil {
+	if _, err := c.IsSpam(context.Background(), "x"); err == nil {
 		t.Fatal("oauth failure must surface as error (fail-open at caller)")
 	}
 }
@@ -147,7 +147,7 @@ func TestChatErrorPropagates(t *testing.T) {
 	ts := newTestServer(t)
 	ts.failNextChat.Store(http.StatusTooManyRequests)
 	c := newTestClient(ts)
-	if _, err := c.SpamProbability(context.Background(), "x"); err == nil {
+	if _, err := c.IsSpam(context.Background(), "x"); err == nil {
 		t.Fatal("chat 429 must surface as error")
 	}
 	// 429 не должен трактоваться как протухший токен: рефреша не было.
@@ -157,83 +157,19 @@ func TestChatErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestParseProbability(t *testing.T) {
-	tests := []struct {
-		name    string
-		content string
-		want    int
-		wantErr bool
-	}{
-		{"clean json", `{"spam_probability": 85}`, 85, false},
-		{"json in code block", "```json\n{\"spam_probability\": 42}\n```", 42, false},
-		{"json inside text", `Вот ответ: {"spam_probability": 7}.`, 7, false},
-		{"json zero is a verdict", `{"spam_probability": 0}`, 0, false},
-		{"json 0..1 scale", `{"spam_probability": 0.95}`, 95, false},
-		// Ровно 1 — это 1% (промпт просит целые 0..100), НЕ шкала 0..1.
-		{"one stays one percent", `{"spam_probability": 1}`, 1, false},
-		{"leading-dot decimal", `.5`, 50, false},
-		{"comma decimal", `0,95`, 95, false},
-		{"bare number", `85`, 85, false},
-		{"number in text", `Вероятность спама: 61%`, 61, false},
-		{"clamp high", `{"spam_probability": 250}`, 100, false},
-		{"clamp negative", `{"spam_probability": -5}`, 0, false},
-		{"garbage", `не могу оценить`, 0, true},
-		// Валидный JSON БЕЗ нужного ключа не должен тихо становиться нулём.
-		{"json wrong key", `{"probability": 95}`, 95, false}, // спасает число-фолбек
-		{"empty object", `{}`, 0, true},
-		{"null", `null`, 0, true},
-		// Несколько чисел — неоднозначно: fail-open честнее догадки.
-		{"ambiguous prose", `По шкале от 0 до 100 я оцениваю это как 95`, 0, true},
-		{"two numbers", `В чате 2 минуты, вероятность спама 5`, 0, true},
-		// Единственное число, но не вероятность.
-		{"single huge number", `1500`, 0, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			p, err := parseProbability(tc.content)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v (p=%d)", err, tc.wantErr, p)
-			}
-			if !tc.wantErr && p != tc.want {
-				t.Errorf("got %d, want %d", p, tc.want)
-			}
-		})
-	}
-}
-
-func TestProbabilityCustomSystemAnd401Refresh(t *testing.T) {
-	// Probability с кастомным промптом обязан сохранить 401-force-refresh
+func TestClassifyCustomSystemAnd401Refresh(t *testing.T) {
+	// Classify с кастомным промптом обязан сохранить 401-force-refresh
 	// обвязку — профиль-чек не должен ломаться на протухшем токене.
 	ts := newTestServer(t)
 	ts.failNextChat.Store(http.StatusUnauthorized)
 	c := newTestClient(ts)
-	p, err := c.Probability(context.Background(), "ПРОФИЛЬ-ПРОМПТ", "факты")
-	if err != nil || p != 93 {
-		t.Fatalf("after 401+refresh want 93, got %d err=%v", p, err)
+	spam, err := c.Classify(context.Background(), "ПРОФИЛЬ-ПРОМПТ", "факты")
+	if err != nil || !spam {
+		t.Fatalf("after 401+refresh want spam=true, got %v err=%v", spam, err)
 	}
 	if ts.oauthCalls.Load() != 2 || ts.chatCalls.Load() != 2 {
 		t.Fatalf("oauth=%d chat=%d, want 2/2 (forced refresh + retry)",
 			ts.oauthCalls.Load(), ts.chatCalls.Load())
-	}
-}
-
-func TestClampScale(t *testing.T) {
-	tests := []struct {
-		in   float64
-		want int
-	}{
-		{0, 0},
-		{0.95, 95}, // дробь 0..1 — шкала вероятности, переводим в проценты
-		{1, 1},     // ровно 1 — это 1%, НЕ 100% (осознанное решение, см. clampScale)
-		{1.5, 1},   // >1 не масштабируется, int() отбрасывает дробь
-		{61, 61},
-		{150, 100}, // клампы
-		{-5, 0},
-	}
-	for _, tc := range tests {
-		if got := clampScale(tc.in); got != tc.want {
-			t.Errorf("clampScale(%v) = %d, want %d", tc.in, got, tc.want)
-		}
 	}
 }
 

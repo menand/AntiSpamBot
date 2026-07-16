@@ -344,27 +344,6 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set spam_check_enabled", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
-	case "sthr":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		v, err := strconv.Atoi(parts[3])
-		// Порог < 50% вешал бы плашку на половину обычных сообщений, а 100%
-		// недостижим (LLM редко отвечает ровно сотней) — фича бы «отключилась».
-		if err != nil || v < 50 || v > 99 {
-			return nil
-		}
-		if err := b.db.SetSpamThreshold(ctx, chatID, &v); err != nil {
-			b.log.Warn("set spam_threshold", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
 	case "swl":
 		if len(parts) != 4 {
 			return nil
@@ -652,7 +631,6 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		greetingText = "свой"
 	}
 
-	spamThreshold := effectiveSpamThreshold(s)
 	spamWhitelist := effectiveSpamWhitelist(s)
 	spamMargin := effectiveSpamVoteMargin(s)
 	spamLabel := onOffLabel(s.SpamCheckEnabled)
@@ -671,7 +649,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"💬 Требовать ответа на приветствие: <b>%s</b> (%d сек)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
-			"🤖 ИИ-антиспам: <b>%s</b> (порог %d%%, белый список после %d сообщ., перевес %d)",
+			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
@@ -680,7 +658,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
-		spamLabel, spamThreshold, spamWhitelist, spamMargin,
+		spamLabel, spamWhitelist, spamMargin,
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -718,7 +696,6 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	// плотный.
 	if s.SpamCheckEnabled {
 		rows = append(rows,
-			intPresetRow(chatID, "sthr", spamThreshold, []int{70, 80, 90}, "%"),
 			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"),
 			intPresetRow(chatID, "svm", spamMargin, []int{2, 3, 5}, " гол."))
 	}

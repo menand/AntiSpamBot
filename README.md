@@ -351,7 +351,7 @@ release: права как у всех      кик (ban+unban);              б�
   ▼ нет
 LLM: Groq ──ошибка/лимит──► GigaChat ──оба упали──► fail-open (не трогаем)
   │
-  ▼ вероятность ≥ порога (дефолт 90%)
+  ▼ вердикт SPAM (бинарный, без порогов)
 плашка «мне кажется, это спам» + голосование
   │   • голос принимается только от участников с историей в чате (гейт доверия)
   │   • голос админа/владельца решает сразу («золотой голос»)
@@ -473,10 +473,11 @@ internal/storage/        SQLite (modernc.org/sqlite, без CGO), один write
   └─ spam.go             всё хранение антиспама: голосования, бюллетени, глобальная
                          база спамеров, приветствия, белый список
 
-internal/groq/           клиент Groq API — первичный LLM (+ общий SystemPrompt промпта)
+internal/groq/           клиент Groq API — первичный LLM (+ общие промпты и парсер
+                         вердикта ParseVerdict)
 internal/gigachat/       клиент GigaChat — фолбек: OAuth-токен с кэшем, вшитый корневой
                          сертификат НУЦ Минцифры (russian_trusted_root_ca.pem — без него
-                         TLS к Сберу не проходит вне РФ), робастный парсер вероятности
+                         TLS к Сберу не проходит вне РФ)
 
 scripts/auto-deploy.sh   cron-скрипт автодеплоя из git (flock, git describe → версия)
 Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.23, non-root
@@ -493,7 +494,7 @@ CLAUDE.md                плотная архитектурная шпарга�
 |---|---|
 | поменять тексты капчи / приветствия по умолчанию | `handlers.go: runCaptcha` (текст капчи), `greeting.go: renderGreeting` (дефолт приветствия) |
 | добавить эмодзи в пул капчи | `captcha/captcha.go: emojiCategories` + положить PNG-глиф в `captcha/assets/` (тест `TestAllEmojiGlyphsPresent` проверит) |
-| поменять дефолтные пороги ИИ-антиспама | константы в начале `spamcheck.go` (`defaultSpamThreshold` 90, `defaultSpamWhitelist` 5, `defaultSpamVoteMargin` 3) |
+| поменять дефолты ИИ-антиспама | константы в начале `spamcheck.go` (`defaultSpamWhitelist` 5, `defaultSpamVoteMargin` 3); вердикт бинарный SPAM/OK, порогов нет |
 | подкрутить промпт LLM | `groq/groq.go: SystemPrompt` (общий для обоих провайдеров); проверить вживую: `GROQ_API_KEY=... go test -run TestLive ./internal/groq -v` |
 | поменять лестницы ретраев Telegram-вызовов | `actions.go: tgBackoffs / kickUnbanBackoffs` |
 | добавить новую пер-чатовую настройку | колонка в **обоих** местах: `schema.sql` + миграция в `db.go`, плюс `MigrateChat` (migrate.go), поле в `ChatSettings` (chats.go), кнопка в `menu.go` |

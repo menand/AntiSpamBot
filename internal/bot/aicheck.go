@@ -15,7 +15,7 @@ import (
 type spamClassifier interface {
 	Enabled() bool
 	Model() string
-	SpamProbability(ctx context.Context, facts string) (int, error)
+	IsSpam(ctx context.Context, facts string) (bool, error)
 }
 
 // aiCheckFacts — безобидный фиксированный вход: реальный вызов проверяет всю
@@ -49,8 +49,8 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 			ctx, cancel := context.WithTimeout(b.runCtx, aiCheckTimeout)
 			defer cancel()
 			start := time.Now()
-			prob, err := p.c.SpamProbability(ctx, aiCheckFacts)
-			lines[i] = formatProviderCheck(p.name, p.c.Model(), prob, time.Since(start), err)
+			spam, err := p.c.IsSpam(ctx, aiCheckFacts)
+			lines[i] = formatProviderCheck(p.name, p.c.Model(), spam, time.Since(start), err)
 		})
 	}
 	for range providers {
@@ -73,12 +73,16 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 
 // formatProviderCheck рендерит одну строку итога. Текст ошибки экранируется и
 // режется: тела ответов API бывают длинными и содержат разметку.
-func formatProviderCheck(name, model string, prob int, elapsed time.Duration, err error) string {
+func formatProviderCheck(name, model string, spam bool, elapsed time.Duration, err error) string {
 	if err != nil {
 		return fmt.Sprintf("❌ %s (%s) — ошибка за %.1f с: <code>%s</code>",
 			name, model, elapsed.Seconds(),
 			html.EscapeString(truncateLabel(err.Error(), 200)))
 	}
-	return fmt.Sprintf("✅ %s (%s) — коннект есть: %.1f с, вердикт %d%%",
-		name, model, elapsed.Seconds(), prob)
+	verdict := "OK"
+	if spam {
+		verdict = "SPAM"
+	}
+	return fmt.Sprintf("✅ %s (%s) — коннект есть: %.1f с, вердикт %s",
+		name, model, elapsed.Seconds(), verdict)
 }
