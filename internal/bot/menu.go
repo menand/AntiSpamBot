@@ -96,6 +96,22 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+	case "dreport":
+		// Глобальный тумблер утренней ЛС-сводки за вчера. Единственный
+		// не-owner-only пункт главного меню: доступен и админам чатов.
+		if !b.canGetDailyReport(query.From.ID) {
+			return nil
+		}
+		on, err := b.db.DailyReportEnabled(ctx, query.From.ID)
+		if err != nil {
+			b.log.Warn("get daily report", "err", err, "user", query.From.ID)
+			return nil
+		}
+		if err := b.db.SetDailyReport(ctx, query.From.ID, !on); err != nil {
+			b.log.Warn("set daily report", "err", err, "user", query.From.ID)
+			return nil
+		}
+		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 	case "logs":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -469,7 +485,32 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 				WithCallbackData("menu:modnotify"),
 		})
 	}
+	// 📬 Итог дня — владельцу и любому админу хотя бы одного известного чата.
+	if b.canGetDailyReport(userID) {
+		reportOn, err := b.db.DailyReportEnabled(b.runCtx, userID)
+		if err != nil {
+			reportOn = false
+		}
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(toggleLabel("📬 Итог дня в ЛС", reportOn)).
+				WithCallbackData("menu:dreport"),
+		})
+	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// canGetDailyReport — кому положена ЛС-сводка: владельцу бота или админу
+// хотя бы одного известного чата (userChats ходит через 6-часовой кэш
+// админства, так что для обычных юзеров это дёшево после первого меню).
+// ponytail: рендер /start незнакомцу стоит N getChatMember при N чатов в
+// реестре — при нынешних единицах чатов это ок; вырастет реестр — прятать
+// проверку за явный клик (как cbChats).
+func (b *Bot) canGetDailyReport(userID int64) bool {
+	if b.isOwner(userID) {
+		return true
+	}
+	chats, err := b.userChats(b.runCtx, userID)
+	return err == nil && len(chats) > 0
 }
 
 const helpText = `📖 <b>Справка</b>

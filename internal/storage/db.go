@@ -61,6 +61,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		`ALTER TABLE chat_settings ADD COLUMN reply_check_enabled INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE chat_settings ADD COLUMN reply_check_seconds INTEGER`,
 		`ALTER TABLE owner_settings ADD COLUMN mod_notify INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE owner_settings ADD COLUMN daily_report INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE owner_settings ADD COLUMN last_report_day TEXT`,
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}
