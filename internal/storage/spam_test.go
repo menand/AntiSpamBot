@@ -218,6 +218,46 @@ func TestSpamNotify(t *testing.T) {
 	}
 }
 
+func TestDailyReportSettings(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if on, err := db.DailyReportEnabled(ctx, 1); err != nil || on {
+		t.Fatalf("default must be off: %v %v", on, err)
+	}
+	if subs, _ := db.DailyReportSubscribers(ctx); len(subs) != 0 {
+		t.Fatalf("no subscribers expected, got %v", subs)
+	}
+	if err := db.SetDailyReport(ctx, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.SetDailyReport(ctx, 2, false)
+	subs, err := db.DailyReportSubscribers(ctx)
+	if err != nil || len(subs) != 1 || subs[0].UserID != 1 || subs[0].LastDay != "" {
+		t.Fatalf("want [{1 \"\"}], got %v err=%v", subs, err)
+	}
+	if err := db.MarkDailyReportSent(ctx, 1, "2026-07-16"); err != nil {
+		t.Fatal(err)
+	}
+	subs, _ = db.DailyReportSubscribers(ctx)
+	if len(subs) != 1 || subs[0].LastDay != "2026-07-16" {
+		t.Fatalf("mark must update LastDay, got %v", subs)
+	}
+	// Маркер без подписки не создаёт подписчика.
+	if err := db.MarkDailyReportSent(ctx, 3, "2026-07-16"); err != nil {
+		t.Fatal(err)
+	}
+	if subs, _ = db.DailyReportSubscribers(ctx); len(subs) != 1 {
+		t.Fatalf("mark alone must not subscribe, got %v", subs)
+	}
+	if err := db.SetDailyReport(ctx, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if subs, _ = db.DailyReportSubscribers(ctx); len(subs) != 0 {
+		t.Fatalf("must be gone after disable, got %v", subs)
+	}
+}
+
 func TestGreetingsLifecycle(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

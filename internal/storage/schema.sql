@@ -167,9 +167,13 @@ CREATE TABLE IF NOT EXISTS pending_replies (
     PRIMARY KEY (chat_id, user_id)
 );
 
--- Глобальные (не пер-чатовые) настройки владельцев бота (OWNER_IDS).
+-- Глобальные (не пер-чатовые) настройки ЛС-уведомлений. Имя историческое:
+-- spam_notify/mod_notify доступны только владельцам (OWNER_IDS), а
+-- daily_report — и админам чатов, так что owner_id хранит любой user id.
 CREATE TABLE IF NOT EXISTS owner_settings (
-    owner_id    INTEGER PRIMARY KEY,
-    spam_notify INTEGER NOT NULL DEFAULT 0, -- слать в ЛС подозрения и вердикты
-    mod_notify  INTEGER NOT NULL DEFAULT 0  -- слать в ЛС кики/баны (капча, молчание, /kick, /ban) и проходы капчи
+    owner_id        INTEGER PRIMARY KEY,
+    spam_notify     INTEGER NOT NULL DEFAULT 0, -- слать в ЛС подозрения и вердикты
+    mod_notify      INTEGER NOT NULL DEFAULT 0, -- слать в ЛС кики/баны (капча, молчание, /kick, /ban) и проходы капчи
+    daily_report    INTEGER NOT NULL DEFAULT 0, -- слать в ЛС утреннюю сводку за вчера по чатам юзера
+    last_report_day TEXT                        -- маркер отправки сводки (день МСК), NULL = ещё не слали
 );

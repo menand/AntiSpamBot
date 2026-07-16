@@ -344,6 +344,70 @@ func (d *DB) SetModNotify(ctx context.Context, ownerID int64, on bool) error {
 	return nil
 }
 
+// DailyReportEnabled — включена ли у юзера утренняя ЛС-сводка по его чатам.
+// В отличие от spam/mod_notify доступна не только владельцам, но и админам.
+func (d *DB) DailyReportEnabled(ctx context.Context, userID int64) (bool, error) {
+	var on int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT daily_report FROM owner_settings WHERE owner_id = ?`, userID).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("daily report enabled: %w", err)
+	}
+	return on != 0, nil
+}
+
+func (d *DB) SetDailyReport(ctx context.Context, userID int64, on bool) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO owner_settings (owner_id, daily_report) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET daily_report = excluded.daily_report
+	`, userID, boolToInt(on))
+	if err != nil {
+		return fmt.Errorf("set daily report: %w", err)
+	}
+	return nil
+}
+
+// ReportSub — подписчик ЛС-сводки и день последней отправки ("" = ещё не слали).
+type ReportSub struct {
+	UserID  int64
+	LastDay string
+}
+
+// DailyReportSubscribers — все подписчики сводки одним запросом.
+func (d *DB) DailyReportSubscribers(ctx context.Context) ([]ReportSub, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT owner_id, COALESCE(last_report_day, '') FROM owner_settings WHERE daily_report != 0`)
+	if err != nil {
+		return nil, fmt.Errorf("daily report subscribers: %w", err)
+	}
+	defer rows.Close()
+	var out []ReportSub
+	for rows.Next() {
+		var s ReportSub
+		if err := rows.Scan(&s.UserID, &s.LastDay); err != nil {
+			return nil, fmt.Errorf("scan daily report subscriber: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// MarkDailyReportSent помечает день отправленным (аналог MarkDailyStatsSent,
+// но per-user): гейт в maybeSendDMReports не пошлёт сводку дважды.
+func (d *DB) MarkDailyReportSent(ctx context.Context, userID int64, day string) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO owner_settings (owner_id, last_report_day) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET last_report_day = excluded.last_report_day
+	`, userID, day)
+	if err != nil {
+		return fmt.Errorf("mark daily report sent: %w", err)
+	}
+	return nil
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1

@@ -7,6 +7,30 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
+func TestReportLine(t *testing.T) {
+	tests := []struct {
+		name  string
+		title string
+		s     storage.Stats
+		want  string
+	}{
+		{"empty day", "Бег", storage.Stats{}, "«Бег» — без событий"},
+		{"normal day", "Бег", storage.Stats{Joined: 5, Passed: 4, Kicked: 1},
+			"«Бег» — вступило 5, прошло 4, кик 1, бан 0"},
+		{"bans merge spam", "Бег", storage.Stats{Banned: 1, SpamBanned: 2},
+			"«Бег» — вступило 0, прошло 0, кик 0, бан 3 (из них спам 2)"},
+		{"title escaped", "A<b>&", storage.Stats{Passed: 1},
+			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, кик 0, бан 0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := reportLine(tc.title, tc.s); got != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDigestHasContent(t *testing.T) {
 	if digestHasContent(storage.Stats{}, nil, nil, nil, nil) {
 		t.Fatal("fully empty day must skip the digest")
