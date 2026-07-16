@@ -57,23 +57,15 @@ func TestUserLabel(t *testing.T) {
 
 func TestEffectiveSpamSettings(t *testing.T) {
 	var s storage.ChatSettings
-	if effectiveSpamThreshold(s) != defaultSpamThreshold {
-		t.Errorf("NULL threshold must fall back to %d", defaultSpamThreshold)
-	}
 	if effectiveSpamWhitelist(s) != defaultSpamWhitelist {
 		t.Errorf("NULL whitelist must fall back to %d", defaultSpamWhitelist)
 	}
-	s.SpamThreshold = sql.NullInt64{Int64: 75, Valid: true}
 	s.SpamWhitelistMsgs = sql.NullInt64{Int64: 10, Valid: true}
-	if effectiveSpamThreshold(s) != 75 || effectiveSpamWhitelist(s) != 10 {
-		t.Error("valid overrides must win")
+	if effectiveSpamWhitelist(s) != 10 {
+		t.Error("valid override must win")
 	}
 	// Мусор в БД → дефолт.
-	s.SpamThreshold = sql.NullInt64{Int64: 500, Valid: true}
 	s.SpamWhitelistMsgs = sql.NullInt64{Int64: -3, Valid: true}
-	if effectiveSpamThreshold(s) != defaultSpamThreshold {
-		t.Error("out-of-range threshold must fall back")
-	}
 	if effectiveSpamWhitelist(s) != defaultSpamWhitelist {
 		t.Error("non-positive whitelist must fall back")
 	}

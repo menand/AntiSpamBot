@@ -22,7 +22,7 @@ const profileBioLimit = 500
 // профиль новичка (имя/ник/bio/фото) оценивается LLM, и при подозрении в
 // чат вешается плашка «забанить?» на общей инфраструктуре голосования.
 // Настройки общие со спам-чеком сообщений: тумблер spam_check_enabled,
-// порог spam_threshold, перевес spam_vote_margin.
+// перевес spam_vote_margin.
 func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 	if !b.spamAIEnabled() {
 		return
@@ -63,19 +63,18 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 
 	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
 	defer cancel()
-	prob, provider, err := b.classifyProbability(ctx, groq.ProfileSystemPrompt, facts, chatID, userID)
+	spam, provider, err := b.classifyVerdict(ctx, groq.ProfileSystemPrompt, facts, chatID, userID)
 	if err != nil {
 		// Fail-open: сбой всех провайдеров — профиль не трогаем.
 		b.log.Warn("profile check failed (fail-open)", "err", err,
 			"provider", provider, "chat", chatID, "user", userID)
 		return
 	}
-	threshold := effectiveSpamThreshold(s)
 	// facts — ровно то, что ушло в LLM: владельцы видят по логу, за что
-	// профилю выставили оценку (тот же verbose-контур, что у спам-чека).
+	// профилю выставили вердикт (тот же verbose-контур, что у спам-чека).
 	b.log.Info("profile check verdict", "chat", chatID, "user", userID,
-		"prob", prob, "threshold", threshold, "provider", provider, "facts", facts)
-	if prob < threshold {
+		"spam", spam, "provider", provider, "facts", facts)
+	if !spam {
 		return
 	}
 
@@ -87,7 +86,7 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 	mention := mentionOrID(infos, userID)
 	margin := effectiveSpamVoteMargin(s)
 
-	params := tu.Message(tu.ID(chatID), profileVoteText(mention, prob, 0, 0, margin)).
+	params := tu.Message(tu.ID(chatID), profileVoteText(mention, 0, 0, margin)).
 		WithParseMode(telego.ModeHTML).
 		WithReplyMarkup(profileVoteKeyboard())
 	if threadID != 0 {
@@ -103,7 +102,7 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 		BotMsgID:    sent.MessageID,
 		TargetMsgID: 0, // маркер профильной плашки: целевого сообщения нет
 		AuthorID:    userID,
-		Prob:        prob,
+		Prob:        100, // ponytail: легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
 		CreatedAt:   time.Now(),
 	}); err != nil {
 		// Без строки в БД кнопки мертвы, а свипер плашку не увидит (он читает
@@ -112,7 +111,7 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
 		return
 	}
-	b.notifyProfileSuspicion(chatID, userID, facts, prob, threshold)
+	b.notifyProfileSuspicion(chatID, userID, facts)
 }
 
 // buildProfileFactsFromAPI собирает факты профиля: getChat(userID) даёт
@@ -173,12 +172,12 @@ func buildProfileFacts(first, last, username, bio string, bioKnown bool, photos 
 	return sb.String()
 }
 
-func profileVoteText(mention string, prob, yes, no, margin int) string {
+func profileVoteText(mention string, yes, no, margin int) string {
 	return fmt.Sprintf(
-		"👤 %s вошёл в чат, но профиль выглядит подозрительно (уверенность %d%%). Забанить?\n\n"+
+		"👤 %s вошёл в чат, но профиль выглядит подозрительно. Забанить?\n\n"+
 			"Голосуйте кнопками — перевес в %d %s решает. Голос админа решает сразу.\n\n"+
 			"🚫 Забанить: <b>%d</b> · ✅ Оставить: <b>%d</b>",
-		mention, prob, margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)
+		mention, margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)
 }
 
 // profileVoteKeyboard — те же callback data sv:1/sv:0, что у спам-плашки:
@@ -192,14 +191,14 @@ func profileVoteKeyboard() *telego.InlineKeyboardMarkup {
 
 // notifyProfileSuspicion шлёт подписанным владельцам карточку подозрительного
 // профиля (форвардить нечего — сообщений у юзера ещё нет).
-func (b *Bot) notifyProfileSuspicion(chatID, userID int64, facts string, prob, threshold int) {
+func (b *Bot) notifyProfileSuspicion(chatID, userID int64, facts string) {
 	targets := b.spamNotifyTargets(b.runCtx)
 	if len(targets) == 0 {
 		return
 	}
-	info := fmt.Sprintf("👤 Подозрительный профиль в «%s»\n%s\nОценка: %d%% (порог %d)",
+	info := fmt.Sprintf("👤 Подозрительный профиль в «%s»\n%s",
 		html.EscapeString(b.chatTitle(b.runCtx, chatID)),
-		html.EscapeString(strings.TrimSpace(facts)), prob, threshold)
+		html.EscapeString(strings.TrimSpace(facts)))
 	for _, ownerID := range targets {
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
 			WithParseMode(telego.ModeHTML)); err != nil {

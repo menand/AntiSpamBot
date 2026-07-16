@@ -56,8 +56,8 @@ func TestBuildProfileFacts(t *testing.T) {
 }
 
 func TestProfileVoteText(t *testing.T) {
-	got := profileVoteText("<a href=\"tg://user?id=1\">Иван</a>", 95, 2, 1, 3)
-	for _, want := range []string{"Иван", "95%", "перевес в 3 голоса", "Забанить: <b>2</b>", "Оставить: <b>1</b>"} {
+	got := profileVoteText("<a href=\"tg://user?id=1\">Иван</a>", 2, 1, 3)
+	for _, want := range []string{"Иван", "перевес в 3 голоса", "Забанить: <b>2</b>", "Оставить: <b>1</b>"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}

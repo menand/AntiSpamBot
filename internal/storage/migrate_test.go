@@ -30,9 +30,11 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	greetEnts := `[{"type":"bold","offset":0,"length":6}]`
 	_ = db.SetGreetingText(ctx, old, &greet, &greetEnts)
 	_ = db.SetSilentAnnounceEnabled(ctx, old, false)
-	sthr, swl, svm := 75, 10, 2
+	swl, svm := 10, 2
 	_ = db.SetSpamCheckEnabled(ctx, old, true)
-	_ = db.SetSpamThreshold(ctx, old, &sthr)
+	// Легаси-колонка (сеттер выпилен вместе с порогом), но MigrateChat обязан
+	// переносить и её — сеем сырым UPDATE.
+	_, _ = db.sql.ExecContext(ctx, `UPDATE chat_settings SET spam_threshold = 75 WHERE chat_id = ?`, old)
 	_ = db.SetSpamWhitelistMsgs(ctx, old, &swl)
 	_ = db.SetSpamVoteMargin(ctx, old, &svm)
 	rpls := 90

@@ -107,7 +107,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     greeting_entities       TEXT,
     silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
     spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
-    spam_threshold          INTEGER, -- NULL = 90; порог вероятности спама (%)
+    spam_threshold          INTEGER, -- легаси (вердикт теперь бинарный); колонка живёт ради миграций
     spam_whitelist_msgs     INTEGER, -- NULL = 5; сообщений до белого списка
     spam_vote_margin        INTEGER, -- NULL = 3; перевес голосов для вердикта
     reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- режим «требовать ответа»
