@@ -344,6 +344,51 @@ func (d *DB) SetModNotify(ctx context.Context, ownerID int64, on bool) error {
 	return nil
 }
 
+// CaptchaNotifyEnabled — включены ли у владельца ЛС-уведомления о КАЖДОМ
+// провале капчи (mod_notify шлёт провалы только со второй попытки).
+func (d *DB) CaptchaNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
+	var on int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT captcha_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("captcha notify enabled: %w", err)
+	}
+	return on != 0, nil
+}
+
+// CaptchaNotifyOwners — все владельцы с подпиской на все провалы капчи.
+func (d *DB) CaptchaNotifyOwners(ctx context.Context) ([]int64, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT owner_id FROM owner_settings WHERE captcha_notify != 0`)
+	if err != nil {
+		return nil, fmt.Errorf("captcha notify owners: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan captcha notify owner: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+func (d *DB) SetCaptchaNotify(ctx context.Context, ownerID int64, on bool) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO owner_settings (owner_id, captcha_notify) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET captcha_notify = excluded.captcha_notify
+	`, ownerID, boolToInt(on))
+	if err != nil {
+		return fmt.Errorf("set captcha notify: %w", err)
+	}
+	return nil
+}
+
 // DailyReportEnabled — включена ли у юзера утренняя ЛС-сводка по его чатам.
 // В отличие от spam/mod_notify доступна не только владельцам, но и админам.
 func (d *DB) DailyReportEnabled(ctx context.Context, userID int64) (bool, error) {

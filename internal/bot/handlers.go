@@ -966,12 +966,12 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now(), storage.ReasonCaptcha)
-		b.notifyModAction(p.ChatID, p.UserID, storage.EventBan, storage.ReasonCaptcha, reason)
+		b.notifyCaptchaFail(p.ChatID, p.UserID, storage.EventBan, reason, count)
 		return b.ban(ctx, p.ChatID, p.UserID)
 	}
 	b.log.Info("kicking user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 	_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now(), storage.ReasonCaptcha)
-	b.notifyModAction(p.ChatID, p.UserID, storage.EventKick, storage.ReasonCaptcha, reason)
+	b.notifyCaptchaFail(p.ChatID, p.UserID, storage.EventKick, reason, count)
 	return b.kick(ctx, p.ChatID, p.UserID)
 }
 

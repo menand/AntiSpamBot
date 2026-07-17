@@ -96,6 +96,22 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+	case "capnotify":
+		// Глобальный тумблер владельца: слать ли ему в ЛС ВСЕ провалы капчи
+		// (под общим modnotify провалы приходят только со второй попытки).
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		on, err := b.db.CaptchaNotifyEnabled(ctx, query.From.ID)
+		if err != nil {
+			b.log.Warn("get captcha notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		if err := b.db.SetCaptchaNotify(ctx, query.From.ID, !on); err != nil {
+			b.log.Warn("set captcha notify", "err", err, "owner", query.From.ID)
+			return nil
+		}
+		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 	case "dreport":
 		// Глобальный тумблер утренней ЛС-сводки за вчера. Единственный
 		// не-owner-only пункт главного меню: доступен и админам чатов.
@@ -497,6 +513,10 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 		if err != nil {
 			modOn = false
 		}
+		capOn, err := b.db.CaptchaNotifyEnabled(b.runCtx, userID)
+		if err != nil {
+			capOn = false
+		}
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton(toggleLabel("🔔 Спам-уведомления в ЛС", notifyOn)).
 				WithCallbackData("menu:spamnotify"),
@@ -504,6 +524,10 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и капча в ЛС", modOn)).
 				WithCallbackData("menu:modnotify"),
+		})
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(toggleLabel("🧩 Все провалы капчи в ЛС", capOn)).
+				WithCallbackData("menu:capnotify"),
 		})
 	}
 	// 📬 Итог дня — владельцу и любому админу хотя бы одного известного чата.
