@@ -433,6 +433,12 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 
 func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error {
 	if message.Chat.Type != "private" {
+		// Хендлер зарегистрирован на /start И /help без chat-предиката —
+		// групповой /help делегируем эфемерной справке, /start в группе молчит.
+		if f := strings.Fields(message.Text); len(f) > 0 &&
+			(f[0] == "/help" || strings.HasPrefix(f[0], "/help@")) {
+			return b.handleGroupHelpCommand(ctx, message)
+		}
 		return nil
 	}
 
