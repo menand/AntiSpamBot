@@ -88,7 +88,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	captchaDelay, err := parseDuration("CAPTCHA_DELAY_MS", 2000*time.Millisecond, time.Millisecond)
+	// 3000: с 2000 эфемерная капча (ephemeral_enabled) стабильно попадала в
+	// гонку отрисовки клиента — вживую в открывающуюся ленту эфемерное
+	// сообщение не подклеивается, только при переоткрытии чата.
+	captchaDelay, err := parseDuration("CAPTCHA_DELAY_MS", 3000*time.Millisecond, time.Millisecond)
 	if err != nil {
 		return nil, err
 	}

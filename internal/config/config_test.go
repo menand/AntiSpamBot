@@ -120,7 +120,7 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.CaptchaTimeout != 30*time.Second || cfg.MaxAttempts != 3 ||
 		cfg.NewcomerDays != 7 || cfg.SilentAnnounceDays != 30 ||
-		cfg.CaptchaDelay != 2*time.Second || cfg.DailyStatsUTCHour != 6 {
+		cfg.CaptchaDelay != 3*time.Second || cfg.DailyStatsUTCHour != 6 {
 		t.Errorf("defaults mismatch: %+v", cfg)
 	}
 	if cfg.DBPath != "bot.db" {
