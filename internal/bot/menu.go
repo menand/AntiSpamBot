@@ -70,64 +70,28 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
-		on, err := b.db.SpamNotifyEnabled(ctx, query.From.ID)
-		if err != nil {
-			b.log.Warn("get spam notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		if err := b.db.SetSpamNotify(ctx, query.From.ID, !on); err != nil {
-			b.log.Warn("set spam notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+		return b.toggleOwnerSetting(ctx, query, b.db.SpamNotifyEnabled, b.db.SetSpamNotify, "spam_notify")
 	case "modnotify":
 		// Глобальный тумблер владельца: слать ли ему в ЛС кики/баны
 		// (капча, молчание, /kick, /ban, глобальная база) и проходы капчи.
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
-		on, err := b.db.ModNotifyEnabled(ctx, query.From.ID)
-		if err != nil {
-			b.log.Warn("get mod notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		if err := b.db.SetModNotify(ctx, query.From.ID, !on); err != nil {
-			b.log.Warn("set mod notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+		return b.toggleOwnerSetting(ctx, query, b.db.ModNotifyEnabled, b.db.SetModNotify, "mod_notify")
 	case "capnotify":
 		// Глобальный тумблер владельца: слать ли ему в ЛС ВСЕ провалы капчи
 		// (под общим modnotify провалы приходят только со второй попытки).
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
-		on, err := b.db.CaptchaNotifyEnabled(ctx, query.From.ID)
-		if err != nil {
-			b.log.Warn("get captcha notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		if err := b.db.SetCaptchaNotify(ctx, query.From.ID, !on); err != nil {
-			b.log.Warn("set captcha notify", "err", err, "owner", query.From.ID)
-			return nil
-		}
-		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+		return b.toggleOwnerSetting(ctx, query, b.db.CaptchaNotifyEnabled, b.db.SetCaptchaNotify, "captcha_notify")
 	case "dreport":
 		// Глобальный тумблер утренней ЛС-сводки за вчера. Единственный
 		// не-owner-only пункт главного меню: доступен и админам чатов.
 		if !b.canGetDailyReport(query.From.ID) {
 			return nil
 		}
-		on, err := b.db.DailyReportEnabled(ctx, query.From.ID)
-		if err != nil {
-			b.log.Warn("get daily report", "err", err, "user", query.From.ID)
-			return nil
-		}
-		if err := b.db.SetDailyReport(ctx, query.From.ID, !on); err != nil {
-			b.log.Warn("set daily report", "err", err, "user", query.From.ID)
-			return nil
-		}
-		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
+		return b.toggleOwnerSetting(ctx, query, b.db.DailyReportEnabled, b.db.SetDailyReport, "daily_report")
 	case "logs":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -140,66 +104,32 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		return b.handleLogsCommand(ctx, synthetic)
 	case "stats":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		return b.renderChatStats(ctx, query, chatID, parsePeriod(parts[3]))
 	case "settings":
-		if len(parts) != 3 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "gr":
-		// Тоггл приветствия. Понимает и старый формат (menu:gr:chat:period)
-		// с устаревших inline-кнопок, и новый (menu:gr:chat) из подменю
-		// настроек.
-		if len(parts) < 3 {
+		// Тоггл приветствия. Хвост легаси-формата menu:gr:chat:period со
+		// устаревших inline-кнопок игнорируется (см. chatCallbackTarget).
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		// Тогглы — read-modify-write: на ошибке чтения прерываемся, иначе мы
-		// запишем инверсию ДЕФОЛТА вместо инверсии реального значения.
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
-			return nil
-		}
-		if err := b.db.SetGreetingEnabled(ctx, chatID, !s.GreetingEnabled); err != nil {
-			b.log.Warn("set greeting in menu", "err", err)
-			return nil
-		}
-		return b.renderChatSettings(ctx, query, chatID)
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.GreetingEnabled },
+			b.db.SetGreetingEnabled, "greeting_enabled")
 	case "grtxt":
 		// Взводим флоу «пришли мне новый текст приветствия»: следующее личное
 		// сообщение юзера станет шаблоном приветствия чата.
-		if len(parts) != 3 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
 		// Экран настроек: читаем напрямую и прерываемся на ошибке, иначе
@@ -227,14 +157,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			WithParseMode(telego.ModeHTML))
 		return nil
 	case "max":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
@@ -243,19 +167,13 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err != nil || v < 1 || v > 100 {
 			return nil
 		}
-		if err := b.db.SetMaxAttempts(ctx, chatID, &v); err != nil {
+		if err := b.db.SetMaxAttempts(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set max_attempts", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "tmo":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
@@ -263,60 +181,30 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err != nil || v < 5 || v > 600 {
 			return nil
 		}
-		if err := b.db.SetCaptchaTimeoutSec(ctx, chatID, &v); err != nil {
+		if err := b.db.SetCaptchaTimeoutSec(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set captcha_timeout", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "daily":
-		if len(parts) != 3 {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
-			return nil
-		}
-		if err := b.db.SetDailyStatsEnabled(ctx, chatID, !s.DailyStatsEnabled); err != nil {
-			b.log.Warn("set daily stats", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.DailyStatsEnabled },
+			b.db.SetDailyStatsEnabled, "daily_stats_enabled")
 	case "rpl":
 		// Тоггл режима «требовать ответа на приветствие».
-		if len(parts) != 3 {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
-			return nil
-		}
-		if err := b.db.SetReplyCheckEnabled(ctx, chatID, !s.ReplyCheckEnabled); err != nil {
-			b.log.Warn("set reply_check_enabled", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.ReplyCheckEnabled },
+			b.db.SetReplyCheckEnabled, "reply_check_enabled")
 	case "rplt":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
@@ -324,62 +212,34 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err != nil || v < 10 || v > 600 {
 			return nil
 		}
-		if err := b.db.SetReplyCheckSeconds(ctx, chatID, &v); err != nil {
+		if err := b.db.SetReplyCheckSeconds(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set reply_check_seconds", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "eph":
 		// Тоггл эфемерных служебных сообщений (капча и ответы мод-команд).
-		if len(parts) != 3 {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
-			return nil
-		}
-		if err := b.db.SetEphemeralEnabled(ctx, chatID, !s.EphemeralEnabled); err != nil {
-			b.log.Warn("set ephemeral_enabled", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.EphemeralEnabled },
+			b.db.SetEphemeralEnabled, "ephemeral_enabled")
 	case "sil":
-		if len(parts) != 3 {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
-			return nil
-		}
-		if err := b.db.SetSilentAnnounceEnabled(ctx, chatID, !s.SilentAnnounceEnabled); err != nil {
-			b.log.Warn("set silent announce", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.SilentAnnounceEnabled },
+			b.db.SetSilentAnnounceEnabled, "silent_announce_enabled")
 	case "spam":
-		if len(parts) != 3 {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
 			return nil
 		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
-			return nil
-		}
+		// Тоггл read-modify-write, как toggleChatSetting, но с гейтом по
+		// наличию LLM-ключа между чтением и записью — поэтому развёрнут.
 		s, err := b.db.GetChatSettings(ctx, chatID)
 		if err != nil {
 			b.log.Warn("get chat settings", "err", err, "chat", chatID)
@@ -393,19 +253,13 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 				"⚠️ Ни GROQ_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя."))
 			return nil
 		}
-		if err := b.db.SetSpamCheckEnabled(ctx, chatID, !s.SpamCheckEnabled); err != nil {
+		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
 			b.log.Warn("set spam_check_enabled", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "swl":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
@@ -413,19 +267,13 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err != nil || v < 1 || v > 1000 {
 			return nil
 		}
-		if err := b.db.SetSpamWhitelistMsgs(ctx, chatID, &v); err != nil {
+		if err := b.db.SetSpamWhitelistMsgs(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set spam_whitelist_msgs", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "svm":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
@@ -433,38 +281,26 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err != nil || v < 1 || v > 10 {
 			return nil
 		}
-		if err := b.db.SetSpamVoteMargin(ctx, chatID, &v); err != nil {
+		if err := b.db.SetSpamVoteMargin(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set spam_vote_margin", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "hour":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
 		if err != nil || v < 0 || v > 23 {
 			return nil
 		}
-		if err := b.db.SetDailyStatsHour(ctx, chatID, &v); err != nil {
+		if err := b.db.SetDailyStatsHour(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set daily hour", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "cmode":
-		if len(parts) != 4 {
-			return nil
-		}
-		chatID, err := strconv.ParseInt(parts[2], 10, 64)
-		if err != nil {
-			return nil
-		}
-		if !b.canManageChat(ctx, query.From.ID, chatID) {
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
 		mode := parts[3]
@@ -472,12 +308,67 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			mode != string(captcha.ModeImage) {
 			return nil
 		}
-		if err := b.db.SetCaptchaMode(ctx, chatID, &mode); err != nil {
+		if err := b.db.SetCaptchaMode(b.runCtx, chatID, &mode); err != nil {
 			b.log.Warn("set captcha mode", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	}
 	return nil
+}
+
+// chatCallbackTarget разбирает callback вида "menu:<key>:<chatID>[:<val>]":
+// проверяет длину, парсит chatID и гейтит доступ (canManageChat). ok=false —
+// ветка должна молча выйти. Длина проверяется как len(parts) < wantLen, не
+// точно: лишние сегменты безвредны (доступ гейтит canManageChat, значения
+// валидируются в ветках), а легаси-формат menu:gr:chat:period со старых
+// клавиатур продолжает работать.
+func (b *Bot) chatCallbackTarget(ctx *th.Context, query telego.CallbackQuery, parts []string, wantLen int) (int64, bool) {
+	if len(parts) < wantLen {
+		return 0, false
+	}
+	chatID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	if !b.canManageChat(ctx, query.From.ID, chatID) {
+		return 0, false
+	}
+	return chatID, true
+}
+
+// toggleChatSetting — общее тело пер-чатовых тогглов настроек: read-modify-write.
+// На ошибке ЧТЕНИЯ прерываемся, иначе записали бы инверсию ДЕФОЛТА вместо
+// инверсии реального значения. Запись — на runCtx (конвенция «DB writes from
+// callbacks» из CLAUDE.md): начатый тоггл не должен теряться на shutdown.
+func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, chatID int64,
+	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string) error {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err != nil {
+		b.log.Warn("get chat settings", "err", err, "chat", chatID)
+		return nil
+	}
+	if err := set(b.runCtx, chatID, !get(s)); err != nil {
+		b.log.Warn("set "+what, "err", err, "chat", chatID)
+	}
+	return b.renderChatSettings(ctx, query, chatID)
+}
+
+// toggleOwnerSetting — общее тело глобальных ЛС-тогглов главного меню
+// (spamnotify/modnotify/capnotify/dreport). Гейт доступа остаётся в ветке —
+// он у них разный (isOwner / canGetDailyReport). Запись — на runCtx, как у
+// toggleChatSetting.
+func (b *Bot) toggleOwnerSetting(ctx *th.Context, query telego.CallbackQuery,
+	enabled func(context.Context, int64) (bool, error), set func(context.Context, int64, bool) error, what string) error {
+	on, err := enabled(ctx, query.From.ID)
+	if err != nil {
+		b.log.Warn("get "+what, "err", err, "user", query.From.ID)
+		return nil
+	}
+	if err := set(b.runCtx, query.From.ID, !on); err != nil {
+		b.log.Warn("set "+what, "err", err, "user", query.From.ID)
+		return nil
+	}
+	return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 }
 
 func (b *Bot) mainMenuText(userID int64) string {

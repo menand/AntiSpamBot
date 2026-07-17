@@ -2,12 +2,14 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"strings"
 	"time"
 
 	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
 	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
@@ -117,9 +119,11 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 
 	if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(userID), sb.String()).
 		WithParseMode(telego.ModeHTML)); err != nil {
-		// Юзер заблокировал бота — отписываем, иначе ретрай долбился бы в
-		// закрытую ЛС каждый тик до скончания веков.
-		if strings.Contains(err.Error(), "Forbidden") {
+		// 403 = ЛС закрыта навсегда (юзер заблокировал бота / аккаунт удалён) —
+		// отписываем, иначе ретрай долбился бы в закрытую ЛС каждый тик до
+		// скончания веков.
+		var apiErr *telegoapi.Error
+		if errors.As(err, &apiErr) && apiErr.ErrorCode == 403 {
 			b.log.Info("dm report: user blocked bot, unsubscribing", "user", userID)
 			_ = b.db.SetDailyReport(ctx, userID, false)
 			return

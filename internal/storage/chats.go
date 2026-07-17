@@ -118,177 +118,81 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	return s, nil
 }
 
-// SetEphemeralEnabled тогглит эфемерные служебные сообщения.
-func (d *DB) SetEphemeralEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, ephemeral_enabled)
+// setChatSetting апсертит одну колонку chat_settings — общее тело всех
+// Set*-сеттеров ниже. col — всегда константа вызывающего, не пользовательский
+// ввод.
+func (d *DB) setChatSetting(ctx context.Context, chatID int64, col string, v any) error {
+	_, err := d.sql.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO chat_settings (chat_id, %[1]s)
 		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET ephemeral_enabled = excluded.ephemeral_enabled
-	`, chatID, v)
+		ON CONFLICT(chat_id) DO UPDATE SET %[1]s = excluded.%[1]s
+	`, col), chatID, v)
 	if err != nil {
-		return fmt.Errorf("set ephemeral_enabled: %w", err)
+		return fmt.Errorf("set %s: %w", col, err)
 	}
 	return nil
+}
+
+// nullableInt — *int в значение nullable-колонки: nil = NULL (снять
+// пер-чатовый override, вернуться к глобальному дефолту).
+func nullableInt(v *int) any {
+	if v == nil {
+		return nil
+	}
+	return int64(*v)
+}
+
+// SetEphemeralEnabled тогглит эфемерные служебные сообщения.
+func (d *DB) SetEphemeralEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	return d.setChatSetting(ctx, chatID, "ephemeral_enabled", boolToInt(enabled))
 }
 
 // SetReplyCheckEnabled тогглит режим «требовать ответа на приветствие».
 func (d *DB) SetReplyCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, reply_check_enabled)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET reply_check_enabled = excluded.reply_check_enabled
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set reply_check_enabled: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "reply_check_enabled", boolToInt(enabled))
 }
 
 // SetReplyCheckSeconds переопределяет срок ожидания ответа. nil снимает.
 func (d *DB) SetReplyCheckSeconds(ctx context.Context, chatID int64, seconds *int) error {
-	var v any
-	if seconds != nil {
-		v = int64(*seconds)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, reply_check_seconds)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET reply_check_seconds = excluded.reply_check_seconds
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set reply_check_seconds: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "reply_check_seconds", nullableInt(seconds))
 }
 
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, greeting_enabled)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET greeting_enabled = excluded.greeting_enabled
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set greeting: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "greeting_enabled", boolToInt(enabled))
 }
 
 // SetSilentAnnounceEnabled включает/выключает объявления «вернулся после
 // долгого молчания» для этого чата.
 func (d *DB) SetSilentAnnounceEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, silent_announce_enabled)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET silent_announce_enabled = excluded.silent_announce_enabled
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set silent_announce_enabled: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "silent_announce_enabled", boolToInt(enabled))
 }
 
 // SetSpamCheckEnabled включает/выключает ИИ-анализ спама для этого чата.
 func (d *DB) SetSpamCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, spam_check_enabled)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET spam_check_enabled = excluded.spam_check_enabled
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set spam_check_enabled: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "spam_check_enabled", boolToInt(enabled))
 }
 
 // SetSpamWhitelistMsgs переопределяет, сколько всего сообщений выводит юзера
 // в белый список (без анализа спама). nil сбрасывает.
 func (d *DB) SetSpamWhitelistMsgs(ctx context.Context, chatID int64, value *int) error {
-	var v any
-	if value != nil {
-		v = int64(*value)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, spam_whitelist_msgs)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET spam_whitelist_msgs = excluded.spam_whitelist_msgs
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set spam_whitelist_msgs: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "spam_whitelist_msgs", nullableInt(value))
 }
 
 // SetSpamVoteMargin переопределяет перевес голосов, решающий спам-вердикт. nil сбрасывает.
 func (d *DB) SetSpamVoteMargin(ctx context.Context, chatID int64, value *int) error {
-	var v any
-	if value != nil {
-		v = int64(*value)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, spam_vote_margin)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET spam_vote_margin = excluded.spam_vote_margin
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set spam_vote_margin: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "spam_vote_margin", nullableInt(value))
 }
 
 // SetMaxAttempts переопределяет глобальный MaxAttempts для этого чата. nil
 // снимает переопределение (снова действует глобальный дефолт).
 func (d *DB) SetMaxAttempts(ctx context.Context, chatID int64, value *int) error {
-	var v any
-	if value != nil {
-		v = int64(*value)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, max_attempts)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET max_attempts = excluded.max_attempts
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set max_attempts: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "max_attempts", nullableInt(value))
 }
 
 // SetCaptchaTimeoutSec переопределяет глобальный таймаут капчи для этого
 // чата. nil снимает переопределение.
 func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *int) error {
-	var v any
-	if seconds != nil {
-		v = int64(*seconds)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, captcha_timeout_seconds)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET captcha_timeout_seconds = excluded.captcha_timeout_seconds
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set captcha_timeout_seconds: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "captcha_timeout_seconds", nullableInt(seconds))
 }
 
 // SetCaptchaMode сохраняет стиль капчи для этого чата. nil снимает
@@ -300,15 +204,7 @@ func (d *DB) SetCaptchaMode(ctx context.Context, chatID int64, mode *string) err
 	if mode != nil {
 		v = *mode
 	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, captcha_mode)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET captcha_mode = excluded.captcha_mode
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set captcha_mode: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "captcha_mode", v)
 }
 
 // SetGreetingText сохраняет кастомный шаблон приветствия для этого чата.
@@ -341,51 +237,19 @@ func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text, entitiesJS
 // постится ежедневный дайджест. nil снимает переопределение (возврат к
 // глобальному дефолту).
 func (d *DB) SetDailyStatsHour(ctx context.Context, chatID int64, utcHour *int) error {
-	var v any
-	if utcHour != nil {
-		v = int64(*utcHour)
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, daily_stats_utc_hour)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET daily_stats_utc_hour = excluded.daily_stats_utc_hour
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set daily_stats_utc_hour: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "daily_stats_utc_hour", nullableInt(utcHour))
 }
 
 // SetDailyStatsEnabled включает/выключает ежедневный дайджест в этом чате.
 // По умолчанию выключено.
 func (d *DB) SetDailyStatsEnabled(ctx context.Context, chatID int64, enabled bool) error {
-	v := 0
-	if enabled {
-		v = 1
-	}
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, daily_stats_enabled)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET daily_stats_enabled = excluded.daily_stats_enabled
-	`, chatID, v)
-	if err != nil {
-		return fmt.Errorf("set daily_stats_enabled: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "daily_stats_enabled", boolToInt(enabled))
 }
 
 // MarkDailyStatsSent записывает, что ежедневный дайджест за `day` отправлен в
 // `chatID`. Нужен, чтобы пропускать чаты, уже обработанные сегодня.
 func (d *DB) MarkDailyStatsSent(ctx context.Context, chatID int64, day string) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chat_settings (chat_id, last_daily_stats_day)
-		VALUES (?, ?)
-		ON CONFLICT(chat_id) DO UPDATE SET last_daily_stats_day = excluded.last_daily_stats_day
-	`, chatID, day)
-	if err != nil {
-		return fmt.Errorf("mark daily sent: %w", err)
-	}
-	return nil
+	return d.setChatSetting(ctx, chatID, "last_daily_stats_day", day)
 }
 
 // ChatsNeedingDailyStats возвращает ID чатов, у которых:

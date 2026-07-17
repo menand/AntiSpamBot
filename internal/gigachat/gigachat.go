@@ -7,6 +7,7 @@ package gigachat
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	_ "embed"
@@ -19,8 +20,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/menand/AntiSpamBot/internal/groq"
 )
@@ -106,6 +105,16 @@ func newHTTPClient() *http.Client {
 
 func (c *Client) Enabled() bool { return c != nil && c.authKey != "" }
 
+// rqUID — UUIDv4 для обязательного заголовка RqUID OAuth-запроса; несколько
+// строк на crypto/rand вместо внешней зависимости ради одного заголовка.
+func rqUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])      // crypto/rand.Read не возвращает ошибок (Go ≥ 1.24)
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
 func (c *Client) Model() string { return c.model }
 
 // errUnauthorized — chat ответил 401: токен отозван раньше expires_at.
@@ -157,7 +166,7 @@ func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Basic "+c.authKey)
-	req.Header.Set("RqUID", uuid.NewString())
+	req.Header.Set("RqUID", rqUID())
 
 	resp, err := c.http.Do(req)
 	if err != nil {

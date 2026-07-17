@@ -3,7 +3,6 @@ module github.com/menand/AntiSpamBot
 go 1.26.0
 
 require (
-	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mymmrac/telego v1.11.0
 	golang.org/x/image v0.42.0
@@ -18,6 +17,7 @@ require (
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/grbit/go-json v0.11.0 // indirect
 	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
