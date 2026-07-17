@@ -175,7 +175,8 @@ CREATE TABLE IF NOT EXISTS pending_replies (
 CREATE TABLE IF NOT EXISTS owner_settings (
     owner_id        INTEGER PRIMARY KEY,
     spam_notify     INTEGER NOT NULL DEFAULT 0, -- слать в ЛС подозрения и вердикты
-    mod_notify      INTEGER NOT NULL DEFAULT 0, -- слать в ЛС кики/баны (капча, молчание, /kick, /ban) и проходы капчи
+    mod_notify      INTEGER NOT NULL DEFAULT 0, -- слать в ЛС кики/баны (капча со 2-й попытки, молчание, /kick, /ban) и проходы капчи
     daily_report    INTEGER NOT NULL DEFAULT 0, -- слать в ЛС утреннюю сводку за вчера по чатам юзера
-    last_report_day TEXT                        -- маркер отправки сводки (день МСК), NULL = ещё не слали
+    last_report_day TEXT,                       -- маркер отправки сводки (день МСК), NULL = ещё не слали
+    captcha_notify  INTEGER NOT NULL DEFAULT 0  -- слать в ЛС ВСЕ провалы капчи (mod_notify шлёт только повторные)
 );
