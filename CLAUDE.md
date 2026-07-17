@@ -17,7 +17,7 @@ docker compose logs -f
 
 Bot version is stamped via `-ldflags "-X main.version=$(git describe ...)"` — `make build`/`make docker-up` and `scripts/auto-deploy.sh` do it automatically; a bare `docker compose up -d --build` yields `dev`.
 
-Config is env-only — no config file. Required: `BOT_TOKEN`. Optional: `CAPTCHA_TIMEOUT_SECONDS` (30), `MAX_ATTEMPTS` (3), `NEWCOMER_DAYS` (7), `SILENT_ANNOUNCE_DAYS` (30, 0=off), `LOG_LEVEL` (info), `DB_PATH` (bot.db / /data/bot.db in Docker), `ALLOWED_CHATS` (none = all chats), `OWNER_IDS`, `LOG_FILE` (set in Docker to /data/bot.log), `CAPTCHA_DELAY_MS` (2000), `DAILY_STATS_UTC_HOUR` (6), `GROQ_API_KEY` + `GROQ_MODEL` (llama-3.1-8b-instant), `GIGACHAT_AUTH_KEY` + `GIGACHAT_SCOPE` (GIGACHAT_API_PERS) + `GIGACHAT_MODEL` (GigaChat) — AI spam analysis needs at least one of the two API keys.
+Config is env-only — no config file. Required: `BOT_TOKEN`. Optional: `CAPTCHA_TIMEOUT_SECONDS` (30), `MAX_ATTEMPTS` (3), `NEWCOMER_DAYS` (7), `SILENT_ANNOUNCE_DAYS` (30, 0=off), `LOG_LEVEL` (info), `DB_PATH` (bot.db / /data/bot.db in Docker), `ALLOWED_CHATS` (none = all chats), `OWNER_IDS`, `LOG_FILE` (set in Docker to /data/bot.log), `CAPTCHA_DELAY_MS` (3000 — under 3s the ephemeral captcha loses the client render race), `DAILY_STATS_UTC_HOUR` (6), `GROQ_API_KEY` + `GROQ_MODEL` (llama-3.1-8b-instant), `GIGACHAT_AUTH_KEY` + `GIGACHAT_SCOPE` (GIGACHAT_API_PERS) + `GIGACHAT_MODEL` (GigaChat) — AI spam analysis needs at least one of the two API keys.
 
 ## Architecture
 
