@@ -61,7 +61,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	}
 	if actErr != nil {
 		b.log.Warn("mod command action failed", "err", actErr, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, threadOf(message), "Не получилось — проверь мои права на блокировку.")
+		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на блокировку.")
 		return nil
 	}
 
@@ -81,10 +81,11 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	}
 
 	mention := b.mentionFor(targetID)
+	recv := b.modReceiver(chatID, message)
 	if permanent {
-		b.sendHTML(chatID, threadOf(message), "🚫 "+mention+" забанен.")
+		b.sendHTML(chatID, threadOf(message), recv, "🚫 "+mention+" забанен.")
 	} else {
-		b.sendHTML(chatID, threadOf(message), "👢 "+mention+" кикнут.")
+		b.sendHTML(chatID, threadOf(message), recv, "👢 "+mention+" кикнут.")
 	}
 	b.log.Info("mod command", "action", action, "chat", chatID,
 		"target", targetID, "by", message.From.ID)
@@ -152,13 +153,13 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	}
 	if err := b.mute(b.runCtx, chatID, targetID, d); err != nil {
 		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, threadOf(message), "Не получилось — проверь мои права на ограничение участников.")
+		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на ограничение участников.")
 		return nil
 	}
 	// Замьюченный физически не может выполнить «напиши что-нибудь» — снимаем
 	// ожидание реплая тихо, иначе таймер кикнул бы его за молчание.
 	b.cancelReplyWait(chatID, targetID)
-	b.sendHTML(chatID, threadOf(message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
+	b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
 	b.log.Info("mute command", "chat", chatID, "target", targetID,
 		"minutes", int(d.Minutes()), "by", message.From.ID)
 	return nil
@@ -371,28 +372,52 @@ func (b *Bot) cleanupTargetTraces(chatID, targetID int64) {
 	}
 }
 
-// replyTo отвечает реплаем на сообщение-команду (для отказов).
+// modReceiver — получатель эфемерного ответа на команду: id вызвавшего, когда
+// в чате включён эфемерный режим; 0 = отвечать публично. Анонимный админ пишет
+// от имени GroupAnonymousBot — боту эфемерное не доставить, ему публично.
+func (b *Bot) modReceiver(chatID int64, message telego.Message) int64 {
+	if message.From == nil || message.From.IsBot {
+		return 0
+	}
+	if !b.chatSettings(b.runCtx, chatID).EphemeralEnabled {
+		return 0
+	}
+	return message.From.ID
+}
+
+// replyTo отвечает реплаем на сообщение-команду (для отказов). При включённом
+// эфемерном режиме ответ видит только вызвавший.
 func (b *Bot) replyTo(ctx *th.Context, message telego.Message, text string) {
 	params := tu.Message(tu.ID(message.Chat.ID), text).
 		WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID})
 	if message.IsTopicMessage {
 		params = params.WithMessageThreadID(message.MessageThreadID)
 	}
+	if recv := b.modReceiver(message.Chat.ID, message); recv != 0 {
+		params = params.WithReceiverUserID(recv)
+	}
 	_, _ = b.api.SendMessage(ctx, params)
 }
 
-func (b *Bot) sendPlain(chatID int64, threadID int, text string) {
+// sendPlain/sendHTML: receiverID ≠ 0 — эфемерно этому юзеру, 0 — публично.
+func (b *Bot) sendPlain(chatID int64, threadID int, receiverID int64, text string) {
 	params := tu.Message(tu.ID(chatID), text)
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
 	}
+	if receiverID != 0 {
+		params = params.WithReceiverUserID(receiverID)
+	}
 	_, _ = b.api.SendMessage(b.runCtx, params)
 }
 
-func (b *Bot) sendHTML(chatID int64, threadID int, text string) {
+func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string) {
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
+	}
+	if receiverID != 0 {
+		params = params.WithReceiverUserID(receiverID)
 	}
 	_, _ = b.api.SendMessage(b.runCtx, params)
 }

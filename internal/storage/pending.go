@@ -7,24 +7,26 @@ import (
 )
 
 type PendingRow struct {
-	ChatID     int64
-	UserID     int64
-	MessageID  int
-	CorrectIdx int
-	ExpiresAt  time.Time
-	ThreadID   int // топик форума, в котором вошёл юзер; 0 = без топика
+	ChatID      int64
+	UserID      int64
+	MessageID   int
+	CorrectIdx  int
+	ExpiresAt   time.Time
+	ThreadID    int // топик форума, в котором вошёл юзер; 0 = без топика
+	EphemeralID int // ≠0: капча эфемерная, удалять по этому id
 }
 
 func (d *DB) PutPending(ctx context.Context, p PendingRow) error {
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO pending_captchas (chat_id, user_id, message_id, correct_idx, expires_at, thread_id)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO pending_captchas (chat_id, user_id, message_id, correct_idx, expires_at, thread_id, ephemeral_msg_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, user_id) DO UPDATE SET
 			message_id = excluded.message_id,
 			correct_idx = excluded.correct_idx,
 			expires_at = excluded.expires_at,
-			thread_id = excluded.thread_id
-	`, p.ChatID, p.UserID, p.MessageID, p.CorrectIdx, p.ExpiresAt.Unix(), p.ThreadID)
+			thread_id = excluded.thread_id,
+			ephemeral_msg_id = excluded.ephemeral_msg_id
+	`, p.ChatID, p.UserID, p.MessageID, p.CorrectIdx, p.ExpiresAt.Unix(), p.ThreadID, p.EphemeralID)
 	if err != nil {
 		return fmt.Errorf("put pending: %w", err)
 	}
@@ -115,7 +117,7 @@ func (d *DB) LoadAllPendingReplies(ctx context.Context) ([]PendingReply, error) 
 
 func (d *DB) LoadAllPending(ctx context.Context) ([]PendingRow, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT chat_id, user_id, message_id, correct_idx, expires_at, thread_id FROM pending_captchas`)
+		`SELECT chat_id, user_id, message_id, correct_idx, expires_at, thread_id, ephemeral_msg_id FROM pending_captchas`)
 	if err != nil {
 		return nil, fmt.Errorf("load pending: %w", err)
 	}
@@ -125,7 +127,7 @@ func (d *DB) LoadAllPending(ctx context.Context) ([]PendingRow, error) {
 	for rows.Next() {
 		var p PendingRow
 		var expiresUnix int64
-		if err := rows.Scan(&p.ChatID, &p.UserID, &p.MessageID, &p.CorrectIdx, &expiresUnix, &p.ThreadID); err != nil {
+		if err := rows.Scan(&p.ChatID, &p.UserID, &p.MessageID, &p.CorrectIdx, &expiresUnix, &p.ThreadID, &p.EphemeralID); err != nil {
 			return nil, fmt.Errorf("scan pending: %w", err)
 		}
 		p.ExpiresAt = time.Unix(expiresUnix, 0)

@@ -269,7 +269,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 			// Истекла, пока бот лежал — считаем таймаутом немедленно.
 			expires = now.Add(1 * time.Second)
 		}
-		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID)
+		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID, row.EphemeralID)
 		b.goSafe("waitTimeout", func() { b.waitTimeout(p) })
 	}
 	b.log.Info("restored pending captchas", "count", len(rows))

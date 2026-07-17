@@ -287,3 +287,21 @@ func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) er
 	}
 	return nil
 }
+
+// deleteBotMessage удаляет своё сообщение, обычное или эфемерное: ephID ≠ 0 —
+// эфемерное (нужен receiver — юзер, которому оно было видно), иначе обычный
+// deleteMessage по msgID.
+func (b *Bot) deleteBotMessage(ctx context.Context, chatID int64, msgID, ephID int, receiverID int64) error {
+	if ephID == 0 {
+		return b.deleteMessage(ctx, chatID, msgID)
+	}
+	err := b.api.DeleteEphemeralMessage(ctx, &telego.DeleteEphemeralMessageParams{
+		ChatID:             tu.ID(chatID),
+		EphemeralMessageID: ephID,
+		ReceiverUserID:     receiverID,
+	})
+	if err != nil {
+		return fmt.Errorf("delete ephemeral message: %w", err)
+	}
+	return nil
+}

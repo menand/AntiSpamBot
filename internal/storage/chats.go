@@ -71,6 +71,7 @@ type ChatSettings struct {
 	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
 	ReplyCheckEnabled     bool           // режим «требовать ответа»; по умолчанию false
 	ReplyCheckSeconds     sql.NullInt64  // NULL = 60 секунд на ответ
+	EphemeralEnabled      bool           // служебные сообщения эфемерно; по умолчанию false
 }
 
 // defaultChatSettings — строка настроек для чата без сохранённой строки —
@@ -85,20 +86,22 @@ func defaultChatSettings(chatID int64) ChatSettings {
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
 	s := defaultChatSettings(chatID)
 
-	var greetingInt, dailyInt, silentInt, spamInt, replyInt int
+	var greetingInt, dailyInt, silentInt, spamInt, replyInt, ephInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
 		       captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
-		       spam_vote_margin, reply_check_enabled, reply_check_seconds
+		       spam_vote_margin, reply_check_enabled, reply_check_seconds,
+		       ephemeral_enabled
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
 		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities, &silentInt,
 		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
-		&s.SpamVoteMargin, &replyInt, &s.ReplyCheckSeconds)
+		&s.SpamVoteMargin, &replyInt, &s.ReplyCheckSeconds,
+		&ephInt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -111,7 +114,25 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	s.SilentAnnounceEnabled = silentInt != 0
 	s.SpamCheckEnabled = spamInt != 0
 	s.ReplyCheckEnabled = replyInt != 0
+	s.EphemeralEnabled = ephInt != 0
 	return s, nil
+}
+
+// SetEphemeralEnabled тогглит эфемерные служебные сообщения.
+func (d *DB) SetEphemeralEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, ephemeral_enabled)
+		VALUES (?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET ephemeral_enabled = excluded.ephemeral_enabled
+	`, chatID, v)
+	if err != nil {
+		return fmt.Errorf("set ephemeral_enabled: %w", err)
+	}
+	return nil
 }
 
 // SetReplyCheckEnabled тогглит режим «требовать ответа на приветствие».
