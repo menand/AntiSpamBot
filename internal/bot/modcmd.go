@@ -226,6 +226,45 @@ func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
 	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID, "user", message.From.ID)
 }
 
+// handleGroupHelpCommand — /help в группе: справка о командах, ВСЕГДА
+// эфемерно (независимо от ephemeral_enabled — ответ адресован одному юзеру,
+// чат не засоряется), сама команда удаляется. Анонимному отправителю
+// (From = GroupAnonymousBot) эфемерку не доставить — ему публично, как в
+// modReceiver. /help@ДругойБот отсеивает commandForUs. Вызывается из
+// handlePrivateStart (общая регистрация /start|/help без chat-предиката).
+func (b *Bot) handleGroupHelpCommand(_ *th.Context, message telego.Message) error {
+	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
+		return nil
+	}
+	chatID := message.Chat.ID
+	if !b.chatAllowed(chatID) || message.From == nil || !b.commandForUs(message.Text) {
+		return nil
+	}
+	var recv int64
+	if !message.From.IsBot {
+		recv = message.From.ID
+	}
+	b.sendHTML(chatID, threadOf(message), recv, b.groupHelpText())
+	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
+		b.log.Debug("delete /help command", "err", err, "chat", chatID)
+	}
+	b.log.Info("group help", "chat", chatID, "user", message.From.ID)
+	return nil
+}
+
+func (b *Bot) groupHelpText() string {
+	t := "🛡 <b>Команды бота</b> (для админов чата):\n" +
+		"/kick — кикнуть (реплаем на сообщение или @username)\n" +
+		"/ban — забанить навсегда и стереть сообщения\n" +
+		"/mute 30 | 2h | 3d — рид-онли на срок\n" +
+		"/del — тихо удалить сообщение (реплаем)\n" +
+		"/help — эта справка (видна только тебе)"
+	if b.me != nil && b.me.Username != "" {
+		t += "\n\nСтатистика и настройки — в ЛС: @" + b.me.Username
+	}
+	return t
+}
+
 // mentionFor — HTML-упоминание юзера по кэшу user_info (или голый ID).
 func (b *Bot) mentionFor(targetID int64) string {
 	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
