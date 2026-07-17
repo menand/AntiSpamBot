@@ -8,6 +8,8 @@ import (
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
+
+	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
 func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
@@ -20,11 +22,7 @@ func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
 		return nil
 	}
 
-	loc, err := time.LoadLocation("Europe/Moscow")
-	if err != nil {
-		loc = time.UTC
-	}
-	started := b.startedAt.In(loc).Format("02.01.2006 15:04:05 MST")
+	started := b.startedAt.In(storage.StatsLocation).Format("02.01.2006 15:04:05 MST")
 	uptime := time.Since(b.startedAt)
 
 	text := fmt.Sprintf(

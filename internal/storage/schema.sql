@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS members (
 
 CREATE TABLE IF NOT EXISTS message_counts (
     chat_id        INTEGER NOT NULL,
-    day            TEXT    NOT NULL, -- 'YYYY-MM-DD' UTC
+    day            TEXT    NOT NULL, -- 'YYYY-MM-DD', день по МСК (storage.DayOf)
     newcomer_count INTEGER NOT NULL DEFAULT 0,
     oldtimer_count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, day)
@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS user_info (
 );
 
 -- Известные чаты: пополняются попутно из каждого видимого нами chat_member-
--- и message-апдейта. Используются меню /chats (только для владельца) для списка чатов.
+-- и message-апдейта. Используются меню /chats для списка чатов (владелец бота
+-- видит все, админ чата — свои).
 CREATE TABLE IF NOT EXISTS chats (
     chat_id    INTEGER PRIMARY KEY,
     title      TEXT,

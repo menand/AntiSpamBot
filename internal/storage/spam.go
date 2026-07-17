@@ -254,165 +254,107 @@ func (d *DB) UserMessageTotalsByChat(ctx context.Context, userID int64) (map[int
 	return out, rows.Err()
 }
 
-// SpamNotifyEnabled — включены ли у владельца ЛС-уведомления о спаме.
-func (d *DB) SpamNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
+// ownerFlagEnabled читает булев флаг owner_settings; нет строки — false.
+// col здесь и в хелперах ниже — всегда константа вызывающего, не
+// пользовательский ввод.
+func (d *DB) ownerFlagEnabled(ctx context.Context, ownerID int64, col string) (bool, error) {
 	var on int
 	err := d.sql.QueryRowContext(ctx,
-		`SELECT spam_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
+		fmt.Sprintf(`SELECT %s FROM owner_settings WHERE owner_id = ?`, col), ownerID).Scan(&on)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("spam notify enabled: %w", err)
+		return false, fmt.Errorf("%s enabled: %w", col, err)
 	}
 	return on != 0, nil
 }
 
-// SpamNotifyOwners — все владельцы с включёнными уведомлениями одним
-// запросом (вместо точечного SELECT на каждого при каждом событии).
-func (d *DB) SpamNotifyOwners(ctx context.Context) ([]int64, error) {
+// ownerFlagUsers — все юзеры со взведённым флагом одним запросом (вместо
+// точечного SELECT на каждого при каждом событии).
+func (d *DB) ownerFlagUsers(ctx context.Context, col string) ([]int64, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT owner_id FROM owner_settings WHERE spam_notify != 0`)
+		fmt.Sprintf(`SELECT owner_id FROM owner_settings WHERE %s != 0`, col))
 	if err != nil {
-		return nil, fmt.Errorf("spam notify owners: %w", err)
+		return nil, fmt.Errorf("%s users: %w", col, err)
 	}
 	defer rows.Close()
 	var out []int64
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan spam notify owner: %w", err)
+			return nil, fmt.Errorf("scan %s user: %w", col, err)
 		}
 		out = append(out, id)
 	}
 	return out, rows.Err()
 }
 
-func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO owner_settings (owner_id, spam_notify) VALUES (?, ?)
-		ON CONFLICT(owner_id) DO UPDATE SET spam_notify = excluded.spam_notify
-	`, ownerID, boolToInt(on))
+// setOwnerCol апсертит одну колонку owner_settings — общее тело Set*-тогглов
+// и маркера отправки сводки.
+func (d *DB) setOwnerCol(ctx context.Context, ownerID int64, col string, v any) error {
+	_, err := d.sql.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO owner_settings (owner_id, %[1]s) VALUES (?, ?)
+		ON CONFLICT(owner_id) DO UPDATE SET %[1]s = excluded.%[1]s
+	`, col), ownerID, v)
 	if err != nil {
-		return fmt.Errorf("set spam notify: %w", err)
+		return fmt.Errorf("set %s: %w", col, err)
 	}
 	return nil
+}
+
+// SpamNotifyEnabled — включены ли у владельца ЛС-уведомления о спаме.
+func (d *DB) SpamNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
+	return d.ownerFlagEnabled(ctx, ownerID, "spam_notify")
+}
+
+// SpamNotifyOwners — все владельцы с включёнными уведомлениями о спаме.
+func (d *DB) SpamNotifyOwners(ctx context.Context) ([]int64, error) {
+	return d.ownerFlagUsers(ctx, "spam_notify")
+}
+
+func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
+	return d.setOwnerCol(ctx, ownerID, "spam_notify", boolToInt(on))
 }
 
 // ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах
 // и проходах капчи.
 func (d *DB) ModNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
-	var on int
-	err := d.sql.QueryRowContext(ctx,
-		`SELECT mod_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("mod notify enabled: %w", err)
-	}
-	return on != 0, nil
+	return d.ownerFlagEnabled(ctx, ownerID, "mod_notify")
 }
 
 // ModNotifyOwners — все владельцы с включёнными уведомлениями о модерации.
 func (d *DB) ModNotifyOwners(ctx context.Context) ([]int64, error) {
-	rows, err := d.sql.QueryContext(ctx,
-		`SELECT owner_id FROM owner_settings WHERE mod_notify != 0`)
-	if err != nil {
-		return nil, fmt.Errorf("mod notify owners: %w", err)
-	}
-	defer rows.Close()
-	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan mod notify owner: %w", err)
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return d.ownerFlagUsers(ctx, "mod_notify")
 }
 
 func (d *DB) SetModNotify(ctx context.Context, ownerID int64, on bool) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO owner_settings (owner_id, mod_notify) VALUES (?, ?)
-		ON CONFLICT(owner_id) DO UPDATE SET mod_notify = excluded.mod_notify
-	`, ownerID, boolToInt(on))
-	if err != nil {
-		return fmt.Errorf("set mod notify: %w", err)
-	}
-	return nil
+	return d.setOwnerCol(ctx, ownerID, "mod_notify", boolToInt(on))
 }
 
 // CaptchaNotifyEnabled — включены ли у владельца ЛС-уведомления о КАЖДОМ
 // провале капчи (mod_notify шлёт провалы только со второй попытки).
 func (d *DB) CaptchaNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
-	var on int
-	err := d.sql.QueryRowContext(ctx,
-		`SELECT captcha_notify FROM owner_settings WHERE owner_id = ?`, ownerID).Scan(&on)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("captcha notify enabled: %w", err)
-	}
-	return on != 0, nil
+	return d.ownerFlagEnabled(ctx, ownerID, "captcha_notify")
 }
 
 // CaptchaNotifyOwners — все владельцы с подпиской на все провалы капчи.
 func (d *DB) CaptchaNotifyOwners(ctx context.Context) ([]int64, error) {
-	rows, err := d.sql.QueryContext(ctx,
-		`SELECT owner_id FROM owner_settings WHERE captcha_notify != 0`)
-	if err != nil {
-		return nil, fmt.Errorf("captcha notify owners: %w", err)
-	}
-	defer rows.Close()
-	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("scan captcha notify owner: %w", err)
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	return d.ownerFlagUsers(ctx, "captcha_notify")
 }
 
 func (d *DB) SetCaptchaNotify(ctx context.Context, ownerID int64, on bool) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO owner_settings (owner_id, captcha_notify) VALUES (?, ?)
-		ON CONFLICT(owner_id) DO UPDATE SET captcha_notify = excluded.captcha_notify
-	`, ownerID, boolToInt(on))
-	if err != nil {
-		return fmt.Errorf("set captcha notify: %w", err)
-	}
-	return nil
+	return d.setOwnerCol(ctx, ownerID, "captcha_notify", boolToInt(on))
 }
 
 // DailyReportEnabled — включена ли у юзера утренняя ЛС-сводка по его чатам.
 // В отличие от spam/mod_notify доступна не только владельцам, но и админам.
 func (d *DB) DailyReportEnabled(ctx context.Context, userID int64) (bool, error) {
-	var on int
-	err := d.sql.QueryRowContext(ctx,
-		`SELECT daily_report FROM owner_settings WHERE owner_id = ?`, userID).Scan(&on)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("daily report enabled: %w", err)
-	}
-	return on != 0, nil
+	return d.ownerFlagEnabled(ctx, userID, "daily_report")
 }
 
 func (d *DB) SetDailyReport(ctx context.Context, userID int64, on bool) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO owner_settings (owner_id, daily_report) VALUES (?, ?)
-		ON CONFLICT(owner_id) DO UPDATE SET daily_report = excluded.daily_report
-	`, userID, boolToInt(on))
-	if err != nil {
-		return fmt.Errorf("set daily report: %w", err)
-	}
-	return nil
+	return d.setOwnerCol(ctx, userID, "daily_report", boolToInt(on))
 }
 
 // ReportSub — подписчик ЛС-сводки и день последней отправки ("" = ещё не слали).
@@ -443,14 +385,7 @@ func (d *DB) DailyReportSubscribers(ctx context.Context) ([]ReportSub, error) {
 // MarkDailyReportSent помечает день отправленным (аналог MarkDailyStatsSent,
 // но per-user): гейт в maybeSendDMReports не пошлёт сводку дважды.
 func (d *DB) MarkDailyReportSent(ctx context.Context, userID int64, day string) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO owner_settings (owner_id, last_report_day) VALUES (?, ?)
-		ON CONFLICT(owner_id) DO UPDATE SET last_report_day = excluded.last_report_day
-	`, userID, day)
-	if err != nil {
-		return fmt.Errorf("mark daily report sent: %w", err)
-	}
-	return nil
+	return d.setOwnerCol(ctx, userID, "last_report_day", day)
 }
 
 func boolToInt(b bool) int {
