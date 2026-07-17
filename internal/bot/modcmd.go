@@ -210,14 +210,19 @@ func (b *Bot) commandForUs(text string) bool {
 	return true
 }
 
-// punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ.
-// Мьют best-effort: в обычной group рестрикт недоступен, без прав не пройдёт
-// — тогда остаётся только ответ.
+// punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ +
+// удаление самой команды (как на успешных админских ветках — служебной команде
+// нечего висеть в чате). Мьют и удаление best-effort: в обычной group рестрикт
+// недоступен, без прав не пройдёт — тогда остаётся только ответ.
 func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
 	if err := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute); err != nil {
 		b.log.Debug("punish mute failed", "err", err, "chat", message.Chat.ID)
 	}
+	// Сначала ответ (пока якорь-сообщение живо), потом удаление команды.
 	b.replyTo(ctx, message, "🙅 Это админская команда, не балуйся. Вот тебе мьют на 1 минуту, раз хотел.")
+	if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+		b.log.Debug("delete punished command", "err", err, "chat", message.Chat.ID)
+	}
 	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID, "user", message.From.ID)
 }
 
