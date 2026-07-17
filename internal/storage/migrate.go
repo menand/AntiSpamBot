@@ -104,12 +104,12 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, reply_check_seconds)
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, reply_check_seconds
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {

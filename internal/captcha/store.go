@@ -6,12 +6,13 @@ import (
 )
 
 type Pending struct {
-	ChatID     int64
-	UserID     int64
-	MessageID  int
-	CorrectIdx int
-	ExpiresAt  time.Time
-	ThreadID   int // топик форума, куда отправлена капча; 0 = без топика
+	ChatID      int64
+	UserID      int64
+	MessageID   int
+	CorrectIdx  int
+	ExpiresAt   time.Time
+	ThreadID    int // топик форума, куда отправлена капча; 0 = без топика
+	EphemeralID int // ≠0: капча эфемерная (видна только юзеру), удалять по этому id
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -71,7 +72,7 @@ func (s *Store) FinishKickoff(chatID, userID int64) {
 	delete(s.inflight, capKey{chatID, userID})
 }
 
-func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID int) *Pending {
+func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID, ephemeralID int) *Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -80,13 +81,14 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 		old.Cancel()
 	}
 	p := &Pending{
-		ChatID:     chatID,
-		UserID:     userID,
-		MessageID:  messageID,
-		CorrectIdx: correctIdx,
-		ExpiresAt:  expiresAt,
-		ThreadID:   threadID,
-		cancelCh:   make(chan struct{}),
+		ChatID:      chatID,
+		UserID:      userID,
+		MessageID:   messageID,
+		CorrectIdx:  correctIdx,
+		ExpiresAt:   expiresAt,
+		ThreadID:    threadID,
+		EphemeralID: ephemeralID,
+		cancelCh:    make(chan struct{}),
 	}
 	s.items[k] = p
 	return p

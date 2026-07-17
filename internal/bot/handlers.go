@@ -89,7 +89,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
 			p.Cancel()
 			_ = b.db.DeletePending(b.runCtx, upd.Chat.ID, user.ID)
-			if err := b.deleteMessage(b.runCtx, upd.Chat.ID, p.MessageID); err != nil {
+			if err := b.deleteBotMessage(b.runCtx, upd.Chat.ID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
 				b.log.Warn("delete captcha after user left",
 					"err", err, "chat", upd.Chat.ID, "msg", p.MessageID)
 			}
@@ -360,11 +360,19 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 	_ = b.db.DeletePending(b.runCtx, chatID, query.From.ID)
 
 	capMsg := query.Message.Message()
-	if capMsg != nil && capMsg.MessageID != p.MessageID {
+	if capMsg != nil {
 		// Callback приехал не на живом сообщении капчи (stale-сообщение
 		// после неудавшегося delete или подделанный data) — его клавиатура
 		// не наша, эмодзи из неё врали бы; остаёмся на номерах кнопок.
-		capMsg = nil
+		// У эфемерной капчи свой id — обычные message_id там оба нулевые,
+		// и сравнение по ним пропускало бы stale.
+		stale := capMsg.MessageID != p.MessageID
+		if p.EphemeralID != 0 {
+			stale = capMsg.EphemeralMessageID != p.EphemeralID
+		}
+		if stale {
+			capMsg = nil
+		}
 	}
 	if optIdx == p.CorrectIdx {
 		_ = b.api.AnswerCallbackQuery(ctx,
@@ -776,6 +784,10 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		}
 	}
 
+	// Эфемерный режим: капча видна только вступившему (и боту). Ряд
+	// админ-аппрува в нём бессмысленен — админы сообщения не видят.
+	ephemeral := settings.EphemeralEnabled
+
 	// Контракт раскладки: ряд 0 — варианты в порядке индексов, ряд 1 — кнопка
 	// админа. buttonLabel читает row 0 по этому контракту — при перестановке
 	// рядов обнови и его.
@@ -785,12 +797,13 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			tu.InlineKeyboardButton(c.Emoji).
 				WithCallbackData(fmt.Sprintf("cap:%d:%d", user.ID, i)))
 	}
-	kb := tu.InlineKeyboard(
-		tu.InlineKeyboardRow(buttons...),
-		tu.InlineKeyboardRow(
+	rows := [][]telego.InlineKeyboardButton{tu.InlineKeyboardRow(buttons...)}
+	if !ephemeral {
+		rows = append(rows, tu.InlineKeyboardRow(
 			tu.InlineKeyboardButton("✅ Впустить (для админов)").
-				WithCallbackData(fmt.Sprintf("capok:%d", user.ID))),
-	)
+				WithCallbackData(fmt.Sprintf("capok:%d", user.ID))))
+	}
+	kb := tu.InlineKeyboard(rows...)
 
 	// Отправка ретраится: 429 прилетает ровно во время масс-джойна, а
 	// single-shot фейл здесь release'ил юзера БЕЗ капчи — щит отключался
@@ -813,6 +826,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			if threadID != 0 {
 				p = p.WithMessageThreadID(threadID)
 			}
+			if ephemeral {
+				p = p.WithReceiverUserID(user.ID)
+			}
 			var e error
 			msg, e = b.api.SendPhoto(ctx, p)
 			return e
@@ -827,6 +843,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			WithReplyMarkup(kb)
 		if threadID != 0 {
 			params = params.WithMessageThreadID(threadID)
+		}
+		if ephemeral {
+			params = params.WithReceiverUserID(user.ID)
 		}
 		err = retryTG(ctx, func() error {
 			var e error
@@ -843,15 +862,16 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	}
 
 	expires := time.Now().Add(captchaTimeout)
-	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires, threadID)
+	p := b.store.Put(chatID, user.ID, msg.MessageID, ch.CorrectIdx, expires, threadID, msg.EphemeralMessageID)
 
 	if err := b.db.PutPending(ctx, storage.PendingRow{
-		ChatID:     chatID,
-		UserID:     user.ID,
-		MessageID:  msg.MessageID,
-		CorrectIdx: ch.CorrectIdx,
-		ExpiresAt:  expires,
-		ThreadID:   threadID,
+		ChatID:      chatID,
+		UserID:      user.ID,
+		MessageID:   msg.MessageID,
+		CorrectIdx:  ch.CorrectIdx,
+		ExpiresAt:   expires,
+		ThreadID:    threadID,
+		EphemeralID: msg.EphemeralMessageID,
 	}); err != nil {
 		// Третий pre-persist обрыв (после shutdown-в-задержке и фейла
 		// отправки): капча только в памяти не переживёт рестарт — юзер
@@ -863,7 +883,7 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			"err", err, "chat", chatID, "user", user.ID)
 		if taken, ok := b.store.Take(chatID, user.ID); ok && taken == p {
 			taken.Cancel()
-			if derr := b.deleteMessage(ctx, chatID, msg.MessageID); derr != nil {
+			if derr := b.deleteBotMessage(ctx, chatID, msg.MessageID, msg.EphemeralMessageID, user.ID); derr != nil {
 				b.log.Warn("delete captcha after persist failure",
 					"err", derr, "chat", chatID, "msg", msg.MessageID)
 			}
@@ -914,7 +934,7 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	if answer != "" {
 		b.notifyModAction(p.ChatID, p.UserID, storage.EventPass, "", answer)
 	}
-	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
+	if err := b.deleteBotMessage(ctx, p.ChatID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
 		b.log.Warn("delete captcha on pass",
 			"err", err, "chat", p.ChatID, "msg", p.MessageID)
 	}
@@ -938,7 +958,7 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 		b.log.Warn("increment attempt", "err", err)
 		count = 1 // считаем первой попыткой и едем дальше
 	}
-	if err := b.deleteMessage(ctx, p.ChatID, p.MessageID); err != nil {
+	if err := b.deleteBotMessage(ctx, p.ChatID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
 		b.log.Warn("delete captcha on fail/timeout",
 			"err", err, "chat", p.ChatID, "msg", p.MessageID, "reason", reason)
 	}

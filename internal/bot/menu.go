@@ -312,6 +312,27 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set reply_check_seconds", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "eph":
+		// Тоггл эфемерных служебных сообщений (капча и ответы мод-команд).
+		if len(parts) != 3 {
+			return nil
+		}
+		chatID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil
+		}
+		if !b.canManageChat(ctx, query.From.ID, chatID) {
+			return nil
+		}
+		s, err := b.db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return nil
+		}
+		if err := b.db.SetEphemeralEnabled(ctx, chatID, !s.EphemeralEnabled); err != nil {
+			b.log.Warn("set ephemeral_enabled", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "sil":
 		if len(parts) != 3 {
 			return nil
@@ -690,7 +711,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"💬 Требовать ответа на приветствие: <b>%s</b> (%d сек)\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
-			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)",
+			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)\n"+
+			"👻 Эфемерные сообщения (капча и мод-ответы видны только адресату): <b>%s</b>",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, timeoutSec,
@@ -700,6 +722,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
 		spamLabel, spamWhitelist, spamMargin,
+		onOffLabel(s.EphemeralEnabled),
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -726,6 +749,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		{
 			tu.InlineKeyboardButton(toggleLabel("💬 Требовать ответ", s.ReplyCheckEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:rpl:%d", chatID)),
+			tu.InlineKeyboardButton(toggleLabel("👻 Эфемерно", s.EphemeralEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
 		},
 	}
 	// Пресеты секунд ожидания — только при включённом режиме (как у антиспама).
