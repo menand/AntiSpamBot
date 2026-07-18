@@ -195,16 +195,18 @@ git pull && docker compose up -d --build
 
 Автостарт при ребуте VDS — `restart: unless-stopped` в `docker-compose.yml`.
 
-### 4. Авто-обновления из git
+### 4. Авто-обновления
 
-В репо есть скрипт [`scripts/auto-deploy.sh`](scripts/auto-deploy.sh): проверяет `origin/main`, при новом коммите делает `git pull` + пересборку. Разовая настройка:
+Образ собирает **GitHub Actions** после зелёных тестов (`ci.yml`, job `image`) и публикует в GHCR: `ghcr.io/menand/antispambot:latest` + тег версии. Сервер ничего не компилирует — скрипт [`scripts/auto-deploy.sh`](scripts/auto-deploy.sh) по крону пуллит образ и перезапускает контейнер, только если image ID изменился (сломанный коммит до прода не доедет — образ без зелёных тестов не публикуется). Разовая настройка:
 
 ```bash
 # crontab -e:
 */5 * * * * /root/AntiSpamBot/scripts/auto-deploy.sh >> /var/log/antispam-deploy.log 2>&1
 ```
 
-Исполняемый бит уже в git. Молчит если нечего делать, пишет в лог когда реально деплоит. `flock` защищает от наложений.
+Исполняемый бит уже в git. Молчит если нечего делать, пишет в лог когда реально деплоит. `flock` защищает от наложений. Полный цикл «push → бот перезапущен» — 3–7 минут (сборка на CI ~0.5–2 мин + ближайший тик крона); сам деплой на сервере — секунды.
+
+Аварийный fallback: секция `build` в `docker-compose.yml` осталась — `make docker-up` соберёт образ прямо на сервере, как раньше. Откат на любую версию: `docker pull ghcr.io/menand/antispambot:vX.Y.Z` + `docker compose up -d --no-build`.
 
 Владельцы бота (`OWNER_IDS`) при каждом обновлении получают в ЛС 🔴 → 🟢.
 
