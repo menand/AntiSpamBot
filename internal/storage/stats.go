@@ -38,6 +38,9 @@ const (
 	EventKick    EventKind = "kick"
 	EventBan     EventKind = "ban"
 	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
+	// EventMute — мьют командой /mute. Питает список «10 последних» /unmute;
+	// QueryStats его сознательно игнорирует — мьют не относится к воронке капчи.
+	EventMute EventKind = "mute"
 )
 
 // Причины киков/банов (events.reason). Префиксные форматы несут ID для

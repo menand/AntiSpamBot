@@ -279,6 +279,52 @@ func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego
 		Title:  chatTitle,
 		Type:   chatType,
 	})
+	// Доверенный (/whitelist): вход без капчи, reply-ожидания и профиль-чека.
+	// Проверка ДО глобальной базы спамеров — пер-чатовое доверие админа
+	// перекрывает её в этом чате. Ошибка чтения — обычная капча (fail-safe).
+	if trusted, err := b.db.IsTrusted(b.runCtx, chatID, user.ID); err == nil && trusted {
+		// Дедуп дубль-доставки (chat_member + new_chat_members) — по свежему
+		// joined_at от первой доставки. Минутный kickoff-замок, как у
+		// banKnownSpammer, здесь нельзя: IsCaptchaActive всё это время удалял
+		// бы сообщения только что впущенного. Побочный эффект: повторный вход
+		// в течение минуты обходится без второго приветствия и событий — ок.
+		if joinedAt, ok, jerr := b.db.MemberJoinedAt(b.runCtx, chatID, user.ID); jerr == nil && ok &&
+			time.Since(joinedAt) < time.Minute {
+			return
+		}
+		if !b.store.BeginKickoff(chatID, user.ID) {
+			return
+		}
+		b.goSafe("admitTrusted", func() {
+			// Замок снимается сразу после записи joined_at (дедуп-маркер выше
+			// уже перехватывает дубли) и ДО отправки приветствия — окно, где
+			// IsCaptchaActive удаляет сообщения юзера, сжимается до пары
+			// DB-записей. Defer — страховка от паники до штатного снятия.
+			released := false
+			defer func() {
+				if !released {
+					b.store.FinishKickoff(chatID, user.ID)
+				}
+			}()
+			// Имя в кэш до приветствия — путь сообщений его ещё не заполнял.
+			b.rememberUser(b.runCtx, storage.UserInfo{
+				UserID:    user.ID,
+				FirstName: user.FirstName,
+				LastName:  user.LastName,
+				Username:  user.Username,
+			})
+			_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now(), "")
+			_ = b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventPass, time.Now(), "")
+			if err := b.db.UpsertMember(b.runCtx, chatID, user.ID, time.Now()); err != nil {
+				b.log.Warn("upsert trusted member", "err", err)
+			}
+			b.store.FinishKickoff(chatID, user.ID)
+			released = true
+			b.log.Info("trusted user admitted without captcha", "chat", chatID, "user", user.ID)
+			b.maybeSendGreeting(b.runCtx, b.chatSettings(b.runCtx, chatID), chatID, user.ID, threadID)
+		})
+		return
+	}
 	// Известный спамер (вердикт «спам» в любом чате бота): мгновенный бан
 	// вместо капчи. BeginKickoff гасит дубль-доставку chat_member +
 	// new_chat_members; в горутине — banRevoke с ретраями не должен
@@ -793,6 +839,15 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	// Эфемерный режим: капча видна только вступившему (и боту). Ряд
 	// админ-аппрува в нём бессмысленен — админы сообщения не видят.
 	ephemeral := settings.EphemeralEnabled
+	if ephemeral {
+		// Со второй попытки — публично: эфемерка могла не доставиться
+		// оффлайн-юзеру (известный трейд-офф режима), а публичная капча несёт
+		// и ряд «Впустить». Ошибка чтения счётчика — тоже публично:
+		// гарантированная доставка важнее тишины.
+		if n, aerr := b.db.AttemptCount(ctx, chatID, user.ID, attemptsTTL); aerr != nil || n >= 1 {
+			ephemeral = false
+		}
+	}
 
 	// Контракт раскладки: ряд 0 — варианты в порядке индексов, ряд 1 — кнопка
 	// админа. buttonLabel читает row 0 по этому контракту — при перестановке

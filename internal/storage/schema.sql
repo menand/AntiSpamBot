@@ -170,6 +170,24 @@ CREATE TABLE IF NOT EXISTS pending_replies (
     PRIMARY KEY (chat_id, user_id)
 );
 
+-- Доверенные (chat, user): добавлены админом командой /whitelist — входят в
+-- чат без капчи, reply-ожидания и профиль-чека; доверие в чате перекрывает и
+-- глобальную базу спамеров при входе в ЭТОТ чат. Снимается только вручную
+-- (удалением строки из БД).
+CREATE TABLE IF NOT EXISTS trusted_users (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    at      INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+-- Служебные метки бота (ключ-значение): например, announced_version —
+-- последняя версия, о которой разосланы ЛС-оповещения.
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 -- Глобальные (не пер-чатовые) настройки ЛС-уведомлений. Имя историческое:
 -- spam_notify/mod_notify доступны только владельцам (OWNER_IDS), а
 -- daily_report — и админам чатов, так что owner_id хранит любой user id.

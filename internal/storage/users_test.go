@@ -217,3 +217,72 @@ func TestPassedUsers(t *testing.T) {
 		t.Fatalf("user 200: want -1 (no join recorded), got %d", got[2].Secs)
 	}
 }
+
+func TestRecentEventUsers(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	base := time.Now().Add(-time.Hour)
+
+	// Юзер 1: два бана — в списке один раз, по свежему событию.
+	_ = db.RecordEvent(ctx, 1, 1, EventBan, base.Add(1*time.Minute), ReasonCaptcha)
+	_ = db.RecordEvent(ctx, 1, 1, EventBan, base.Add(5*time.Minute), ReasonCaptcha)
+	// Юзер 2: спам-бан (для /unban оба вида в списке).
+	_ = db.RecordEvent(ctx, 1, 2, EventSpamBan, base.Add(3*time.Minute), ReasonGlobal)
+	// Юзер 3: кик за капчу — под фильтр kinds=ban|spamban не попадает.
+	_ = db.RecordEvent(ctx, 1, 3, EventKick, base.Add(4*time.Minute), ReasonCaptcha)
+	// Чужой чат не подмешивается.
+	_ = db.RecordEvent(ctx, 2, 4, EventBan, base.Add(6*time.Minute), ReasonCaptcha)
+
+	got, err := db.RecentEventUsers(ctx, 1, 10,
+		[]EventKind{EventBan, EventSpamBan}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].UserID != 1 || got[1].UserID != 2 {
+		t.Fatalf("want [1 2] freshest first, got %+v", got)
+	}
+	if !got[0].At.Equal(base.Add(5 * time.Minute).Truncate(time.Second)) {
+		t.Fatalf("user 1: want freshest event time, got %v", got[0].At)
+	}
+
+	// Фильтр по причинам: только провалы проверки (captcha|noreply).
+	_ = db.RecordEvent(ctx, 1, 5, EventKick, base.Add(7*time.Minute), ReasonNoReply)
+	_ = db.RecordEvent(ctx, 1, 6, EventKick, base.Add(8*time.Minute), "mod:42")
+	got, err = db.RecentEventUsers(ctx, 1, 10,
+		[]EventKind{EventKick, EventBan}, []string{ReasonCaptcha, ReasonNoReply})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[0].UserID != 5 || got[1].UserID != 1 || got[2].UserID != 3 {
+		t.Fatalf("reason filter: want [5 1 3] freshest first, got %+v", got)
+	}
+
+	// Лимит режет хвост, свежие остаются.
+	got, _ = db.RecentEventUsers(ctx, 1, 1, []EventKind{EventBan, EventSpamBan}, nil)
+	if len(got) != 1 || got[0].UserID != 1 {
+		t.Fatalf("limit: want [1], got %+v", got)
+	}
+}
+
+func TestTrusted(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if ok, err := db.IsTrusted(ctx, 1, 10); err != nil || ok {
+		t.Fatalf("empty: ok=%v err=%v, want false", ok, err)
+	}
+	if err := db.AddTrusted(ctx, 1, 10, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Повторное добавление — no-op.
+	if err := db.AddTrusted(ctx, 1, 10, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := db.IsTrusted(ctx, 1, 10); !ok {
+		t.Fatal("added user must be trusted")
+	}
+	// Доверие пер-чатовое.
+	if ok, _ := db.IsTrusted(ctx, 2, 10); ok {
+		t.Fatal("trust must not leak to another chat")
+	}
+}

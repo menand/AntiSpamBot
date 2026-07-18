@@ -43,6 +43,20 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("drop old members: %w", err)
 	}
 
+	// trusted_users — PK (chat_id, user_id). При конфликте остаётся строка
+	// нового чата (время добавления информационное, сливать нечего).
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO trusted_users (chat_id, user_id, at)
+		SELECT ?, user_id, at FROM trusted_users WHERE chat_id = ?
+		ON CONFLICT(chat_id, user_id) DO NOTHING
+	`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate trusted_users: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM trusted_users WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old trusted_users: %w", err)
+	}
+
 	// message_counts — PK (chat_id, day). Счётчики суммируем.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO message_counts (chat_id, day, newcomer_count, oldtimer_count)

@@ -51,6 +51,27 @@ func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl tim
 	return newCount, nil
 }
 
+// AttemptCount возвращает текущее значение счётчика провалов БЕЗ инкремента:
+// 0 — записи нет или она старше ttl. Нужен эскалации эфемерной капчи: со
+// второй попытки она шлётся публично.
+func (d *DB) AttemptCount(ctx context.Context, chatID, userID int64, ttl time.Duration) (int, error) {
+	var count int
+	var updated int64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT count, updated_at FROM attempts WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID).Scan(&count, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("attempt count: %w", err)
+	}
+	if time.Now().Unix()-updated > int64(ttl.Seconds()) {
+		return 0, nil
+	}
+	return count, nil
+}
+
 func (d *DB) ResetAttempts(ctx context.Context, chatID, userID int64) error {
 	_, err := d.sql.ExecContext(ctx,
 		`DELETE FROM attempts WHERE chat_id = ? AND user_id = ?`,

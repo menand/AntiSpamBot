@@ -41,6 +41,7 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetReplyCheckEnabled(ctx, old, true)
 	_ = db.SetReplyCheckSeconds(ctx, old, &rpls)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
+	_ = db.AddTrusted(ctx, old, 1, now)
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -60,6 +61,12 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	// В новом чате должны оказаться перенесённые данные.
 	if _, ok, _ := db.MemberJoinedAt(ctx, neu, 1); !ok {
 		t.Error("member not migrated to new chat")
+	}
+	if ok, _ := db.IsTrusted(ctx, neu, 1); !ok {
+		t.Error("trusted user not migrated to new chat")
+	}
+	if ok, _ := db.IsTrusted(ctx, old, 1); ok {
+		t.Error("trusted row still on old chat")
 	}
 	s, err := db.QueryStats(ctx, neu, now.Add(-24*time.Hour), now.AddDate(0, 0, 1))
 	if err != nil {

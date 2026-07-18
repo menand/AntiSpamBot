@@ -176,6 +176,34 @@ func TestAttempts(t *testing.T) {
 	}
 }
 
+func TestAttemptCount(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	// Нет записи — 0 без ошибки.
+	if n, err := db.AttemptCount(ctx, 1, 10, time.Hour); err != nil || n != 0 {
+		t.Fatalf("empty: n=%d err=%v, want 0", n, err)
+	}
+	// Чтение не инкрементит.
+	_, _ = db.IncrementAttempt(ctx, 1, 10, time.Hour)
+	_, _ = db.IncrementAttempt(ctx, 1, 10, time.Hour)
+	if n, _ := db.AttemptCount(ctx, 1, 10, time.Hour); n != 2 {
+		t.Fatalf("fresh: n=%d want 2", n)
+	}
+	if n, _ := db.AttemptCount(ctx, 1, 10, time.Hour); n != 2 {
+		t.Fatalf("read must not increment: n=%d want 2", n)
+	}
+	// Протухшая запись читается как 0.
+	if _, err := db.sql.ExecContext(ctx,
+		`UPDATE attempts SET updated_at = ? WHERE chat_id = 1 AND user_id = 10`,
+		time.Now().Add(-2*time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := db.AttemptCount(ctx, 1, 10, time.Hour); n != 0 {
+		t.Fatalf("stale: n=%d want 0", n)
+	}
+}
+
 func TestDayOf(t *testing.T) {
 	// День режется по МСК (UTC+3): поздний вечер UTC — уже следующие
 	// московские сутки, полночь МСК — их начало.
