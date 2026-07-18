@@ -457,16 +457,23 @@ internal/bot/            вся логика бота (telego)
   │                      (goSafe), фоновые циклы, восстановление капч после рестарта
   ├─ handlers.go         входы/выходы (chat_member, new_chat_members), жизненный цикл
   │                      капчи (runCaptcha/onSuccess/onFail), обработка сообщений и
-  │                      правок, мгновенный бан известных спамеров
+  │                      правок, пропуск доверенных, мгновенный бан известных спамеров
   ├─ spamcheck.go        ИИ-антиспам: белый список, факты для LLM, цепочка провайдеров,
   │                      голосование с гейтом доверия, вердикты, кросс-бан, уведомления
+  ├─ profilecheck.go     ИИ-анализ профиля новичка после капчи (та же инфра голосования)
+  ├─ replywait.go        режим «требовать ответа»: ожидания, таймауты, рестарт-восстановление
+  ├─ modcmd.go           /kick /ban /del /mute: резолв цели, наказание не-админов, гейты
+  ├─ unmod.go            /unban /unmute /whitelist: плашка «10 последних» с кнопками (mc:)
+  ├─ whatsnew.go         /whatsnew из вшитого CHANGELOG.md + рассылка о новой версии
   ├─ actions.go          обёртки Telegram-действий с ретраями и honor retry_after:
   │                      restrict/release/kick/ban/banRevoke, releaseOnAbort
   ├─ menu.go             DM-меню целиком: список чатов, статистика, все настройки
   ├─ access.go           права и резолверы: canManageChat, userChats, effective*-хелперы
   ├─ greeting.go         приветствия: шаблон {name}, флоу ввода своего текста
-  ├─ daily.go            цикл ежедневных сводок в чаты
+  ├─ entities.go         конвертер Telegram-entities → HTML (жирный/курсив в приветствиях)
+  ├─ daily.go            цикл ежедневных сводок в чаты + утренние ЛС-отчёты
   ├─ stats.go            периоды, рендер статистики (renderStats) с бюджетом длины
+  ├─ notify.go           ЛС-уведомления владельцам: карточки киков/банов, причины
   ├─ text.go             русская плюрализация, HTML-меншены
   ├─ cache.go            write-through-кэши chats/user_info (минус 2 записи на сообщение)
   ├─ aicheck.go          owner-кнопка «Проверить ИИ»: тестовый запрос каждому провайдеру
@@ -482,11 +489,12 @@ internal/storage/        SQLite (modernc.org/sqlite, без CGO), один write
   ├─ schema.sql          идемпотентная схема (вшита go:embed)
   ├─ db.go               открытие (WAL, busy_timeout) + додающие миграции колонок
   ├─ migrate.go          перенос всех данных при апгрейде basic group → supergroup
-  ├─ pending.go          активные капчи (переживают рестарт)
+  ├─ pending.go          активные капчи и reply-ожидания (переживают рестарт)
   ├─ attempts.go         счётчик провалов капчи с TTL
-  ├─ stats.go            журнал событий (join/pass/kick/ban/spamban) + агрегаты
-  ├─ users.go            активность юзеров, топы, кэш имён
+  ├─ stats.go            журнал событий (join/pass/kick/ban/spamban/mute) + агрегаты
+  ├─ users.go            активность юзеров, топы, кэш имён, доверенные (trusted_users)
   ├─ chats.go            реестр чатов + пер-чатовые настройки (все Set*)
+  ├─ meta.go             служебные метки бота (bot_meta: announced_version)
   └─ spam.go             всё хранение антиспама: голосования, бюллетени, глобальная
                          база спамеров, приветствия, белый список
 
@@ -496,6 +504,8 @@ internal/gigachat/       клиент GigaChat — фолбек: OAuth-токе�
                          сертификат НУЦ Минцифры (russian_trusted_root_ca.pem — без него
                          TLS к Сберу не проходит вне РФ)
 
+CHANGELOG.md             история версий «Что нового» (вшивается в бинарь через
+changelog.go             корневой пакет с go:embed — источник /whatsnew и рассылки)
 scripts/auto-deploy.sh   cron-скрипт автодеплоя из git (flock, git describe → версия)
 Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.23, non-root
 docker-compose.yml       служба bot, volume bot-data для SQLite и логов
