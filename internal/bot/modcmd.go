@@ -257,17 +257,21 @@ func (b *Bot) handleGroupHelpCommand(_ *th.Context, message telego.Message) erro
 	return nil
 }
 
+// groupCommandsList — перечень групповых команд; ЕДИНЫЙ источник для
+// групповой справки (/help в чате) и полной ЛС-справки (helpText в menu.go) —
+// при добавлении команды списки не разъезжаются.
+const groupCommandsList = "/kick — кикнуть (реплаем на сообщение или @username)\n" +
+	"/ban — забанить навсегда и стереть сообщения\n" +
+	"/mute 30 | 2h | 3d — рид-онли на срок\n" +
+	"/del — тихо удалить сообщение (реплаем)\n" +
+	"/unban — разбанить (список последних банов или @username)\n" +
+	"/unmute — снять мьют (список или @username)\n" +
+	"/whitelist — впускать без капчи (список или @username)\n" +
+	"/whatsnew — что нового в боте"
+
 func (b *Bot) groupHelpText() string {
-	t := "🛡 <b>Команды бота</b> (для админов чата):\n" +
-		"/kick — кикнуть (реплаем на сообщение или @username)\n" +
-		"/ban — забанить навсегда и стереть сообщения\n" +
-		"/mute 30 | 2h | 3d — рид-онли на срок\n" +
-		"/del — тихо удалить сообщение (реплаем)\n" +
-		"/unban — разбанить (список последних банов или @username)\n" +
-		"/unmute — снять мьют (список или @username)\n" +
-		"/whitelist — впускать без капчи (список или @username)\n" +
-		"/whatsnew — что нового в боте\n" +
-		"/help — эта справка (видна только тебе)"
+	t := "🛡 <b>Команды бота</b> (для админов чата):\n" + groupCommandsList +
+		"\n/help — эта справка (видна только тебе)"
 	if b.me != nil && b.me.Username != "" {
 		t += "\n\nСтатистика и настройки — в ЛС: @" + b.me.Username
 	}

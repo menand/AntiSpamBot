@@ -224,7 +224,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatsnew"))
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatnew"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
-	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
+	bh.HandleMessage(b.handleHelpCommand, th.CommandEqual("help"))
 	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия
 	bh.HandleMessage(b.handleGroupMessage)                         // фолбэк: сервис-сообщения + счётчики в группах
 	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
@@ -256,7 +256,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 		Scope: &telego.BotCommandScopeAllPrivateChats{Type: "all_private_chats"},
 		Commands: []telego.BotCommand{
 			{Command: "start", Description: "Меню"},
-			{Command: "help", Description: "Справка"},
+			{Command: "help", Description: "Все команды бота"},
 			{Command: "whatsnew", Description: "Что нового в боте"},
 			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
 			{Command: "info", Description: "Uptime бота (для владельцев)"},

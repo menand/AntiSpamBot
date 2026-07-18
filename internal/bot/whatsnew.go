@@ -175,6 +175,16 @@ func (b *Bot) announceVersion(ctx context.Context) {
 			}
 		}
 	}
+	// Индивидуальный opt-out (кнопка «🆕» в меню): вычитаем отказников одним
+	// запросом. Ошибка чтения — шлём всем: потерянный анонс дороже
+	// недоставленной отписки, отказников единицы.
+	if optOuts, oerr := b.db.VersionNotifyOptOuts(ctx); oerr != nil {
+		b.log.Warn("announce version: opt-outs", "err", oerr)
+	} else {
+		for _, id := range optOuts {
+			delete(targets, id)
+		}
+	}
 
 	text := "🆕 <b>Бот обновлён: " + html.EscapeString(base) + "</b>"
 	for _, r := range parseChangelog(antispam.ChangelogMD) {
@@ -185,6 +195,8 @@ func (b *Bot) announceVersion(ctx context.Context) {
 			break
 		}
 	}
+	text += "\n\nℹ️ Полный список команд — по команде /help." +
+		"\n🔕 Отключить эти оповещения: /start → «🆕 Оповещения о версиях»."
 	sent := 0
 	for id := range targets {
 		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), text).

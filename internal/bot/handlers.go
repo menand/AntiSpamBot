@@ -477,14 +477,23 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 	return nil
 }
 
+// handleHelpCommand — /help: полный список ВСЕХ команд с пояснениями. В ЛС —
+// helpText с кнопкой «Назад» (она отредактирует сообщение в главное меню —
+// обычная editWithMenu-механика); в группе — прежняя всегда-эфемерная
+// справка handleGroupHelpCommand.
+func (b *Bot) handleHelpCommand(ctx *th.Context, message telego.Message) error {
+	if message.Chat.Type != "private" {
+		return b.handleGroupHelpCommand(ctx, message)
+	}
+	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), helpText).
+		WithParseMode(telego.ModeHTML).
+		WithReplyMarkup(backKeyboard()))
+	return nil
+}
+
 func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error {
 	if message.Chat.Type != "private" {
-		// Хендлер зарегистрирован на /start И /help без chat-предиката —
-		// групповой /help делегируем эфемерной справке, /start в группе молчит.
-		if f := strings.Fields(message.Text); len(f) > 0 &&
-			(f[0] == "/help" || strings.HasPrefix(f[0], "/help@")) {
-			return b.handleGroupHelpCommand(ctx, message)
-		}
+		// /start в группе молчит; /help живёт в своём handleHelpCommand.
 		return nil
 	}
 
