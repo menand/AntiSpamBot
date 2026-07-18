@@ -1,0 +1,24 @@
+name: Build benchmark
+
+# Временный ручной бенчмарк скорости Docker-сборки на раннерах GitHub —
+# сравнение с ВДС перед переходом на pull-деплой. Образ никуда не пушится
+# (push: false), GHCR/прод не затрагиваются. Первый запуск = холодная сборка
+# (кэша нет), второй = тёплая (кэш положен первым запуском).
+on: workflow_dispatch
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          build-args: VERSION=bench
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
