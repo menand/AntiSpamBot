@@ -37,4 +37,10 @@ echo "=== $(date -Is) deploying ${LOCAL:0:7} -> ${REMOTE:0:7} ==="
 git pull --ff-only origin main
 VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo dev)" \
     docker compose up -d --build
+
+# Мусор прошлых сборок: без прочистки build-кэш растёт бесконечно (доходило
+# до 8.6G на 19G-диске). Кэш моложе недели остаётся — деплой не замедляется.
+# «|| true»: прочистка не должна ронять деплой (set -e выше).
+docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+docker image prune -f >/dev/null 2>&1 || true
 echo "=== $(date -Is) deploy done ==="
