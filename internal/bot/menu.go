@@ -92,6 +92,13 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.toggleOwnerSetting(ctx, query, b.db.DailyReportEnabled, b.db.SetDailyReport, "daily_report")
+	case "vernotify":
+		// Индивидуальный OPT-OUT ЛС «бот обновлён» (дефолт ВКЛ) — доступен,
+		// как и dreport, владельцу и админам чатов.
+		if !b.canGetDailyReport(query.From.ID) {
+			return nil
+		}
+		return b.toggleOwnerSetting(ctx, query, b.db.VersionNotifyEnabled, b.db.SetVersionNotify, "version_notify")
 	case "logs":
 		if !b.isOwner(query.From.ID) {
 			return nil
@@ -421,7 +428,8 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 				WithCallbackData("menu:capnotify"),
 		})
 	}
-	// 📬 Итог дня — владельцу и любому админу хотя бы одного известного чата.
+	// 📬 Итог дня и 🆕 оповещения о версиях — владельцу и любому админу хотя
+	// бы одного известного чата.
 	if b.canGetDailyReport(userID) {
 		reportOn, err := b.db.DailyReportEnabled(b.runCtx, userID)
 		if err != nil {
@@ -430,6 +438,14 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton(toggleLabel("📬 Итог дня в ЛС", reportOn)).
 				WithCallbackData("menu:dreport"),
+		})
+		verOn, err := b.db.VersionNotifyEnabled(b.runCtx, userID)
+		if err != nil {
+			verOn = true // ошибка чтения — показываем дефолт (вкл), тумблер починит
+		}
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(toggleLabel("🆕 Оповещения о версиях", verOn)).
+				WithCallbackData("menu:vernotify"),
 		})
 	}
 	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
@@ -460,8 +476,14 @@ const helpText = `📖 <b>Справка</b>
 «📊 Мои чаты» → выбери чат — там статистика за периоды, ежедневная сводка в чат, приветствие (включая свой текст с подстановкой {name}) и параметры капчи.
 
 <b>Команды в личке</b>
-/start, /help — это меню
+/start — главное меню
+/help — эта справка (работает и в группе)
+/whatsnew — что нового в боте
 /chats — список твоих чатов
+/info, /logs — аптайм и лог-файл (для владельцев бота)
+
+<b>Команды в группе</b> (для админов чата)
+` + groupCommandsList + `
 
 <b>«Молчаливые возвращенцы»</b>
 Если кто-то долго не писал и вдруг написал — я сообщу об этом в чат с шутливым комментарием.`

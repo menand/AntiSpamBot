@@ -347,6 +347,46 @@ func (d *DB) SetCaptchaNotify(ctx context.Context, ownerID int64, on bool) error
 	return d.setOwnerCol(ctx, ownerID, "captcha_notify", boolToInt(on))
 }
 
+// VersionNotifyEnabled — слать ли юзеру ЛС «бот обновлён». Единственный
+// OPT-OUT тумблер owner_settings: НЕТ строки = ВКЛЮЧЕНО (колонка DEFAULT 1) —
+// поэтому не ownerFlagEnabled, у которого дефолт false.
+func (d *DB) VersionNotifyEnabled(ctx context.Context, userID int64) (bool, error) {
+	var on int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT version_notify FROM owner_settings WHERE owner_id = ?`, userID).Scan(&on)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("version_notify enabled: %w", err)
+	}
+	return on != 0, nil
+}
+
+func (d *DB) SetVersionNotify(ctx context.Context, userID int64, on bool) error {
+	return d.setOwnerCol(ctx, userID, "version_notify", boolToInt(on))
+}
+
+// VersionNotifyOptOuts — юзеры, ЯВНО выключившие оповещения о версиях:
+// фильтр рассылки одним запросом (инверсия ownerFlagUsers — тумблер opt-out).
+func (d *DB) VersionNotifyOptOuts(ctx context.Context) ([]int64, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT owner_id FROM owner_settings WHERE version_notify = 0`)
+	if err != nil {
+		return nil, fmt.Errorf("version_notify opt-outs: %w", err)
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan version_notify opt-out: %w", err)
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // DailyReportEnabled — включена ли у юзера утренняя ЛС-сводка по его чатам.
 // В отличие от spam/mod_notify доступна не только владельцам, но и админам.
 func (d *DB) DailyReportEnabled(ctx context.Context, userID int64) (bool, error) {

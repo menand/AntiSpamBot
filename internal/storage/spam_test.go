@@ -294,3 +294,34 @@ func TestPruneGreetings(t *testing.T) {
 		t.Fatal("fresh greeting must survive prune")
 	}
 }
+
+func TestVersionNotify(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	// Дефолт — ВКЛЮЧЕНО: строки нет, но юзер считается подписанным (opt-out).
+	if on, err := db.VersionNotifyEnabled(ctx, 1); err != nil || !on {
+		t.Fatalf("no row: on=%v err=%v, want true", on, err)
+	}
+	// Строка, созданная другим тумблером, тоже читается как включено (DEFAULT 1).
+	_ = db.SetSpamNotify(ctx, 2, true)
+	if on, _ := db.VersionNotifyEnabled(ctx, 2); !on {
+		t.Fatal("row created by another toggle must default to enabled")
+	}
+	// Явное выключение → Enabled=false, юзер в списке отказников.
+	if err := db.SetVersionNotify(ctx, 1, false); err != nil {
+		t.Fatal(err)
+	}
+	if on, _ := db.VersionNotifyEnabled(ctx, 1); on {
+		t.Fatal("opt-out must disable")
+	}
+	outs, err := db.VersionNotifyOptOuts(ctx)
+	if err != nil || len(outs) != 1 || outs[0] != 1 {
+		t.Fatalf("opt-outs = %v (err %v), want [1]", outs, err)
+	}
+	// Включил обратно — из отказников пропал.
+	_ = db.SetVersionNotify(ctx, 1, true)
+	if outs, _ := db.VersionNotifyOptOuts(ctx); len(outs) != 0 {
+		t.Fatalf("after re-enable opt-outs = %v, want empty", outs)
+	}
+}
