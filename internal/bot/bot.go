@@ -134,6 +134,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.goSafe("dailyDigestLoop", func() { b.dailyDigestLoop(ctx) })
 	b.goSafe("reconcileChats", func() { b.reconcileChats(ctx) })
 	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
+	b.goSafe("announceVersion", func() { b.announceVersion(ctx) })
 	var providers []string
 	if b.groqc.Enabled() {
 		providers = append(providers, "groq:"+b.groqc.Model())
@@ -206,6 +207,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
+	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))
@@ -216,6 +218,11 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("del"))
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("delete"))
 	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))
+	bh.HandleMessage(b.handleUnbanCommand, th.CommandEqual("unban"))
+	bh.HandleMessage(b.handleUnmuteCommand, th.CommandEqual("unmute"))
+	bh.HandleMessage(b.handleWhitelistCommand, th.CommandEqual("whitelist"))
+	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatsnew"))
+	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatnew"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("help"))
 	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия
@@ -250,6 +257,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 		Commands: []telego.BotCommand{
 			{Command: "start", Description: "Меню"},
 			{Command: "help", Description: "Справка"},
+			{Command: "whatsnew", Description: "Что нового в боте"},
 			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
 			{Command: "info", Description: "Uptime бота (для владельцев)"},
 			{Command: "logs", Description: "Прислать лог-файл (для владельцев бота)"},

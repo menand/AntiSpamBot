@@ -138,13 +138,11 @@ func (d *DB) GetUserInfos(ctx context.Context, userIDs []int64) (map[int64]UserI
 	if len(userIDs) == 0 {
 		return result, nil
 	}
-	placeholders := strings.Repeat("?,", len(userIDs))
-	placeholders = placeholders[:len(placeholders)-1]
 	args := make([]any, len(userIDs))
 	for i, id := range userIDs {
 		args[i] = id
 	}
-	query := fmt.Sprintf(`SELECT user_id, first_name, last_name, username FROM user_info WHERE user_id IN (%s)`, placeholders)
+	query := fmt.Sprintf(`SELECT user_id, first_name, last_name, username FROM user_info WHERE user_id IN (%s)`, placeholders(len(userIDs)))
 	rows, err := d.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query user_info: %w", err)
@@ -242,8 +240,7 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 	if len(kinds) == 0 {
 		return nil, nil
 	}
-	placeholders := strings.Repeat("?,", len(kinds))
-	placeholders = placeholders[:len(placeholders)-1]
+	ph := placeholders(len(kinds))
 
 	// Один и тот же набор параметров нужен дважды: сперва для коррелированного
 	// подзапроса last_reason, затем для основного WHERE.
@@ -265,7 +262,7 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 		WHERE e.chat_id = ? AND e.kind IN (%s) AND e.at >= ? AND e.at < ?
 		GROUP BY e.user_id
 		ORDER BY MIN(e.at) ASC, e.user_id ASC
-	`, placeholders, placeholders), args...)
+	`, ph, ph), args...)
 	if err != nil {
 		return nil, fmt.Errorf("query event users: %w", err)
 	}
@@ -319,6 +316,86 @@ func scanUserCounts(rows *sql.Rows) ([]UserCount, error) {
 		out = append(out, uc)
 	}
 	return out, rows.Err()
+}
+
+// RecentUser — юзер и время его последнего события заданного вида (для
+// плашек «10 последних» команд /unban, /unmute, /whitelist).
+type RecentUser struct {
+	UserID int64
+	At     time.Time
+}
+
+// RecentEventUsers — последние limit юзеров с событиями заданных видов (и,
+// опционально, причин) в чате, свежие первыми; один юзер — одна строка, по
+// самому свежему его событию.
+func (d *DB) RecentEventUsers(ctx context.Context, chatID int64, limit int, kinds []EventKind, reasons []string) ([]RecentUser, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	q := `SELECT user_id, MAX(at) AS last FROM events WHERE chat_id = ? AND kind IN (` +
+		placeholders(len(kinds)) + `)`
+	args := []any{chatID}
+	for _, k := range kinds {
+		args = append(args, string(k))
+	}
+	if len(reasons) > 0 {
+		q += ` AND reason IN (` + placeholders(len(reasons)) + `)`
+		for _, r := range reasons {
+			args = append(args, r)
+		}
+	}
+	q += ` GROUP BY user_id ORDER BY last DESC LIMIT ?`
+	args = append(args, limit)
+
+	rows, err := d.sql.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("recent event users: %w", err)
+	}
+	defer rows.Close()
+	var out []RecentUser
+	for rows.Next() {
+		var u RecentUser
+		var at int64
+		if err := rows.Scan(&u.UserID, &at); err != nil {
+			return nil, fmt.Errorf("scan recent event user: %w", err)
+		}
+		u.At = time.Unix(at, 0)
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// AddTrusted заносит юзера в доверенные чата (команда /whitelist): вход без
+// капчи. Повторное добавление — no-op.
+func (d *DB) AddTrusted(ctx context.Context, chatID, userID int64, at time.Time) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO trusted_users (chat_id, user_id, at) VALUES (?, ?, ?)
+		ON CONFLICT(chat_id, user_id) DO NOTHING
+	`, chatID, userID, at.Unix())
+	if err != nil {
+		return fmt.Errorf("add trusted: %w", err)
+	}
+	return nil
+}
+
+// IsTrusted — есть ли юзер в доверенных этого чата.
+func (d *DB) IsTrusted(ctx context.Context, chatID, userID int64) (bool, error) {
+	var one int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT 1 FROM trusted_users WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("is trusted: %w", err)
+	}
+	return true, nil
+}
+
+// placeholders — строка «?,?,…,?» из n знаков вопроса для IN-списков.
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 func nullableString(s string) any {
