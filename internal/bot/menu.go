@@ -115,7 +115,12 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !ok {
 			return nil
 		}
-		return b.renderChatStats(ctx, query, chatID, parsePeriod(parts[3]))
+		p := parsePeriod(parts[3])
+		// Запоминаем выбор: список чатов и «⬅️ К статистике» откроются с ним же.
+		if err := b.db.SetLastStatsPeriod(b.runCtx, query.From.ID, string(p)); err != nil {
+			b.log.Warn("set last stats period", "err", err)
+		}
+		return b.renderChatStats(ctx, query, chatID, p)
 	case "settings":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
@@ -516,8 +521,9 @@ func backKeyboard() *telego.InlineKeyboardMarkup {
 }
 
 // chatsListView собирает текст «Твои чаты» + клавиатуру выбора чата, общие
-// для команды /chats и кнопки меню. withBack добавляет ряд «Назад».
-func chatsListView(chats []storage.ChatInfo, withBack bool) (string, *telego.InlineKeyboardMarkup) {
+// для команды /chats и кнопки меню. p — период, с которым откроется
+// статистика (последний выбранный юзером). withBack добавляет ряд «Назад».
+func chatsListView(chats []storage.ChatInfo, p statsPeriod, withBack bool) (string, *telego.InlineKeyboardMarkup) {
 	var sb strings.Builder
 	sb.WriteString("📊 <b>Твои чаты</b>\n\n")
 	if len(chats) == 0 {
@@ -532,7 +538,7 @@ func chatsListView(chats []storage.ChatInfo, withBack bool) (string, *telego.Inl
 		if label == "" {
 			label = fmt.Sprintf("Chat %d", c.ChatID)
 		}
-		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, periodWeek)
+		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, p)
 		rows = append(rows, []telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton(truncateLabel(label, 40)).WithCallbackData(cb),
 		})
@@ -563,7 +569,7 @@ func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error
 		b.log.Warn("user chats", "err", err)
 		return nil
 	}
-	text, kb := chatsListView(chats, true)
+	text, kb := chatsListView(chats, b.lastStatsPeriod(ctx, query.From.ID), true)
 	return b.editWithMenu(ctx, query, text, kb)
 }
 
@@ -704,7 +710,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	}
 	rows = append(rows, []telego.InlineKeyboardButton{
 		tu.InlineKeyboardButton("⬅️ К статистике").
-			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, periodWeek)),
+			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, b.lastStatsPeriod(ctx, query.From.ID))),
 	})
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
@@ -812,6 +818,16 @@ func (b *Bot) chatTitle(ctx context.Context, chatID int64) string {
 	return fmt.Sprintf("Chat %d", chatID)
 }
 
+// lastStatsPeriod — период статистики, который юзер выбирал последним; нет
+// записи или ошибка чтения → неделя (parsePeriod откатывает "" сам).
+func (b *Bot) lastStatsPeriod(ctx context.Context, userID int64) statsPeriod {
+	p, err := b.db.LastStatsPeriod(ctx, userID)
+	if err != nil {
+		b.log.Warn("last stats period", "err", err)
+	}
+	return parsePeriod(p)
+}
+
 // chatLink — chatTitle в виде HTML-ссылки на чат (chatLinkHTML); чата нет в
 // реестре — плоский «Chat <id>».
 func (b *Bot) chatLink(ctx context.Context, chatID int64) string {
@@ -856,7 +872,7 @@ func (b *Bot) handleChatsCommand(ctx *th.Context, message telego.Message) error 
 		b.log.Warn("user chats", "err", err)
 		return nil
 	}
-	text, kb := chatsListView(chats, false)
+	text, kb := chatsListView(chats, b.lastStatsPeriod(ctx, message.From.ID), false)
 	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
 		WithReplyMarkup(kb))
