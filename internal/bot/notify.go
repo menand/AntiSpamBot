@@ -111,12 +111,13 @@ func (b *Bot) sendModCard(targets []int64, chatID, targetID int64, kind storage.
 		}
 	}
 	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{targetID})
-	text := fmt.Sprintf("%s в «%s»\n%s: %s\n%s: %s",
-		action, html.EscapeString(b.chatTitle(b.runCtx, chatID)),
+	text := fmt.Sprintf("%s в %s\n%s: %s\n%s: %s",
+		action, b.chatLink(b.runCtx, chatID),
 		whoLabel, mentionWithUsername(infos, targetID), whyLabel, why)
 	for _, ownerID := range targets {
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
-			WithParseMode(telego.ModeHTML)); err != nil {
+			WithParseMode(telego.ModeHTML).
+			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 			b.log.Warn("notify mod action", "err", err, "owner", ownerID)
 		}
 	}

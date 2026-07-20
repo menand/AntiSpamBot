@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS chats (
     chat_id    INTEGER PRIMARY KEY,
     title      TEXT,
     type       TEXT,
+    username   TEXT,
     updated_at INTEGER NOT NULL
 );
 

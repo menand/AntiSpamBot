@@ -291,12 +291,12 @@ func (b *Bot) notifySpamSuspicion(message telego.Message) {
 		return
 	}
 	chatID := message.Chat.ID
-	title := message.Chat.Title
-	if title == "" {
-		title = fmt.Sprintf("Chat %d", chatID)
-	}
-	info := fmt.Sprintf("🚨 Подозрение на спам в «%s»\nАвтор: %s",
-		html.EscapeString(title),
+	info := fmt.Sprintf("🚨 Подозрение на спам в %s\nАвтор: %s",
+		chatLinkHTML(storage.ChatInfo{
+			ChatID:   chatID,
+			Title:    message.Chat.Title,
+			Username: message.Chat.Username,
+		}),
 		html.EscapeString(userLabel(*message.From)))
 	for _, ownerID := range targets {
 		if _, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
@@ -309,7 +309,8 @@ func (b *Bot) notifySpamSuspicion(message telego.Message) {
 			b.log.Warn("forward spam suspicion", "err", err, "owner", ownerID)
 		}
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
-			WithParseMode(telego.ModeHTML)); err != nil {
+			WithParseMode(telego.ModeHTML).
+			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 			b.log.Warn("notify spam suspicion", "err", err, "owner", ownerID)
 		}
 	}
@@ -345,7 +346,7 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, 
 		sb.WriteString("⚖️ Вердикт: <b>не спам</b>")
 	}
 	fmt.Fprintf(&sb, "\nЧат: %s\nАвтор: %s\nРешение: %s",
-		html.EscapeString(b.chatTitle(b.runCtx, v.ChatID)),
+		b.chatLink(b.runCtx, v.ChatID),
 		mentionWithUsername(infos, v.AuthorID), html.EscapeString(why))
 	var yes, no []string
 	for _, bl := range ballots {
@@ -362,16 +363,14 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, 
 		sb.WriteString("\nПротив: " + strings.Join(no, ", "))
 	}
 	if len(alsoBanned) > 0 {
-		escaped := make([]string, len(alsoBanned))
-		for i, t := range alsoBanned {
-			escaped[i] = html.EscapeString(t)
-		}
-		sb.WriteString("\nТакже забанен в: " + strings.Join(escaped, ", "))
+		// Элементы — готовый HTML из chatLinkHTML, не экранировать повторно.
+		sb.WriteString("\nТакже забанен в: " + strings.Join(alsoBanned, ", "))
 	}
 	text := sb.String()
 	for _, ownerID := range targets {
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
-			WithParseMode(telego.ModeHTML)); err != nil {
+			WithParseMode(telego.ModeHTML).
+			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 			b.log.Warn("notify spam verdict", "err", err, "owner", ownerID)
 		}
 	}
@@ -740,7 +739,7 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 }
 
 // banEverywhere банит юзера во всех группах бота, кроме исходной. Возвращает
-// названия чатов, где бан прошёл. Событие spamban пишется только в чате
+// HTML-ссылки (chatLinkHTML) чатов, где бан прошёл. Событие spamban пишется только в чате
 // вердикта (вызывающим) — иначе статистика «Забанены» размножится.
 // Best effort в один заход, без retryTG: типовая ошибка тут — «нет прав»,
 // перманентная, и лестница ретраев лишь растянула бы обход на минуты.
@@ -766,7 +765,7 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 			continue
 		}
 		b.log.Info("cross-chat spam ban", "chat", c.ChatID, "user", userID)
-		banned = append(banned, titleOrID(c))
+		banned = append(banned, chatLinkHTML(c))
 	}
 	return banned
 }

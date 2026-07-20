@@ -9,22 +9,28 @@ import (
 
 func TestReportLine(t *testing.T) {
 	tests := []struct {
-		name  string
-		title string
-		s     storage.Stats
-		want  string
+		name string
+		c    storage.ChatInfo
+		s    storage.Stats
+		want string
 	}{
-		{"empty day", "Бег", storage.Stats{}, "«Бег» — без событий"},
-		{"normal day", "Бег", storage.Stats{Joined: 5, Passed: 4, Kicked: 1},
+		{"empty day", storage.ChatInfo{ChatID: -5, Title: "Бег"}, storage.Stats{},
+			"«Бег» — без событий"},
+		{"normal day", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Joined: 5, Passed: 4, Kicked: 1},
 			"«Бег» — вступило 5, прошло 4, кик 1, бан 0"},
-		{"bans merge spam", "Бег", storage.Stats{Banned: 1, SpamBanned: 2},
+		{"bans merge spam", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Banned: 1, SpamBanned: 2},
 			"«Бег» — вступило 0, прошло 0, кик 0, бан 3 (из них спам 2)"},
-		{"title escaped", "A<b>&", storage.Stats{Passed: 1},
+		{"title escaped", storage.ChatInfo{ChatID: -5, Title: "A<b>&"}, storage.Stats{Passed: 1},
 			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, кик 0, бан 0"},
+		{"public chat linked", storage.ChatInfo{ChatID: -5, Title: "Бег", Username: "run_chat"},
+			storage.Stats{Passed: 1},
+			`<a href="https://t.me/run_chat">«Бег»</a> — вступило 0, прошло 1, кик 0, бан 0`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := reportLine(tc.title, tc.s); got != tc.want {
+			if got := reportLine(tc.c, tc.s); got != tc.want {
 				t.Errorf("got  %q\nwant %q", got, tc.want)
 			}
 		})

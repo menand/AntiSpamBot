@@ -72,6 +72,26 @@ func mentionFromInfo(info storage.UserInfo) string {
 	return fmt.Sprintf(`<a href="tg://user?id=%d">%s</a>`, info.UserID, html.EscapeString(name))
 }
 
+// chatLinkHTML рендерит «Название» чата кликабельной HTML-ссылкой на сам чат:
+// t.me/<username> для публичных, t.me/c/<id>/… для приватных супергрупп,
+// плоский текст для обычных групп, у которых ссылки не существует.
+// t.me/c-ссылка открывается только у участников чата; у владельца бота, не
+// состоящего в чате, она мертва — принятый компромисс: рабочего формата
+// ссылки для не-участника нет вовсе, а мёртвая не хуже плоского текста.
+func chatLinkHTML(c storage.ChatInfo) string {
+	title := "«" + html.EscapeString(titleOrID(c)) + "»"
+	if c.Username != "" {
+		return fmt.Sprintf(`<a href="https://t.me/%s">%s</a>`, c.Username, title)
+	}
+	if c.ChatID < -1_000_000_000_000 {
+		// ponytail: огромный message_id — стандартный хак «открыть чат в конце»,
+		// клиенты клампят его к последнему сообщению.
+		return fmt.Sprintf(`<a href="https://t.me/c/%d/999999999">%s</a>`,
+			-c.ChatID-1_000_000_000_000, title)
+	}
+	return title
+}
+
 // mentionOrID рендерит mention по данным из карты; если юзера там нет — id.
 func mentionOrID(infos map[int64]storage.UserInfo, userID int64) string {
 	if info, ok := infos[userID]; ok {

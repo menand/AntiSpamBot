@@ -87,7 +87,7 @@ Tables:
 - `message_counts(chat_id, day, newcomer_count, oldtimer_count)` — daily aggregates.
 - `user_activity`, `user_message_counts` — silence detection / top writers.
 - `user_info(user_id, …)` — display-name cache for mentions.
-- `chats(chat_id, title, type)` — registry for the DM menu; row removed when the bot leaves.
+- `chats(chat_id, title, type, username)` — registry for the DM menu; row removed when the bot leaves. `username` (public @username, NULL = private) feeds `chatLinkHTML` — DM notifications render chat titles as links: `t.me/<username>` for public chats, `t.me/c/<id>/…` for private supergroups (members-only), plain text otherwise; all such sends disable link previews.
 - `chat_settings(chat_id, greeting_enabled, max_attempts, captcha_timeout_seconds, daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled, spam_check_enabled, spam_threshold (legacy, unused), spam_whitelist_msgs, spam_vote_margin, reply_check_enabled, reply_check_seconds, ephemeral_enabled)` — per-chat overrides; NULL = global default. Resolved via `effective*` helpers in `access.go` (spam ones are pure funcs in `spamcheck.go` over a loaded `ChatSettings`).
 - `pending_replies(chat_id, user_id, expires_at)` — active require-reply waits; restart-safe, restored by `restorePendingReplies`.
 - `spam_votes(chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at)` + `spam_ballots(chat_id, bot_msg_id, voter_id, is_spam)` — active «спам/не спам» votes; all state in SQLite (restart-safe), rows removed by `TakeSpamVote`.

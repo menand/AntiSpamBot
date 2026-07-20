@@ -94,12 +94,12 @@ func TestGetChat(t *testing.T) {
 	if _, ok, _ := db.GetChat(ctx, 5); ok {
 		t.Fatal("unknown chat should not be found")
 	}
-	_ = db.RememberChat(ctx, ChatInfo{ChatID: 5, Title: "Тестовый чат", Type: "supergroup"})
+	_ = db.RememberChat(ctx, ChatInfo{ChatID: 5, Title: "Тестовый чат", Type: "supergroup", Username: "testchat"})
 	c, ok, err := db.GetChat(ctx, 5)
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
-	if c.Title != "Тестовый чат" || c.Type != "supergroup" {
+	if c.Title != "Тестовый чат" || c.Type != "supergroup" || c.Username != "testchat" {
 		t.Errorf("unexpected chat: %+v", c)
 	}
 }
