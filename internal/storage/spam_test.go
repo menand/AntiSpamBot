@@ -218,6 +218,29 @@ func TestSpamNotify(t *testing.T) {
 	}
 }
 
+func TestLastStatsPeriod(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if p, err := db.LastStatsPeriod(ctx, 1); err != nil || p != "" {
+		t.Fatalf("no row must give empty period: %q %v", p, err)
+	}
+	if err := db.SetLastStatsPeriod(ctx, 1, "day"); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := db.LastStatsPeriod(ctx, 1); err != nil || p != "day" {
+		t.Fatalf("want day, got %q err=%v", p, err)
+	}
+	// Перезапись и независимость юзеров.
+	_ = db.SetLastStatsPeriod(ctx, 1, "month")
+	if p, _ := db.LastStatsPeriod(ctx, 1); p != "month" {
+		t.Fatalf("want month, got %q", p)
+	}
+	if p, _ := db.LastStatsPeriod(ctx, 2); p != "" {
+		t.Fatalf("user 2 must be untouched, got %q", p)
+	}
+}
+
 func TestDailyReportSettings(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

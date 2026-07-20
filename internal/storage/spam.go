@@ -303,6 +303,27 @@ func (d *DB) setOwnerCol(ctx context.Context, ownerID int64, col string, v any) 
 	return nil
 }
 
+// LastStatsPeriod — последний выбранный юзером период статистики DM-меню;
+// нет строки/NULL — "". Валидацию значения делает вызывающий (parsePeriod).
+func (d *DB) LastStatsPeriod(ctx context.Context, userID int64) (string, error) {
+	var p string
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT COALESCE(last_stats_period, '') FROM owner_settings WHERE owner_id = ?`,
+		userID).Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("last stats period: %w", err)
+	}
+	return p, nil
+}
+
+// SetLastStatsPeriod запоминает период статистики, выбранный юзером в DM-меню.
+func (d *DB) SetLastStatsPeriod(ctx context.Context, userID int64, p string) error {
+	return d.setOwnerCol(ctx, userID, "last_stats_period", p)
+}
+
 // SpamNotifyEnabled — включены ли у владельца ЛС-уведомления о спаме.
 func (d *DB) SpamNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
 	return d.ownerFlagEnabled(ctx, ownerID, "spam_notify")

@@ -199,5 +199,6 @@ CREATE TABLE IF NOT EXISTS owner_settings (
     daily_report    INTEGER NOT NULL DEFAULT 0, -- слать в ЛС утреннюю сводку за вчера по чатам юзера
     last_report_day TEXT,                       -- маркер отправки сводки (день МСК), NULL = ещё не слали
     captcha_notify  INTEGER NOT NULL DEFAULT 0, -- слать в ЛС ВСЕ провалы капчи (mod_notify шлёт только повторные)
-    version_notify  INTEGER NOT NULL DEFAULT 1  -- слать ЛС «бот обновлён»; единственный opt-out тумблер (нет строки = ВКЛ)
+    version_notify  INTEGER NOT NULL DEFAULT 1, -- слать ЛС «бот обновлён»; единственный opt-out тумблер (нет строки = ВКЛ)
+    last_stats_period TEXT                      -- последний выбранный период статистики DM-меню, NULL = неделя
 );
