@@ -9,22 +9,25 @@ import (
 )
 
 type ChatInfo struct {
-	ChatID int64
-	Title  string
-	Type   string
+	ChatID   int64
+	Title    string
+	Type     string
+	Username string // публичный @username чата; "" = приватный
 }
 
 func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO chats (chat_id, title, type, updated_at)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO chats (chat_id, title, type, username, updated_at)
+		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id) DO UPDATE SET
 			title = excluded.title,
 			type = excluded.type,
+			username = excluded.username,
 			updated_at = excluded.updated_at
 	`, info.ChatID,
 		nullableString(info.Title),
 		nullableString(info.Type),
+		nullableString(info.Username),
 		time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("remember chat: %w", err)
@@ -35,10 +38,10 @@ func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 // GetChat возвращает строку реестра для одного чата, если он известен.
 func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) {
 	var c ChatInfo
-	var title, ctype sql.NullString
+	var title, ctype, uname sql.NullString
 	err := d.sql.QueryRowContext(ctx,
-		`SELECT chat_id, title, type FROM chats WHERE chat_id = ?`,
-		chatID).Scan(&c.ChatID, &title, &ctype)
+		`SELECT chat_id, title, type, username FROM chats WHERE chat_id = ?`,
+		chatID).Scan(&c.ChatID, &title, &ctype, &uname)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ChatInfo{}, false, nil
 	}
@@ -47,6 +50,7 @@ func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) 
 	}
 	c.Title = title.String
 	c.Type = ctype.String
+	c.Username = uname.String
 	return c, true, nil
 }
 
@@ -287,7 +291,7 @@ func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentMSKHour, default
 // ListChats возвращает все чаты, которые бот видел, отсортированные по названию.
 func (d *DB) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	rows, err := d.sql.QueryContext(ctx,
-		`SELECT chat_id, title, type FROM chats ORDER BY COALESCE(title, ''), chat_id`)
+		`SELECT chat_id, title, type, username FROM chats ORDER BY COALESCE(title, ''), chat_id`)
 	if err != nil {
 		return nil, fmt.Errorf("list chats: %w", err)
 	}
@@ -295,12 +299,13 @@ func (d *DB) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	var out []ChatInfo
 	for rows.Next() {
 		var c ChatInfo
-		var title, ctype sql.NullString
-		if err := rows.Scan(&c.ChatID, &title, &ctype); err != nil {
+		var title, ctype, uname sql.NullString
+		if err := rows.Scan(&c.ChatID, &title, &ctype, &uname); err != nil {
 			return nil, fmt.Errorf("scan chat: %w", err)
 		}
 		c.Title = title.String
 		c.Type = ctype.String
+		c.Username = uname.String
 		out = append(out, c)
 	}
 	return out, rows.Err()

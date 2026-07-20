@@ -76,7 +76,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		(newStatus == "member" || newStatus == "restricted")
 	if joined {
 		// chat_member-апдейты не несут информации о топике; капча уйдёт в General (0).
-		b.onUserJoined(upd.Chat.ID, upd.Chat.Title, upd.Chat.Type, user, 0)
+		b.onUserJoined(upd.Chat, user, 0)
 		return nil
 	}
 
@@ -135,9 +135,10 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 	b.rememberChat(b.runCtx, storage.ChatInfo{
-		ChatID: upd.Chat.ID,
-		Title:  upd.Chat.Title,
-		Type:   upd.Chat.Type,
+		ChatID:   upd.Chat.ID,
+		Title:    upd.Chat.Title,
+		Type:     upd.Chat.Type,
+		Username: upd.Chat.Username,
 	})
 	b.checkAdminRights(upd)
 	return nil
@@ -273,11 +274,13 @@ func missingRights(m telego.ChatMember) []string {
 // только тот вызов, который реально запустил капчу, — вход, доставленный
 // обоими типами апдейтов, попадает в статистику один раз. threadID — топик
 // форума, где замечен вход (0 = нет/General).
-func (b *Bot) onUserJoined(chatID int64, chatTitle, chatType string, user telego.User, threadID int) {
+func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
+	chatID := chat.ID
 	b.rememberChat(b.runCtx, storage.ChatInfo{
-		ChatID: chatID,
-		Title:  chatTitle,
-		Type:   chatType,
+		ChatID:   chatID,
+		Title:    chat.Title,
+		Type:     chat.Type,
+		Username: chat.Username,
 	})
 	// Доверенный (/whitelist): вход без капчи, reply-ожидания и профиль-чека.
 	// Проверка ДО глобальной базы спамеров — пер-чатовое доверие админа
@@ -574,7 +577,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 			hadHuman = true
 			b.log.Info("new_chat_members service message",
 				"chat", message.Chat.ID, "user", nm.ID)
-			b.onUserJoined(message.Chat.ID, message.Chat.Title, message.Chat.Type, nm, threadID)
+			b.onUserJoined(message.Chat, nm, threadID)
 		}
 		// Сносим телеграмное «X вошёл в чат» — засоряет чат, а капчу мы уже
 		// показываем.
@@ -629,9 +632,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	when := time.Unix(int64(message.Date), 0)
 
 	b.rememberChat(b.runCtx, storage.ChatInfo{
-		ChatID: chatID,
-		Title:  message.Chat.Title,
-		Type:   message.Chat.Type,
+		ChatID:   chatID,
+		Title:    message.Chat.Title,
+		Type:     message.Chat.Type,
+		Username: message.Chat.Username,
 	})
 	b.rememberUser(b.runCtx, storage.UserInfo{
 		UserID:    user.ID,

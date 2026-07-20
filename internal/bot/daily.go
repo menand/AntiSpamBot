@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"strings"
 	"time"
 
@@ -106,7 +105,7 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 			b.log.Warn("dm report: query stats", "err", err, "chat", c.ChatID)
 			continue
 		}
-		line := reportLine(titleOrID(c), s)
+		line := reportLine(c, s)
 		if n := len([]rune(line)); n > budget {
 			fmt.Fprintf(&sb, "\n… и ещё %d %s", len(chats)-i,
 				pluralRU(len(chats)-i, "чат", "чата", "чатов"))
@@ -118,7 +117,8 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 	}
 
 	if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(userID), sb.String()).
-		WithParseMode(telego.ModeHTML)); err != nil {
+		WithParseMode(telego.ModeHTML).
+		WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 		// 403 = ЛС закрыта навсегда (юзер заблокировал бота / аккаунт удалён) —
 		// отписываем, иначе ретрай долбился бы в закрытую ЛС каждый тик до
 		// скончания веков.
@@ -141,14 +141,15 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 
 // reportLine — однострочная сводка чата для ЛС-отчёта: только счётчики, без
 // имён и топов («без излишних деталей»). Бан = обычные + спам-вердикты.
-func reportLine(title string, s storage.Stats) string {
-	title = truncateLabel(title, 60) // рун-безопасно; простыня в названии чата не съест бюджет отчёта
+func reportLine(c storage.ChatInfo, s storage.Stats) string {
+	c.Title = truncateLabel(titleOrID(c), 60) // рун-безопасно; простыня в названии чата не съест бюджет отчёта
+	link := chatLinkHTML(c)
 	banned := s.Banned + s.SpamBanned
 	if s.Joined+s.Passed+s.Kicked+banned == 0 {
-		return fmt.Sprintf("«%s» — без событий", html.EscapeString(title))
+		return fmt.Sprintf("%s — без событий", link)
 	}
-	line := fmt.Sprintf("«%s» — вступило %d, прошло %d, кик %d, бан %d",
-		html.EscapeString(title), s.Joined, s.Passed, s.Kicked, banned)
+	line := fmt.Sprintf("%s — вступило %d, прошло %d, кик %d, бан %d",
+		link, s.Joined, s.Passed, s.Kicked, banned)
 	if s.SpamBanned > 0 {
 		line += fmt.Sprintf(" (из них спам %d)", s.SpamBanned)
 	}

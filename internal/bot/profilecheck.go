@@ -196,12 +196,13 @@ func (b *Bot) notifyProfileSuspicion(chatID, userID int64, facts string) {
 	if len(targets) == 0 {
 		return
 	}
-	info := fmt.Sprintf("👤 Подозрительный профиль в «%s»\n%s",
-		html.EscapeString(b.chatTitle(b.runCtx, chatID)),
+	info := fmt.Sprintf("👤 Подозрительный профиль в %s\n%s",
+		b.chatLink(b.runCtx, chatID),
 		html.EscapeString(strings.TrimSpace(facts)))
 	for _, ownerID := range targets {
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
-			WithParseMode(telego.ModeHTML)); err != nil {
+			WithParseMode(telego.ModeHTML).
+			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 			b.log.Warn("notify profile suspicion", "err", err, "owner", ownerID)
 		}
 	}

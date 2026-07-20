@@ -125,6 +125,32 @@ func TestHumanDaysGenRU(t *testing.T) {
 	}
 }
 
+func TestChatLinkHTML(t *testing.T) {
+	tests := []struct {
+		name string
+		c    storage.ChatInfo
+		want string
+	}{
+		{"public username", storage.ChatInfo{ChatID: -1001234567890, Title: "Бег", Username: "run_chat"},
+			`<a href="https://t.me/run_chat">«Бег»</a>`},
+		{"private supergroup", storage.ChatInfo{ChatID: -1001234567890, Title: "Бег"},
+			`<a href="https://t.me/c/1234567890/999999999">«Бег»</a>`},
+		{"basic group plain", storage.ChatInfo{ChatID: -12345, Title: "Бег"},
+			"«Бег»"},
+		{"title escaped", storage.ChatInfo{ChatID: -12345, Title: "A<b>&"},
+			"«A&lt;b&gt;&amp;»"},
+		{"no title", storage.ChatInfo{ChatID: -12345},
+			"«Chat -12345»"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := chatLinkHTML(tc.c); got != tc.want {
+				t.Errorf("got  %q\nwant %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestMentionWithUsername(t *testing.T) {
 	infos := map[int64]storage.UserInfo{
 		1: {UserID: 1, FirstName: "Andrey", LastName: "Menshov", Username: "menshovandrey"},

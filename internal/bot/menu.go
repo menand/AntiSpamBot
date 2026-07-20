@@ -812,6 +812,16 @@ func (b *Bot) chatTitle(ctx context.Context, chatID int64) string {
 	return fmt.Sprintf("Chat %d", chatID)
 }
 
+// chatLink — chatTitle в виде HTML-ссылки на чат (chatLinkHTML); чата нет в
+// реестре — плоский «Chat <id>».
+func (b *Bot) chatLink(ctx context.Context, chatID int64) string {
+	c, ok, err := b.db.GetChat(ctx, chatID)
+	if err == nil && ok {
+		return chatLinkHTML(c)
+	}
+	return fmt.Sprintf("«Chat %d»", chatID)
+}
+
 // titleOrID — «Название» или «Chat <id>», когда названия в реестре нет.
 func titleOrID(c storage.ChatInfo) string {
 	if c.Title != "" {
