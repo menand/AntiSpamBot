@@ -234,6 +234,8 @@ func TestStats(t *testing.T) {
 	_ = db.RecordEvent(ctx, 100, 2, EventKick, now, "")
 	_ = db.RecordEvent(ctx, 100, 3, EventJoin, now, "")
 	_ = db.RecordEvent(ctx, 100, 3, EventBan, now, "")
+	_ = db.RecordEvent(ctx, 100, 4, EventJoin, now, "")
+	_ = db.RecordEvent(ctx, 100, 4, EventLeft, now, "")
 
 	_ = db.UpsertMember(ctx, 100, 1, now.Add(-1*time.Hour))
 	_ = db.IncMessage(ctx, 100, now, true)
@@ -244,8 +246,8 @@ func TestStats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Joined != 3 {
-		t.Errorf("Joined=%d want 3", s.Joined)
+	if s.Joined != 4 {
+		t.Errorf("Joined=%d want 4", s.Joined)
 	}
 	if s.Passed != 1 {
 		t.Errorf("Passed=%d want 1", s.Passed)
@@ -255,6 +257,9 @@ func TestStats(t *testing.T) {
 	}
 	if s.Banned != 1 {
 		t.Errorf("Banned=%d want 1", s.Banned)
+	}
+	if s.Left != 1 {
+		t.Errorf("Left=%d want 1", s.Left)
 	}
 	if s.MsgNewcomer != 2 {
 		t.Errorf("MsgNewcomer=%d want 2", s.MsgNewcomer)

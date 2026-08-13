@@ -81,6 +81,17 @@ func isNotModified(err error) bool {
 		strings.Contains(apiErr.Description, "message is not modified")
 }
 
+// isUserNotParticipant матчит «USER_NOT_PARTICIPANT»: адресат уже покинул чат
+// (типично — ушёл в окне между restrict и доставкой эфемерной капчи, а в
+// масс-джойн эфемерка с WithReceiverUserID требует участника). Ретраить такой
+// 400 бессмысленно — это не транзиентная ошибка, юзер физически вне чата;
+// и это не провал капчи (kick событие не пишем), а честный EventLeft.
+func isUserNotParticipant(err error) bool {
+	var apiErr *telegoapi.Error
+	return errors.As(err, &apiErr) &&
+		strings.Contains(apiErr.Description, "USER_NOT_PARTICIPANT")
+}
+
 func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
 	// Ретраится: сетевой чих (DNS/TCP) на этом вызове означает, что юзер НЕ
 	// ограничен и капча не уйдёт. Это хуже, чем задержка на ретрай.

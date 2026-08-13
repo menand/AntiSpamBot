@@ -3,14 +3,19 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
+# -tags stdjson — стандартный encoding/json вместо grbit/go-json: тот падает
+# nil-pointer'ом в Update.Clone() на типизированном nil в интерфейсных полях
+# (см. «panic in handler» в проде). Телего официально поддерживает тег.
+JSON_TAGS := -tags stdjson
+
 build:
-	go build -ldflags "$(LDFLAGS)" -o bin/bot ./cmd/bot
+	go build $(JSON_TAGS) -ldflags "$(LDFLAGS)" -o bin/bot ./cmd/bot
 
 run:
-	go run ./cmd/bot
+	go run $(JSON_TAGS) ./cmd/bot
 
 test:
-	go test -race ./...
+	go test $(JSON_TAGS) -race ./...
 
 vet:
 	go vet ./...

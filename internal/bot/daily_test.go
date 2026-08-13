@@ -18,15 +18,18 @@ func TestReportLine(t *testing.T) {
 			"«Бег» — без событий"},
 		{"normal day", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Joined: 5, Passed: 4, Kicked: 1},
-			"«Бег» — вступило 5, прошло 4, кик 1, бан 0"},
+			"«Бег» — вступило 5, прошло 4, вышли сами 0, кик 1, бан 0"},
 		{"bans merge spam", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Banned: 1, SpamBanned: 2},
-			"«Бег» — вступило 0, прошло 0, кик 0, бан 3 (из них спам 2)"},
+			"«Бег» — вступило 0, прошло 0, вышли сами 0, кик 0, бан 3 (из них спам 2)"},
 		{"title escaped", storage.ChatInfo{ChatID: -5, Title: "A<b>&"}, storage.Stats{Passed: 1},
-			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, кик 0, бан 0"},
+			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0"},
 		{"public chat linked", storage.ChatInfo{ChatID: -5, Title: "Бег", Username: "run_chat"},
 			storage.Stats{Passed: 1},
-			`<a href="https://t.me/run_chat">«Бег»</a> — вступило 0, прошло 1, кик 0, бан 0`},
+			`<a href="https://t.me/run_chat">«Бег»</a> — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0`},
+		{"left counted", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Joined: 5, Passed: 3, Kicked: 1, Left: 1},
+			"«Бег» — вступило 5, прошло 3, вышли сами 1, кик 1, бан 0"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,6 +57,10 @@ func TestDigestHasContent(t *testing.T) {
 	}
 	if !digestHasContent(storage.Stats{MsgOldtimer: 5}, nil, nil, nil, nil) {
 		t.Fatal("messages-only day must produce a digest")
+	}
+	// День, где единственное событие — юзер вышел посреди капчи.
+	if !digestHasContent(storage.Stats{Left: 1}, nil, nil, nil, nil) {
+		t.Fatal("left-only day must produce a digest")
 	}
 	if !digestHasContent(storage.Stats{}, nil, []storage.UserCount{{UserID: 3}}, nil, nil) {
 		t.Fatal("failers-only day must produce a digest")
