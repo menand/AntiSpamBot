@@ -93,6 +93,28 @@ func TestRenderStatsNewMemberSeconds(t *testing.T) {
 	}
 }
 
+func TestRenderStatsLeft(t *testing.T) {
+	// Воронка с «вышли сами»: строка есть, процент от Joined, «В процессе»
+	// учитывает Left (5+3+1+1=10, значит 0 в процессе).
+	s := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 1, Left: 1}
+	out := renderStats(periodDay, "сегодня", s, 7,
+		nil, nil, nil, nil, map[int64]storage.UserInfo{})
+	if !strings.Contains(out, "Вышли сами: 1 (10%)") {
+		t.Fatalf("expected «Вышли сами» line:\n%s", out)
+	}
+	if strings.Contains(out, "В процессе") {
+		t.Fatalf("funnel must close with Left counted, got:\n%s", out)
+	}
+
+	// Left = 0 — строки нет (не шумим).
+	s2 := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 1}
+	out2 := renderStats(periodDay, "сегодня", s2, 7,
+		nil, nil, nil, nil, map[int64]storage.UserInfo{})
+	if strings.Contains(out2, "Вышли сами") {
+		t.Fatalf("no Left — no line expected:\n%s", out2)
+	}
+}
+
 func TestRenderStatsListsComplete(t *testing.T) {
 	s := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 2}
 	newMembers := fakeUsers(2001, 2, 1)

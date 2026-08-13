@@ -38,6 +38,11 @@ const (
 	EventKick    EventKind = "kick"
 	EventBan     EventKind = "ban"
 	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
+	// EventLeft — юзер вышел (или был убран админом), не дождавшись конца
+	// капчи: ни пасс, ни провал. Воронка становится честной: входило =
+	// прошло + кикнуто + забанено + вышло само + в процессе. Без него такие
+	// юзеры навсегда висели бы в «В процессе» в статистике.
+	EventLeft EventKind = "left"
 	// EventMute — мьют командой /mute. Питает список «10 последних» /unmute;
 	// QueryStats его сознательно игнорирует — мьют не относится к воронке капчи.
 	EventMute EventKind = "mute"
@@ -123,6 +128,7 @@ type Stats struct {
 	Kicked      int
 	Banned      int
 	SpamBanned  int // баны ИИ-антиспама; отдельно от воронки капчи
+	Left        int // вышли сами посреди капчи (ни пасс, ни кик)
 	MsgNewcomer int
 	MsgOldtimer int
 	PeriodFrom  time.Time
@@ -158,6 +164,8 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 			s.Banned = n
 		case EventSpamBan:
 			s.SpamBanned = n
+		case EventLeft:
+			s.Left = n
 		}
 	}
 	rows.Close()

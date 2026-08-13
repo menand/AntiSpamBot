@@ -178,7 +178,10 @@ func renderStats(
 		fmt.Fprintf(&sb, "• Прошли капчу: %d (%s)\n", s.Passed, pct(s.Passed, s.Joined))
 		fmt.Fprintf(&sb, "• Кикнуты: %d (%s)\n", s.Kicked, pct(s.Kicked, s.Joined))
 		fmt.Fprintf(&sb, "• Забанены: %d (%s)\n", s.Banned, pct(s.Banned, s.Joined))
-		pending := s.Joined - s.Passed - s.Kicked - s.Banned
+		if s.Left > 0 {
+			fmt.Fprintf(&sb, "• Вышли сами: %d (%s)\n", s.Left, pct(s.Left, s.Joined))
+		}
+		pending := s.Joined - s.Passed - s.Kicked - s.Banned - s.Left
 		if pending > 0 {
 			fmt.Fprintf(&sb, "• В процессе: %d\n", pending)
 		}

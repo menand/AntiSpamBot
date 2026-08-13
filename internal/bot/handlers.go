@@ -93,6 +93,11 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 				b.log.Warn("delete captcha after user left",
 					"err", err, "chat", upd.Chat.ID, "msg", p.MessageID)
 			}
+			// Не пасс и не провал — отдельный счётчик, чтобы воронка в
+			// статистике сходилась (иначе такие юзеры навсегда в «В процессе»).
+			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
+				b.log.Warn("record left event", "err", err)
+			}
 			b.log.Info("captcha cancelled — user left mid-captcha",
 				"chat", upd.Chat.ID, "user", user.ID)
 		}
@@ -928,7 +933,18 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		})
 	}
 	if err != nil {
-		b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
+		// USER_NOT_PARTICIPANT — юзер вышел до доставки капчи (в store её ещё
+		// нет, ветка «left mid-captcha» в handleChatMember не сработала).
+		// Не провал капчи: kick не пишем, а EventLeft — чтобы воронка в
+		// статистике сходилась, а не копила «В процессе» навсегда.
+		if isUserNotParticipant(err) {
+			if rerr := b.db.RecordEvent(ctx, chatID, user.ID, storage.EventLeft, time.Now(), ""); rerr != nil {
+				b.log.Warn("record left event", "err", rerr)
+			}
+			b.log.Info("captcha aborted — user not participant", "chat", chatID, "user", user.ID)
+		} else {
+			b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
+		}
 		// releaseOnAbort: при живом ctx (сетевой фейл) — полный бюджет ретраев,
 		// при отменённом (shutdown) — detached, иначе мут не снялся бы.
 		b.releaseOnAbort(ctx, chatID, user.ID)
