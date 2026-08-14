@@ -7,7 +7,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
     -ldflags="-s -w -X main.version=${VERSION}" -o /out/bot ./cmd/bot
 
-FROM alpine:3.23
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -H -u 10001 bot && \
     mkdir -p /data && chown bot:bot /data
