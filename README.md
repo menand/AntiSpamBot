@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white" alt="Go 1.26"/>
   <img src="https://img.shields.io/github/actions/workflow/status/menand/AntiSpamBot/ci.yml?branch=main&label=CI" alt="CI status"/>
-  <img src="https://img.shields.io/badge/docker-alpine%203.23-2496ED?logo=docker&logoColor=white" alt="Alpine 3.23"/>
+  <img src="https://img.shields.io/badge/docker-alpine%203.24-2496ED?logo=docker&logoColor=white" alt="Alpine 3.24"/>
   <img src="https://img.shields.io/badge/telegram-bot%20api%207.x+-26A5E4?logo=telegram&logoColor=white" alt="Telegram Bot API 7.x+"/>
   <img src="https://img.shields.io/github/last-commit/menand/AntiSpamBot" alt="Last commit"/>
 </p>
@@ -509,7 +509,7 @@ internal/gigachat/       клиент GigaChat — фолбек: OAuth-токе�
 CHANGELOG.md             история версий «Что нового» (вшивается в бинарь через
 changelog.go             корневой пакет с go:embed — источник /whatsnew и рассылки)
 scripts/auto-deploy.sh   cron-скрипт автодеплоя из git (flock, git describe → версия)
-Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.23, non-root
+Dockerfile               multi-stage: golang:1.26-alpine → alpine:3.24, non-root
 docker-compose.yml       служба bot, volume bot-data для SQLite и логов
 .env.example             шаблон настроек с комментариями
 CLAUDE.md                плотная архитектурная шпаргалка для AI-ассистентов
@@ -564,7 +564,7 @@ CI (GitHub Actions): `vet` + `test -race` + `build` на каждый push/PR. D
 ```bash
 docker compose exec bot sh -c 'cat /data/bot.db' > bot-$(date +%F).db
 # или через sqlite3 backup (онлайн, без паузы):
-docker run --rm -v antispambot_bot-data:/data alpine:3.23 sh -c \
+docker run --rm -v antispambot_bot-data:/data alpine:3.24 sh -c \
   'apk add -q sqlite && sqlite3 /data/bot.db ".backup /data/bot.db.bak"'
 ```
 

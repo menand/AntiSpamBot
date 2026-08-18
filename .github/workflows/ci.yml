@@ -5,13 +5,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Часовой дозор базовых образов (base-update.yml) дёргает пересборку прод-образа
+  # без пуша кода, когда golang:1.26-alpine или alpine:3.24 обновились на Docker Hub.
+  workflow_dispatch:
+    inputs:
+      rebuild_image:
+        description: Rebuild production image from current main without a code push
+        type: boolean
+        default: false
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           # Держать в синхроне с golang:X.Y-alpine в Dockerfile — тестировать
           # тем же тулчейном, каким собирается прод-образ.
@@ -23,31 +31,38 @@ jobs:
       - run: go build -tags stdjson ./...
 
   # Прод-образ: собирается ТОЛЬКО после зелёных тестов и только на push в
-  # main — сломанный коммит физически не доедет до ВДС (тот пуллит готовый
-  # образ, см. scripts/auto-deploy.sh). Релизный тег пушится атомарно с веткой
+  # main (или явную пересборку от base-update.yml) — сломанный коммит
+  # физически не доедет до ВДС (тот пуллит готовый образ, см.
+  # scripts/auto-deploy.sh). Релизный тег пушится атомарно с веткой
   # (git push --atomic origin main vX.Y.Z), поэтому fetch-tags уже видит его
   # и git describe даёт чистый vX.Y.Z — как раньше при сборке на ВДС.
+  # Дайджесты баз кладутся в label образа: base-update.yml сверяет их с
+  # актуальными дайджестами на Docker Hub и триггерит пересборку при разнице.
   image:
     needs: test
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_image == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # git describe нужна вся история и теги
           fetch-tags: true
       - id: ver
         run: echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - id: bases
+        run: |
+          echo "golang=$(docker buildx imagetools inspect golang:1.26-alpine | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "alpine=$(docker buildx imagetools inspect alpine:3.24 | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
@@ -56,5 +71,8 @@ jobs:
             ghcr.io/menand/antispambot:latest
             ghcr.io/menand/antispambot:${{ steps.ver.outputs.version }}
           build-args: VERSION=${{ steps.ver.outputs.version }}
+          labels: |
+            base.digest.golang=${{ steps.bases.outputs.golang }}
+            base.digest.alpine=${{ steps.bases.outputs.alpine }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

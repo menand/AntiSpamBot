@@ -1,0 +1,60 @@
+name: Base image update check
+
+# Часовой дозор базовых образов прод-контейнера. Каждый час сверяет дайджесты
+# golang:1.26-alpine и alpine:3.24 на Docker Hub с дайджестами, запечёнными в
+# последний ghcr.io/menand/antispambot:latest (labels base.digest.*, их пишет
+# ci.yml при сборке). Разошлись — вышел новый патч Go/Alpine (часто security):
+# триггерим пересборку через workflow_dispatch ci.yml (rebuild_image=true);
+# тесты там прогоняются, VDS подхватит новый образ сам (auto-deploy рестартует
+# только при смене image ID). Совпали — ничего не делаем, бесплатный no-op.
+# Без пересборок по пушам база внутри бинаря/образа так и оставалась бы
+# замороженной на версии последнего коммита.
+
+on:
+  schedule:
+    - cron: '0 * * * *' # каждый час, :00
+  workflow_dispatch: # ручной запуск для отладки
+
+permissions:
+  contents: read
+  packages: read
+  actions: write # gh workflow run ci.yml
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Current upstream base digests
+        id: current
+        run: |
+          echo "golang=$(docker buildx imagetools inspect golang:1.26-alpine | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "alpine=$(docker buildx imagetools inspect alpine:3.24 | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+
+      - name: Base digests baked into the published image
+        id: baked
+        run: |
+          AMD=$(docker buildx imagetools inspect --raw ghcr.io/menand/antispambot:latest \
+            | jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest' | head -1)
+          LABELS=$(docker buildx imagetools inspect --format '{{json .}}' \
+            "ghcr.io/menand/antispambot:latest@$AMD" | jq -c '.image.config.Labels // {}')
+          echo "golang=$(echo "$LABELS" | jq -r '.["base.digest.golang"] // empty')" >> "$GITHUB_OUTPUT"
+          echo "alpine=$(echo "$LABELS" | jq -r '.["base.digest.alpine"] // empty')" >> "$GITHUB_OUTPUT"
+          echo "labels=$LABELS" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild when a base image moved
+        if: steps.baked.outputs.golang == '' || steps.current.outputs.golang != steps.baked.outputs.golang || steps.current.outputs.alpine != steps.baked.outputs.alpine
+        run: |
+          echo "Base image update detected:"
+          echo "  golang: current=${{ steps.current.outputs.golang }} baked=${{ steps.baked.outputs.golang }}"
+          echo "  alpine: current=${{ steps.current.outputs.alpine }} baked=${{ steps.baked.outputs.alpine }}"
+          echo "Dispatching ci.yml (rebuild_image=true)..."
+          gh workflow run ci.yml -f rebuild_image=true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bases are current
+        if: steps.baked.outputs.golang != '' && steps.current.outputs.golang == steps.baked.outputs.golang && steps.current.outputs.alpine == steps.baked.outputs.alpine
+        run: |
+          echo "Bases are current: golang=${{ steps.current.outputs.golang }} alpine=${{ steps.current.outputs.alpine }}"

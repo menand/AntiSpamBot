@@ -20,7 +20,10 @@ const (
 	defaultEndpoint = "https://api.groq.com/openai/v1/chat/completions"
 	// DefaultModel — быстрая и дешёвая; качества для бинарной классификации
 	// спама хватает. Переопределяется env GROQ_MODEL.
-	DefaultModel = "llama-3.1-8b-instant"
+	// llama-3.1-8b-instant удалена из Groq (model_not_found) — compound-mini
+	// (роутер на llama-3.3-70b + gpt-oss-120b) отдаёт чистые SPAM/OK без
+	// reasoning-токенов в content.
+	DefaultModel = "groq/compound-mini"
 )
 
 // SystemPrompt — инструкция классификатора спама. Экспортирована, потому что

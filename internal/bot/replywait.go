@@ -125,16 +125,26 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 	}
 	p.Cancel()
 	_ = b.db.DeletePendingReply(b.runCtx, chatID, userID)
+	// Единственный победитель гонки фиксирует «прошёл»: капча уже позади,
+	// ответ на приветствие — финальная проверка. При однофакторной проверке
+	// (reply_check выключен) пасс записан ещё в onSuccess, и здесь Take
+	// просто промахивается — лишний пасс не пишется.
+	_ = b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), "")
 	b.log.Info("reply check passed", "chat", chatID, "user", userID)
 }
 
-// cancelReplyWait тихо снимает ожидание (юзер вышел/кикнут/забанен) — кик за
-// молчание ему уже не грозит, событий не пишем.
-func (b *Bot) cancelReplyWait(chatID, userID int64) {
+// cancelReplyWait тихо снимает ожидание (юзер вышел/кикнут/забанен/замьючен) —
+// кик за молчание ему уже не грозит. Возвращает true, если ожидание было
+// активным: вызывающему надо закрыть воронку статистики событием (left/pass),
+// иначе юзер навсегда зависнет в «В процессе» — пасс при reply-check пишется
+// только в replyWaitSatisfied, то есть после снятия его уже никто не запишет.
+func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
 	if p, ok := b.replies.Take(chatID, userID); ok {
 		p.Cancel()
 		_ = b.db.DeletePendingReply(b.runCtx, chatID, userID)
+		return true
 	}
+	return false
 }
 
 // waitReplyTimeout ждёт дедлайн ожидания. Молчание = провал второго шага
