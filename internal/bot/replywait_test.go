@@ -1,7 +1,11 @@
 package bot
 
 import (
+	"context"
 	"database/sql"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -73,5 +77,77 @@ func TestEffectiveReplyCheckSeconds(t *testing.T) {
 	s.ReplyCheckSeconds = sql.NullInt64{Int64: 90, Valid: true}
 	if got := effectiveReplyCheckSeconds(s); got != 90 {
 		t.Errorf("override: got %d, want 90", got)
+	}
+}
+
+func newTestBotWithDB(t *testing.T) (*Bot, *storage.DB) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &Bot{
+		db:      db,
+		replies: newReplyStore(),
+		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		runCtx:  context.Background(),
+	}, db
+}
+
+func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
+	ctx := context.Background()
+	b, db := newTestBotWithDB(t)
+	b.replies.Put(1, 2, time.Now().Add(time.Minute))
+	_ = db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
+	})
+
+	b.replyWaitSatisfied(1, 2)
+
+	// Ожидание снято и «прошёл» записан ровно один раз.
+	if _, ok := b.replies.Take(1, 2); ok {
+		t.Fatal("pending reply must be taken by replyWaitSatisfied")
+	}
+	if rows, err := db.LoadAllPendingReplies(ctx); err != nil {
+		t.Fatal(err)
+	} else if len(rows) != 0 {
+		t.Fatalf("pending_replies rows = %d, want 0", len(rows))
+	}
+	s, err := db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Passed != 1 {
+		t.Fatalf("passes = %d, want 1", s.Passed)
+	}
+
+	// Повторный вызов (ожидания уже нет) пасс не дублирует.
+	b.replyWaitSatisfied(1, 2)
+	s, _ = db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	if s.Passed != 1 {
+		t.Fatalf("passes after duplicate = %d, want 1", s.Passed)
+	}
+}
+
+func TestCancelReplyWaitSignalsCancelled(t *testing.T) {
+	ctx := context.Background()
+	b, db := newTestBotWithDB(t)
+	b.replies.Put(1, 2, time.Now().Add(time.Minute))
+	_ = db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
+	})
+
+	if !b.cancelReplyWait(1, 2) {
+		t.Fatal("cancelReplyWait must report an active wait was cancelled")
+	}
+	if rows, err := db.LoadAllPendingReplies(ctx); err != nil {
+		t.Fatal(err)
+	} else if len(rows) != 0 {
+		t.Fatalf("pending_replies rows = %d, want 0", len(rows))
+	}
+	if b.cancelReplyWait(1, 2) {
+		t.Fatal("cancelReplyWait on an idle wait must report false")
 	}
 }

@@ -103,7 +103,15 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		}
 		// Ожидание «ответь на приветствие» тоже снимается тихо: ушедшему
 		// (или забаненному вердиктом/командой) кик за молчание не грозит.
-		b.cancelReplyWait(upd.Chat.ID, user.ID)
+		// Но только собственный уход (left) закрывает воронку событием: при
+		// reply-check «прошёл» ещё не записан, и без left юзер навсегда
+		// висел бы в «В процессе». kicked не дублируем — kick/ban уже пишут
+		// инициаторы (waitReplyTimeout, /kick, /ban, вердикт антиспама).
+		if b.cancelReplyWait(upd.Chat.ID, user.ID) && newStatus == "left" {
+			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
+				b.log.Warn("record left event (reply wait)", "err", err)
+			}
+		}
 	}
 	return nil
 }
@@ -1017,8 +1025,16 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	if err := b.db.UpsertMember(ctx, p.ChatID, p.UserID, time.Now()); err != nil {
 		b.log.Warn("upsert member", "err", err)
 	}
-	if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
-		b.log.Warn("record pass event", "err", err)
+	s := b.chatSettings(ctx, p.ChatID)
+	// «Прошёл» засчитывается только после ВСЕХ включённых проверок: при
+	// однофакторной (одна капча) — сразу здесь; при включённом reply-check —
+	// когда юзер реально ответил на приветствие (replyWaitSatisfied). Иначе
+	// пасс до таймаута задваивался последующим киком за молчание
+	// (join→pass→kick/noreply в воронке статистики).
+	if !s.ReplyCheckEnabled {
+		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event", "err", err)
+		}
 	}
 	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID, "answer", answer)
 	if answer != "" {
@@ -1031,7 +1047,6 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	if err := b.release(ctx, p.ChatID, p.UserID); err != nil {
 		return err
 	}
-	s := b.chatSettings(ctx, p.ChatID)
 	// Ожидание ответа взводим СРАЗУ после размьюта, до сетевой отправки
 	// приветствия: юзер уже может писать, и его первое сообщение должно
 	// застать ожидание активным (иначе гонка → кик написавшего).
