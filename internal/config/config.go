@@ -25,9 +25,12 @@ type Config struct {
 	DailyStatsUTCHour  int                // час суток (UTC), в который/после которого постятся ежедневные дайджесты
 	GroqAPIKey         string             // пусто = Groq выключен
 	GroqModel          string             // пусто = groq.DefaultModel
-	GigaChatAuthKey    string             // пусто = фолбек GigaChat выключен
+	GeminiAPIKey       string             // пусто = Gemini выключен
+	GeminiModel        string             // пусто = gemini.DefaultModel
+	GigaChatAuthKey    string             // пусто = GigaChat выключен
 	GigaChatScope      string             // пусто = gigachat.DefaultScope
 	GigaChatModel      string             // пусто = gigachat.DefaultModel
+	AIProviderOrder    []string           // порядок цепочки ИИ-провайдеров; пусто = по умолчанию
 }
 
 func Load() (*Config, error) {
@@ -107,6 +110,11 @@ func Load() (*Config, error) {
 		return nil, errors.New("DAILY_STATS_UTC_HOUR must be 0..23")
 	}
 
+	aiOrder, err := parseAIProviderOrder(os.Getenv("AI_PROVIDER_ORDER"))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
 		Token:              token,
 		CaptchaTimeout:     timeout,
@@ -122,10 +130,50 @@ func Load() (*Config, error) {
 		DailyStatsUTCHour:  digestHour,
 		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
 		GroqModel:          os.Getenv("GROQ_MODEL"),
+		GeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
+		GeminiModel:        os.Getenv("GEMINI_MODEL"),
 		GigaChatAuthKey:    os.Getenv("GIGACHAT_AUTH_KEY"),
 		GigaChatScope:      os.Getenv("GIGACHAT_SCOPE"),
 		GigaChatModel:      os.Getenv("GIGACHAT_MODEL"),
+		AIProviderOrder:    aiOrder,
 	}, nil
+}
+
+// DefaultAIProviders — порядок цепочки ИИ-провайдеров, когда AI_PROVIDER_ORDER
+// не задан. Согласован с тем, что написано в CLAUDE.md/README.
+var DefaultAIProviders = []string{"groq", "gemini", "gigachat"}
+
+// parseAIProviderOrder читает AI_PROVIDER_ORDER: строгий комма-список имён
+// из DefaultAIProviders. Пустая строка = дефолт; неизвестное имя или дубликат —
+// ошибка (опечатка в env не должна молча менять цепочку фолбеков).
+func parseAIProviderOrder(v string) ([]string, error) {
+	if strings.TrimSpace(v) == "" {
+		return append([]string(nil), DefaultAIProviders...), nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, raw := range strings.Split(v, ",") {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, fmt.Errorf("invalid AI_PROVIDER_ORDER %q: empty entry", v)
+		}
+		valid := false
+		for _, allowed := range DefaultAIProviders {
+			if name == allowed {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, fmt.Errorf("invalid AI_PROVIDER_ORDER %q: unknown provider %q (allowed: %s)", v, name, strings.Join(DefaultAIProviders, ","))
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("invalid AI_PROVIDER_ORDER %q: duplicate provider %q", v, name)
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out, nil
 }
 
 // parseDuration читает целочисленную env-переменную, выраженную в заданной

@@ -1,7 +1,9 @@
 // Package gigachat — минимальный клиент GigaChat API (Сбер) для оценки
-// спамности сообщений. Фолбек для internal/groq: у Groq лимиты запросов в
-// минуту/сутки, GigaChat подхватывает, когда Groq недоступен. Контракт тот
-// же: любая ошибка — это ошибка, НЕ вердикт; вызывающий обязан fail-open.
+// спамности сообщений. Запасной фолбек в цепочке ИИ-провайдеров
+// (groq → gemini → gigachat; порядок — AI_PROVIDER_ORDER): у Groq и Gemini
+// бывают лимиты запросов в минуту/сутки, GigaChat подхватывает, когда они
+// недоступны. Контракт тот же: любая ошибка — это ошибка, НЕ вердикт;
+// вызывающий обязан fail-open.
 package gigachat
 
 import (
@@ -226,7 +228,7 @@ type chatResponse struct {
 }
 
 // chat выполняет один запрос к chat/completions и возвращает сырой текст
-// ответа модели (вердикт из него достаёт groq.ParseVerdict — общий для обоих
+// ответа модели (вердикт из него достаёт groq.ParseVerdict — общий для всех
 // провайдеров). 401 возвращается как errUnauthorized, чтобы вызывающий мог
 // сделать рефреш токена.
 func (c *Client) chat(ctx context.Context, token, system, facts string) (string, error) {

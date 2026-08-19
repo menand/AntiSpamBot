@@ -12,6 +12,7 @@ import (
 	th "github.com/mymmrac/telego/telegohandler"
 	tu "github.com/mymmrac/telego/telegoutil"
 
+	"github.com/menand/AntiSpamBot/internal/config"
 	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -123,7 +124,7 @@ func (b *Bot) invalidateAdminCache(chatID, userID int64) {
 
 // spamAIEnabled — доступен ли хоть один LLM-провайдер для спам-анализа.
 func (b *Bot) spamAIEnabled() bool {
-	return b.groqc.Enabled() || b.gigac.Enabled()
+	return b.groqc.Enabled() || b.gemic.Enabled() || b.gigac.Enabled()
 }
 
 // spamGatesPass — общие гейты «стоит ли гнать этого юзера в LLM», от дешёвого
@@ -185,7 +186,7 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 	if skip {
 		return
 	}
-	// Дедуп параллельных сообщений того же автора, пока Groq думает.
+	// Дедуп параллельных сообщений того же автора, пока первичный провайдер думает.
 	k := chatUser{chatID, user.ID}
 	b.spamMu.Lock()
 	if _, busy := b.spamInflight[k]; busy {
@@ -220,7 +221,7 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	}
 	facts := buildSpamFacts(message, memberFor, msgTotal)
 
-	// Бюджет на всю цепочку провайдеров; Groq внутри ограничен отдельно,
+	// Бюджет на всю цепочку провайдеров; первичный внутри ограничен отдельно,
 	// чтобы его зависший вызов не съел время фолбека.
 	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
 	defer cancel()
@@ -381,39 +382,87 @@ func (b *Bot) classifySpam(ctx context.Context, chatID, userID int64, facts stri
 	return b.classifyVerdict(ctx, groq.SystemPrompt, facts, chatID, userID)
 }
 
-// classifyVerdict гоняет факты по цепочке провайдеров с заданным
-// системным промптом (спам-чек сообщений и профиль-чек различаются только
-// им): Groq первичен (быстрее и с бо́льшим лимитом), GigaChat подхватывает
-// при ЛЮБОЙ его ошибке — чаще всего это минутный rate-limit Groq (суточный
-// запас ещё есть, но ждать минуту нельзя). Ошибка возвращается только когда
-// упали все доступные провайдеры. chatID/userID — только для логов.
-func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID, userID int64) (spam bool, provider string, err error) {
-	if b.groqc.Enabled() {
-		gctx := ctx
-		if b.gigac.Enabled() {
-			// Суб-бюджет нужен только чтобы зависший Groq оставил время
-			// фолбеку; без фолбека Groq получает весь бюджет проверки.
-			var cancel context.CancelFunc
-			gctx, cancel = context.WithTimeout(ctx, 12*time.Second)
-			defer cancel()
-		}
-		spam, err = b.groqc.Classify(gctx, system, facts)
-		if err == nil {
-			return spam, "groq", nil
-		}
-		if !b.gigac.Enabled() {
-			return false, "groq", err
-		}
-		b.log.Warn("groq check failed, falling back to gigachat",
-			"err", err, "chat", chatID, "user", userID)
+// llmClassifier — общий срез API всех LLM-клиентов (groq, gemini, gigachat),
+// достаточный для цепочки фолбеков classifyVerdict.
+type llmClassifier interface {
+	Enabled() bool
+	Model() string
+	Classify(ctx context.Context, system, facts string) (bool, error)
+}
+
+// aiProvider — одна позиция цепочки ИИ-провайдеров.
+type aiProvider struct {
+	name string
+	c    llmClassifier
+}
+
+// aiProviders собирает цепочку в порядке cfg.AIProviderOrder (пустой список —
+// защита от тестов, конструкрующих Bot с ручным config: тогда дефолт).
+func (b *Bot) aiProviders() []aiProvider {
+	order := b.cfg.AIProviderOrder
+	if len(order) == 0 {
+		order = config.DefaultAIProviders
 	}
-	if !b.gigac.Enabled() {
+	out := make([]aiProvider, 0, len(order))
+	for _, name := range order {
+		switch name {
+		case "groq":
+			out = append(out, aiProvider{name: "groq", c: b.groqc})
+		case "gemini":
+			out = append(out, aiProvider{name: "gemini", c: b.gemic})
+		case "gigachat":
+			out = append(out, aiProvider{name: "gigachat", c: b.gigac})
+		default:
+			// Недостижимо при валидации AI_PROVIDER_ORDER в config.Load;
+			// страховка от ручного Config/будущих провайдеров без кейса.
+			b.log.Warn("aiProviders: unknown provider in order, skipped", "provider", name)
+		}
+	}
+	return out
+}
+
+// classifyVerdict гоняет факты по цепочке провайдеров в порядке
+// cfg.AIProviderOrder (по умолчанию groq → gemini → gigachat) с заданным
+// системным промптом (спам-чек сообщений и профиль-чек различаются только
+// им). Первый включённый провайдер — первичный: быстрее всех отвечает и
+// получает суб-бюджет (12 с), чтобы зависший запрос оставил время фолбекам;
+// без фолбеков первичный получает весь бюджет проверки. Каждый следующий
+// включённый подхватывает при ЛЮБОЙ ошибке предыдущего — чаще всего это
+// минутный rate-limit (суточный запас ещё есть, но ждать минуту нельзя).
+// Ошибка возвращается только когда упали все включённые провайдеры.
+// chatID/userID — только для логов.
+func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID, userID int64) (spam bool, provider string, err error) {
+	providers := b.aiProviders()
+	var enabled []aiProvider
+	for _, p := range providers {
+		if p.c.Enabled() {
+			enabled = append(enabled, p)
+		}
+	}
+	if len(enabled) == 0 {
 		// Недостижимо при гейте spamAIEnabled у вызывающих; страховка от
 		// будущих прямых вызовов.
 		return false, "none", errors.New("no spam providers enabled")
 	}
-	spam, err = b.gigac.Classify(ctx, system, facts)
-	return spam, "gigachat", err
+	for i, p := range enabled {
+		pctx := ctx
+		if i == 0 && len(enabled) > 1 {
+			// Суб-бюджет только первичному: чтобы зависший запрос оставил
+			// время остальным фолбекам.
+			var cancel context.CancelFunc
+			pctx, cancel = context.WithTimeout(ctx, 12*time.Second)
+			defer cancel()
+		}
+		spam, err = p.c.Classify(pctx, system, facts)
+		if err == nil {
+			return spam, p.name, nil
+		}
+		if i < len(enabled)-1 {
+			b.log.Warn(p.name+" check failed, falling back",
+				"err", err, "chat", chatID, "user", userID)
+		}
+	}
+	return false, enabled[len(enabled)-1].name, err
 }
 
 // buildSpamFacts собирает то, что уходит в LLM: контекст автора, факт

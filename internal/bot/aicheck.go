@@ -10,8 +10,8 @@ import (
 	tu "github.com/mymmrac/telego/telegoutil"
 )
 
-// spamClassifier — общий срез API обоих LLM-клиентов (groq, gigachat),
-// достаточный для диагностики. Оба удовлетворяют ему как есть.
+// spamClassifier — общий срез API всех LLM-клиентов (groq, gemini, gigachat),
+// достаточный для диагностики. Все они удовлетворяют ему как есть.
 type spamClassifier interface {
 	Enabled() bool
 	Model() string
@@ -34,6 +34,7 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 		c    spamClassifier
 	}{
 		{"groq", b.groqc},
+		{"gemini", b.gemic},
 		{"gigachat", b.gigac},
 	}
 

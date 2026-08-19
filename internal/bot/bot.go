@@ -15,6 +15,7 @@ import (
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/config"
+	"github.com/menand/AntiSpamBot/internal/gemini"
 	"github.com/menand/AntiSpamBot/internal/gigachat"
 	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
@@ -50,10 +51,12 @@ type Bot struct {
 	greetMu    sync.Mutex
 	greetInput map[int64]greetInputState
 
-	// ИИ-антиспам: Groq-клиент (первичный), GigaChat (фолбек при ошибках и
-	// лимитах Groq), дедуп запущенных проверок (chat:user) и кэш «этот юзер —
-	// админ чата» (для белого списка и золотого голоса).
+	// ИИ-антиспам: Groq-клиент (первичный), Gemini (средний фолбек),
+	// GigaChat (запасной); порядок цепочки — cfg.AIProviderOrder. Дедуп
+	// запущенных проверок (chat:user) и кэш «этот юзер — админ чата» (для
+	// белого списка и золотого голоса).
 	groqc        *groq.Client
+	gemic        *gemini.Client
 	gigac        *gigachat.Client
 	spamMu       sync.Mutex
 	spamInflight map[chatUser]struct{}
@@ -91,6 +94,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		userCache:    make(map[int64]storage.UserInfo),
 		greetInput:   make(map[int64]greetInputState),
 		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
+		gemic:        gemini.New(cfg.GeminiAPIKey, cfg.GeminiModel),
 		gigac:        gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
 		spamInflight: make(map[chatUser]struct{}),
 		editChecked:  make(map[chatUser]time.Time),
@@ -136,16 +140,15 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
 	b.goSafe("announceVersion", func() { b.announceVersion(ctx) })
 	var providers []string
-	if b.groqc.Enabled() {
-		providers = append(providers, "groq:"+b.groqc.Model())
-	}
-	if b.gigac.Enabled() {
-		providers = append(providers, "gigachat:"+b.gigac.Model())
+	for _, p := range b.aiProviders() {
+		if p.c.Enabled() {
+			providers = append(providers, p.name+":"+p.c.Model())
+		}
 	}
 	if len(providers) == 0 {
-		b.log.Info("AI spam analysis unavailable: neither GROQ_API_KEY nor GIGACHAT_AUTH_KEY is set")
+		b.log.Info("AI spam analysis unavailable: neither GROQ_API_KEY, GEMINI_API_KEY nor GIGACHAT_AUTH_KEY is set")
 	} else {
-		// Порядок в списке = порядок цепочки classifySpam.
+		// Порядок в списке = порядок цепочки classifyVerdict (AI_PROVIDER_ORDER).
 		b.log.Info("AI spam analysis available", "providers", strings.Join(providers, ", "))
 	}
 
