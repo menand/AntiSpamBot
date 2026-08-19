@@ -301,7 +301,7 @@ git pull && docker compose up -d --build
 | `GROQ_API_KEY` | — | Ключ Groq API — включает возможность ИИ-антиспама (сам анализ включается per-chat в меню) |
 | `GROQ_MODEL` | `groq/compound-mini` | Модель Groq |
 | `GEMINI_API_KEY` | — | Ключ Google Gemini API (AI Studio) — второй фолбек ИИ-антиспама; может работать и единственным провайдером |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Модель Gemini |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Модель Gemini |
 | `GIGACHAT_AUTH_KEY` | — | Authorization key GigaChat (Сбер) — третий фолбек ИИ-антиспама; может работать и единственным провайдером |
 | `GIGACHAT_SCOPE` | `GIGACHAT_API_PERS` | Scope GigaChat (персональный аккаунт) |
 | `GIGACHAT_MODEL` | `GigaChat` | Модель GigaChat (Lite) |
