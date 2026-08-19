@@ -623,9 +623,13 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	if message.From.ID == telegramServiceUserID || message.IsAutomaticForward {
 		return nil
 	}
-	// Пропускаем прочие сервис-сообщения (смена названия, пины и т.п.).
+	// Пропускаем прочие сервис-сообщения (смена названия, пины, изменение
+	// вариантов опроса и т.п.). У последних санитайзер (updatesanitize.go)
+	// вырезает poll_message, а маркер оставляет — иначе служебное сообщение
+	// посчиталось бы за сообщение юзера и ушло в спам-чек с пустым текстом.
 	if message.NewChatTitle != "" || message.NewChatPhoto != nil ||
-		message.PinnedMessage != nil {
+		message.PinnedMessage != nil ||
+		message.PollOptionAdded != nil || message.PollOptionDeleted != nil {
 		return nil
 	}
 
@@ -693,6 +697,11 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	// Live-локация шлёт edited_message каждые несколько секунд всю трансляцию —
 	// это не «правка текста», жечь на неё LLM-запросы нельзя.
 	if message.Location != nil {
+		return nil
+	}
+	// Сервис-сообщения об изменении вариантов опроса (если придут как правка) —
+	// проверять нечего, маркер оставляет санитайзер (updatesanitize.go).
+	if message.PollOptionAdded != nil || message.PollOptionDeleted != nil {
 		return nil
 	}
 	// Правка в спам мид-капча (сообщение проскочило в секунды до рестрикта):
