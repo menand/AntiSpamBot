@@ -2,6 +2,7 @@ package config
 
 import (
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -15,7 +16,9 @@ func clearEnv(t *testing.T) {
 		"ALLOWED_CHATS", "DB_PATH", "NEWCOMER_DAYS", "SILENT_ANNOUNCE_DAYS",
 		"OWNER_IDS", "LOG_FILE", "CAPTCHA_DELAY_MS", "DAILY_STATS_UTC_HOUR",
 		"GROQ_API_KEY", "GROQ_MODEL",
+		"GEMINI_API_KEY", "GEMINI_MODEL",
 		"GIGACHAT_AUTH_KEY", "GIGACHAT_SCOPE", "GIGACHAT_MODEL",
+		"AI_PROVIDER_ORDER",
 	} {
 		t.Setenv(name, "")
 	}
@@ -90,6 +93,41 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
+func TestParseAIProviderOrder(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  []string // nil = ждём ошибку
+	}{
+		{"empty", "", DefaultAIProviders},
+		{"whitespace", "  ", DefaultAIProviders},
+		{"default order", "groq,gemini,gigachat", []string{"groq", "gemini", "gigachat"}},
+		{"reordered", "gigachat,groq,gemini", []string{"gigachat", "groq", "gemini"}},
+		{"single", "gemini", []string{"gemini"}},
+		{"unknown provider", "groq,cerebras", nil},
+		{"duplicate", "groq,gemini,groq", nil},
+		{"empty entry", "groq,,gemini", nil},
+		{"case sensitive", "GROQ,gemini", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseAIProviderOrder(tc.value)
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("value %q: want error, got %v", tc.value, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("value %q: unexpected error: %v", tc.value, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("value %q: got %v, want %v", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseDuration(t *testing.T) {
 	t.Setenv("TEST_DUR", "")
 	if d, err := parseDuration("TEST_DUR", 30*time.Second, time.Second); err != nil || d != 30*time.Second {
@@ -129,6 +167,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AllowedChats != nil || cfg.OwnerIDs != nil {
 		t.Errorf("chat maps must default to nil: %+v", cfg)
 	}
+	if !reflect.DeepEqual(cfg.AIProviderOrder, DefaultAIProviders) {
+		t.Errorf("provider order default: got %v, want %v", cfg.AIProviderOrder, DefaultAIProviders)
+	}
 }
 
 func TestLoadValidation(t *testing.T) {
@@ -145,6 +186,8 @@ func TestLoadValidation(t *testing.T) {
 		{"negative delay", "CAPTCHA_DELAY_MS", "-100"},
 		{"hour out of range", "DAILY_STATS_UTC_HOUR", "24"},
 		{"bad log level", "LOG_LEVEL", "loud"},
+		{"unknown AI provider", "AI_PROVIDER_ORDER", "groq,cerebras"},
+		{"duplicate AI provider", "AI_PROVIDER_ORDER", "groq,gemini,groq"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

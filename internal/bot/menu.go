@@ -262,7 +262,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			// Telegram отбросил бы молча, поэтому объясняем обычным
 			// сообщением: меню живёт в личке, оно ляжет прямо под ним.
 			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
-				"⚠️ Ни GROQ_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя."))
+				"⚠️ Ни GROQ_API_KEY, ни GEMINI_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя."))
 			return nil
 		}
 		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
