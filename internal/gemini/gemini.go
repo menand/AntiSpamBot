@@ -22,9 +22,18 @@ const (
 	// chat/completions JSON, что у Groq, отличается только базой и ключом.
 	defaultEndpoint = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
-	// DefaultModel — стабильная flash-модель с бесплатным тиром; для бинарной
+	// DefaultModel — стабильная flash-lite-модель с бесплатным тиром; для бинарной
 	// классификации спама хватает. Переопределяется env GEMINI_MODEL.
-	DefaultModel = "gemini-2.5-flash"
+	//
+	// Почему НЕ gemini-2.5-flash: это reasoning-модель — перед ответом она
+	// «думает» (thinking tokens), и при скромном max_tokens весь бюджет уходил в
+	// мышление, а content возвращался пустым → ParseVerdict("") падал. Мышление
+	// 2.5-поколения можно попытаться отключить reasoning_effort=none, но это не
+	// гарантирует непустой ответ (2.5-flash-lite пустовала и с ним); при этом
+	// 3.x-модели reasoning_effort отвергают вообще (HTTP 400 INVALID_ARGUMENT).
+	// flash-lite 3.x отвечает вердиктом без всяких хаков — поэтому здесь его
+	// НЕ слать.
+	DefaultModel = "gemini-3.5-flash-lite"
 )
 
 type Client struct {
@@ -84,7 +93,10 @@ func (c *Client) Classify(ctx context.Context, system, facts string) (bool, erro
 	body, err := json.Marshal(chatRequest{
 		Model:       c.model,
 		Temperature: 0,
-		MaxTokens:   64,
+		// 256, а не 64 как у Groq: reasoning-модели Gemini тратят токены на
+		// «мышление», и малого лимита хватало только на него — content выходил
+		// пустым. Запас сверху вердикта безвреден.
+		MaxTokens: 256,
 		Messages: []chatMessage{
 			{Role: "system", Content: system},
 			{Role: "user", Content: facts},
