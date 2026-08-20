@@ -8,9 +8,15 @@
 # приносит прежний latest, image ID не меняется, тик молчит; следующий тик
 # подхватит готовый образ.
 #
+# Smoke + карантин: после деплоя проверяем, что контейнер жив (Running,
+# RestartCount стабилен, getMe отвечает). Жёсткий провал — возвращаем прежний
+# образ и кладём ID в карантин (QUARANTINE). Петли нет: пока упавший образ
+# (тот же ID) в карантине, тик молчит; новый ID (реальный фикс) проходит.
+# Карантин живёт ВНЕ репо и volume контейнера — переживает git-pull и рестарты.
+#
 # Safe to run on a cron tick — file lock, silent when there's nothing to do.
-# Usage (cron example, every 5 minutes):
-#   */5 * * * * /root/AntiSpamBot/scripts/auto-deploy.sh >> /var/log/antispam-deploy.log 2>&1
+# Usage (cron, реальный тик — КАЖДУЮ МИНУТУ):
+#   * * * * * /root/AntiSpamBot/scripts/auto-deploy.sh >> /var/log/antispam-deploy.log 2>&1
 
 set -euo pipefail
 
@@ -21,23 +27,65 @@ export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_DIR"
 
+DEPLOY_LOG="/var/log/antispam-deploy.log"
+QUARANTINE="/var/lib/antispam/bad-images"
+IMAGE="ghcr.io/menand/antispambot:latest"
+ENV_FILE="$REPO_DIR/.env"
+
+# Деплой-лог растёт от минутных pull-тиков; при 50MB срезаем в ноль.
+# fd крона открыт с O_APPEND, поэтому truncate не даёт NUL-хвоста.
+if [ -f "$DEPLOY_LOG" ] && [ "$(stat -c %s "$DEPLOY_LOG" 2>/dev/null || echo 0)" -gt 52428800 ]; then
+    : > "$DEPLOY_LOG"
+fi
+
 # Prevent overlapping runs.
 exec 9>"/tmp/antispam-deploy.lock"
 if ! flock -n 9; then
     exit 0
 fi
 
-IMAGE="ghcr.io/menand/antispambot:latest"
+# Значение ключа из compose-овского .env (KEY=value, `export ` и кавычки снимаем).
+parse_env() {
+    local key="$1" v
+    v="$(grep -E "^(export[[:space:]]+)?${key}=" "$ENV_FILE" 2>/dev/null | head -1 | sed -E "s/^(export[[:space:]]+)?[A-Za-z0-9_]+=//")" || return 1
+    [ -z "$v" ] && return 1
+    v="${v#\"}" v="${v%\"}"
+    v="${v#\'}" v="${v%\'}"
+    printf '%s' "$v"
+}
+
+# ID образа в карантине?
+is_quarantined() {
+    [ -f "$QUARANTINE" ] && grep -qxF "$1" "$QUARANTINE" 2>/dev/null
+}
+
+short_id() { echo "${1:7:12}"; }
+
+# DM владельцам из OWNER_IDS; best-effort, токен не логируется.
+notify_owners() {
+    local token msg owner
+    token="$(parse_env BOT_TOKEN)" || return 0
+    [ -z "$token" ] && return 0
+    msg="$1"
+    for owner in $(parse_env OWNER_IDS | tr ',' ' '); do
+        [ -z "$owner" ] && continue
+        curl -s --max-time 10 -o /dev/null \
+            "https://api.telegram.org/bot${token}/sendMessage" \
+            --data-urlencode "chat_id=${owner}" \
+            --data-urlencode "text=${msg}" || true
+    done
+}
 
 # Тихо подтягиваем репо (скрипт/compose); --tags — чтобы git describe на
 # сервере совпадал с релизными тегами.
-git fetch --quiet --tags origin main
+git fetch --quiet --tags origin main || true
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
     git merge --ff-only --quiet origin/main
 fi
 
 before=$(docker inspect --format '{{.Image}}' menand-antispam 2>/dev/null || true)
-docker compose pull -q bot
+# pull молчит в логе: иначе ~2 строки/минуту вечного шума.
+docker compose pull -q bot >/dev/null 2>&1 || true
 after=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
 
 # Нечего деплоить (или CI ещё не дособрал образ) — молчим, лог не растёт.
@@ -45,8 +93,69 @@ if [ -z "$after" ] || [ "$before" = "$after" ]; then
     exit 0
 fi
 
-echo "=== $(date -Is) deploying image ${after:7:12} ==="
-docker compose up -d --no-build
-# Вытесненные старые образы (~35MB каждый) — чистим, чтобы не копились.
-docker image prune -f >/dev/null 2>&1 || true
-echo "=== $(date -Is) deploy done ==="
+# Проваленный ранее образ (тот же ID) — не деплоим снова, петли нет.
+if is_quarantined "$after"; then
+    exit 0
+fi
+
+echo "=== $(date -Is) deploying image $(short_id "$after") ==="
+if ! docker compose up -d --no-build; then
+    echo "!!! $(date -Is) deploy command failed; container stays on $(short_id "$before")"
+    notify_owners "⚠️ Деплой провалился (up -d): бот остался на $(short_id "$before")" || true
+    exit 0
+fi
+
+# --- Smoke ---
+sleep 10
+SMOKE_FAIL=""
+if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
+    SMOKE_FAIL="container not running"
+else
+    r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
+    sleep 5
+    r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
+    if [ "$r1" != "$r2" ]; then
+        SMOKE_FAIL="restart count grew ($r1 -> $r2)"
+    fi
+fi
+
+# getMe — мягкий сигнал (валидность токена/сети); падение само по себе НЕ
+# откатывает живой контейнер (сетевые блипы случаются).
+TOKEN="$(parse_env BOT_TOKEN || true)"
+GETME_OK=0
+if [ -n "$TOKEN" ]; then
+    if curl -s --max-time 5 "https://api.telegram.org/bot${TOKEN}/getMe" | grep -q '"ok":true'; then
+        GETME_OK=1
+    fi
+fi
+
+if [ -z "$SMOKE_FAIL" ] && [ "$GETME_OK" -eq 1 ]; then
+    # Вытесненные старые образы (~35MB каждый) — чистим, чтобы не копились.
+    docker image prune -f >/dev/null 2>&1 || true
+    echo "=== $(date -Is) deploy done ($(short_id "$after")) ==="
+    notify_owners "✅ Бот обновлён: image $(short_id "$after")" || true
+    exit 0
+fi
+
+if [ -n "$SMOKE_FAIL" ]; then
+    # Жёсткий провал — откат на прежний образ + карантин. Prune НЕ делаем:
+    # старый образ ещё нужен, а упавший остаётся в registry для диагностики.
+    mkdir -p "$(dirname "$QUARANTINE")" || true
+    if ! grep -qxF "$after" "$QUARANTINE" 2>/dev/null; then
+        echo "$after" >> "$QUARANTINE" 2>/dev/null || true
+    fi
+    echo "!!! $(date -Is) SMOKE FAIL ($SMOKE_FAIL); rolling back to $(short_id "$before")"
+    if docker tag "$before" "$IMAGE" && docker compose up -d --no-build; then
+        echo "!!! $(date -Is) rollback done; image $(short_id "$after") quarantined"
+        notify_owners "⚠️ Откат: image $(short_id "$after") провалил smoke ($SMOKE_FAIL), вернулся на $(short_id "$before")" || true
+    else
+        echo "!!! $(date -Is) ROLLBACK FAILED — manual intervention required!"
+        notify_owners "🚨 Откат на $(short_id "$before") НЕ удался! Нужно вмешательство" || true
+    fi
+    exit 1
+fi
+
+# Контейнер жив, но getMe молчит — предупреждаем, НЕ откатываем.
+echo "!!! $(date -Is) getMe failed but container is running; keeping $(short_id "$after")"
+notify_owners "⚠️ Бот обновлён ($(short_id "$after")), но getMe не отвечает — проверьте" || true
+exit 0
