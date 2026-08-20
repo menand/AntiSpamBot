@@ -50,7 +50,7 @@ jobs:
           echo "  golang: current=${{ steps.current.outputs.golang }} baked=${{ steps.baked.outputs.golang }}"
           echo "  alpine: current=${{ steps.current.outputs.alpine }} baked=${{ steps.baked.outputs.alpine }}"
           echo "Dispatching ci.yml (rebuild_image=true)..."
-          gh workflow run ci.yml -f rebuild_image=true
+          gh workflow run ci.yml -f rebuild_image=true -R "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
