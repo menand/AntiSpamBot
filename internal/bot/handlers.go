@@ -624,9 +624,8 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		return nil
 	}
 	// Пропускаем прочие сервис-сообщения (смена названия, пины, изменение
-	// вариантов опроса и т.п.). У последних санитайзер (updatesanitize.go)
-	// вырезает poll_message, а маркер оставляет — иначе служебное сообщение
-	// посчиталось бы за сообщение юзера и ушло в спам-чек с пустым текстом.
+	// вариантов опроса и т.п.) — иначе служебное сообщение посчиталось бы за
+	// сообщение юзера и ушло в спам-чек с пустым текстом.
 	if message.NewChatTitle != "" || message.NewChatPhoto != nil ||
 		message.PinnedMessage != nil ||
 		message.PollOptionAdded != nil || message.PollOptionDeleted != nil {
@@ -700,7 +699,7 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 		return nil
 	}
 	// Сервис-сообщения об изменении вариантов опроса (если придут как правка) —
-	// проверять нечего, маркер оставляет санитайзер (updatesanitize.go).
+	// проверять нечего.
 	if message.PollOptionAdded != nil || message.PollOptionDeleted != nil {
 		return nil
 	}
