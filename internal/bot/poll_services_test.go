@@ -114,6 +114,9 @@ func decodeUpdates(t *testing.T, raw string) []telego.Update {
 	if err := json.Unmarshal([]byte(raw), &ups); err != nil {
 		t.Fatalf("декод батча обновлений: %v", err)
 	}
+	if len(ups) == 0 {
+		t.Fatal("батч обновлений пуст")
+	}
 	return ups
 }
 
@@ -129,8 +132,13 @@ func TestPollOptionAddedDecodes(t *testing.T) {
 		t.Fatal("маркер poll_option_added должен сохраниться")
 	}
 	p := m.PollOptionAdded
-	if p.PollMessage == nil || !p.PollMessage.IsAccessible() {
-		t.Fatalf("poll_message должен декодироваться в доступное сообщение, got %+v", p.PollMessage)
+	// Конкретный тип + непустой MessageID: goccy-бэкенд (голый go test без
+	// -tags stdjson) на старом telego клал бы в PollMessage typed-nil *Message,
+	// который IsAccessible() == true без разыменования — только проверки на
+	// доступность тест прошёл бы ложно.
+	pm, ok := p.PollMessage.(*telego.Message)
+	if !ok || pm.GetMessageID() != 6 {
+		t.Fatalf("poll_message должен декодироваться в *telego.Message с message_id 6, got %+v", p.PollMessage)
 	}
 	if p.OptionText != "new option" {
 		t.Fatalf("option_text = %q, want %q", p.OptionText, "new option")
@@ -146,8 +154,9 @@ func TestPollOptionDeletedDecodes(t *testing.T) {
 	if p == nil {
 		t.Fatal("маркер poll_option_deleted должен сохраниться")
 	}
-	if p.PollMessage == nil || !p.PollMessage.IsAccessible() {
-		t.Fatalf("poll_message должен декодироваться, got %+v", p.PollMessage)
+	pm, ok := p.PollMessage.(*telego.Message)
+	if !ok || pm.GetMessageID() != 6 {
+		t.Fatalf("poll_message должен декодироваться в *telego.Message с message_id 6, got %+v", p.PollMessage)
 	}
 }
 
@@ -157,8 +166,9 @@ func TestPollOptionAddedInaccessibleDecodes(t *testing.T) {
 	if p == nil {
 		t.Fatal("маркер poll_option_added должен сохраниться")
 	}
-	if p.PollMessage == nil || p.PollMessage.IsAccessible() {
-		t.Fatalf("poll_message с date=0 должен декодироваться в InaccessibleMessage, got %+v", p.PollMessage)
+	pm, ok := p.PollMessage.(*telego.InaccessibleMessage)
+	if !ok || pm.GetMessageID() != 6 {
+		t.Fatalf("poll_message с date=0 должен декодироваться в *telego.InaccessibleMessage с message_id 6, got %+v", p.PollMessage)
 	}
 }
 
@@ -175,6 +185,9 @@ func TestPollOptionDeletedEditedDecodes(t *testing.T) {
 	p := ups[0].EditedMessage
 	if p == nil || p.PollOptionDeleted == nil {
 		t.Fatalf("маркер poll_option_deleted в edited_message должен сохраниться, got %+v", p)
+	}
+	if pm, ok := p.PollOptionDeleted.PollMessage.(*telego.Message); !ok || pm.GetMessageID() != 6 {
+		t.Fatalf("poll_message в edited_message должен декодироваться в *telego.Message с message_id 6, got %+v", p.PollOptionDeleted.PollMessage)
 	}
 }
 
