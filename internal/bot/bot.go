@@ -67,6 +67,20 @@ type Bot struct {
 	editChecked map[chatUser]time.Time
 	adminMu     sync.Mutex
 	adminCache  map[chatUser]adminCacheEntry
+
+	// Кэш статуса подтверждения чатов (chats.approval_status): частые чтения
+	// на каждом групповом сообщении (гейт chatServiceable), редкие записи
+	// (апрув/отклонение владельцем). Неограниченный размер по тому же
+	// соглашению, что chatCache (запись ~1 байт на известный чат).
+	approvalMu    sync.Mutex
+	approvalCache map[int64]bool
+
+	// leaveInflight — чаты, из которых бот прямо сейчас выводится по запросу
+	// владельца (menu:leavec). Защита от двойного клика по «Да, выйти»: второй
+	// вызов сделал бы повторный LeaveChat, который после успешного первого
+	// завершился бы ошибкой и показал бы «не получилось» поверх удачного выхода.
+	leaveMu       sync.Mutex
+	leaveInflight map[int64]bool
 }
 
 // chatUser — ключ пер-(chat, user) карт выше.
@@ -84,21 +98,23 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		version = "dev"
 	}
 	return &Bot{
-		api:          api,
-		cfg:          cfg,
-		store:        captcha.NewStore(),
-		replies:      newReplyStore(),
-		log:          log,
-		version:      version,
-		chatCache:    make(map[int64]storage.ChatInfo),
-		userCache:    make(map[int64]storage.UserInfo),
-		greetInput:   make(map[int64]greetInputState),
-		groqc:        groq.New(cfg.GroqAPIKey, cfg.GroqModel),
-		gemic:        gemini.New(cfg.GeminiAPIKey, cfg.GeminiModel),
-		gigac:        gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
-		spamInflight: make(map[chatUser]struct{}),
-		editChecked:  make(map[chatUser]time.Time),
-		adminCache:   make(map[chatUser]adminCacheEntry),
+		api:           api,
+		cfg:           cfg,
+		store:         captcha.NewStore(),
+		replies:       newReplyStore(),
+		log:           log,
+		version:       version,
+		chatCache:     make(map[int64]storage.ChatInfo),
+		userCache:     make(map[int64]storage.UserInfo),
+		greetInput:    make(map[int64]greetInputState),
+		groqc:         groq.New(cfg.GroqAPIKey, cfg.GroqModel),
+		gemic:         gemini.New(cfg.GeminiAPIKey, cfg.GeminiModel),
+		gigac:         gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
+		spamInflight:  make(map[chatUser]struct{}),
+		editChecked:   make(map[chatUser]time.Time),
+		adminCache:    make(map[chatUser]adminCacheEntry),
+		approvalCache: make(map[int64]bool),
+		leaveInflight: make(map[int64]bool),
 	}, nil
 }
 
@@ -211,6 +227,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
 	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))
+	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:"))
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))

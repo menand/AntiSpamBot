@@ -113,7 +113,7 @@ func (b *Bot) handleWhatsNewCommand(ctx *th.Context, message telego.Message) err
 		return nil
 	}
 	chatID := message.Chat.ID
-	if !b.chatAllowed(chatID) || message.From == nil || !b.commandForUs(message.Text) {
+	if !b.chatServiceable(chatID) || message.From == nil || !b.commandForUs(message.Text) {
 		return nil
 	}
 	var recv int64
@@ -160,7 +160,8 @@ func (b *Bot) announceVersion(ctx context.Context) {
 		b.log.Warn("announce version: list chats", "err", err)
 	}
 	for _, c := range chats {
-		if (c.Type != "group" && c.Type != "supergroup") || !b.chatAllowed(c.ChatID) {
+		if (c.Type != "group" && c.Type != "supergroup") || !b.chatAllowed(c.ChatID) ||
+			!b.chatApproved(c.ChatID) {
 			continue
 		}
 		admins, err := b.api.GetChatAdministrators(ctx,

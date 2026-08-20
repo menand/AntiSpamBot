@@ -82,11 +82,16 @@ CREATE TABLE IF NOT EXISTS user_info (
 -- и message-апдейта. Используются меню /chats для списка чатов (владелец бота
 -- видит все, админ чата — свои).
 CREATE TABLE IF NOT EXISTS chats (
-    chat_id    INTEGER PRIMARY KEY,
-    title      TEXT,
-    type       TEXT,
-    username   TEXT,
-    updated_at INTEGER NOT NULL
+    chat_id         INTEGER PRIMARY KEY,
+    title           TEXT,
+    type            TEXT,
+    username        TEXT,
+    updated_at      INTEGER NOT NULL,
+    -- Статус подтверждения чата владельцем бота: 'approved' | 'pending' |
+    -- 'rejected'. 'approved' (в т.ч. строки, созданные до фичи) — бот
+    -- работает; 'pending' — ждёт решения владельца, чат инертен;
+    -- 'rejected' — владелец отклонил, бот не активен (обычно выходит).
+    approval_status TEXT NOT NULL DEFAULT 'approved'
 );
 
 -- Настраиваемое пер-чатовое поведение. Нет строки = дефолты (приветствие

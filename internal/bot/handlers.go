@@ -47,7 +47,9 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	if upd.Chat.Type != "group" && upd.Chat.Type != "supergroup" {
 		return nil
 	}
-	if !b.chatAllowed(upd.Chat.ID) {
+	// Только подтверждённые владельцем чаты: в pending/rejected никаких капч,
+	// прощений и отмен — чат полностью инертен до решения.
+	if !b.chatServiceable(upd.Chat.ID) {
 		return nil
 	}
 	if user.IsBot {
@@ -121,7 +123,9 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 // капчи отменяются — иначе их таймауты стреляли бы kick/ban-вызовами в чате,
 // где бота уже нет. Историческая статистика остаётся как архив. При
 // добавлении/повышении — регистрирует чат и говорит админам, каких прав не
-// хватает, вместо молчаливых отказов потом.
+// хватает, вместо молчаливых отказов потом. НОВЫЙ чат (нет строки в реестре),
+// добавленный НЕ владельцем, помечается pending и ждёт решения владельца:
+// до него бот в чате инертен (см. approval.go).
 func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 	upd := update.MyChatMember
 	if upd == nil {
@@ -147,14 +151,55 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 			"chat", upd.Chat.ID, "title", upd.Chat.Title)
 		return nil
 	}
-	b.rememberChat(b.runCtx, storage.ChatInfo{
+	info := storage.ChatInfo{
 		ChatID:   upd.Chat.ID,
 		Title:    upd.Chat.Title,
 		Type:     upd.Chat.Type,
 		Username: upd.Chat.Username,
-	})
-	b.checkAdminRights(upd)
-	return nil
+	}
+	status, exists, err := b.db.GetChatApproval(b.runCtx, upd.Chat.ID)
+	if err != nil {
+		// Fail-closed: чат, чей статус не смогли прочитать, не обслуживаем и
+		// не спрашиваем повторно — строка останется прежней, следующий
+		// my_chat_member попробует снова.
+		b.log.Warn("get chat approval", "err", err, "chat", upd.Chat.ID)
+		return nil
+	}
+	switch {
+	case !exists:
+		// Новый чат. Добавил сам владелец — его действие и есть согласие:
+		// апрувим без переспроса. Иначе — спрашиваем владельцев ЛС.
+		if b.isOwner(upd.From.ID) {
+			b.log.Info("chat added by owner, auto-approved", "chat", upd.Chat.ID)
+			if err := b.db.SetChatApproval(b.runCtx, upd.Chat.ID, storage.ChatApproved); err != nil {
+				b.log.Warn("approve chat added by owner", "err", err, "chat", upd.Chat.ID)
+				return nil
+			}
+			b.setApprovalCache(upd.Chat.ID, true)
+			b.rememberChat(b.runCtx, info)
+			b.checkAdminRights(upd)
+			return nil
+		}
+		b.askOwnerApproval(upd)
+		return nil
+	case status == storage.ChatApproved:
+		// Существующий/повторно подтверждённый чат: как раньше.
+		b.setApprovalCache(upd.Chat.ID, true)
+		b.rememberChat(b.runCtx, info)
+		b.checkAdminRights(upd)
+		return nil
+	case status == storage.ChatPending:
+		// Уже спросили — ждём решения владельца. Без повторного ЛС и без
+		// подсказки по правам (любая активность в pending запрещена).
+		b.setApprovalCache(upd.Chat.ID, false)
+		b.rememberChat(b.runCtx, info)
+		return nil
+	default:
+		// rejected: leave не прошёл или событие догнало выход — чат инертен.
+		b.setApprovalCache(upd.Chat.ID, false)
+		b.rememberChat(b.runCtx, info)
+		return nil
+	}
 }
 
 // dropChat убирает чат из реестра DM-меню и отменяет его активные капчи.
@@ -182,6 +227,7 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	b.cacheMu.Lock()
 	delete(b.chatCache, chatID)
 	b.cacheMu.Unlock()
+	b.delApprovalCache(chatID)
 }
 
 // reconcileChats один раз на старте прочёсывает реестр чатов и выбрасывает
@@ -542,6 +588,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		oldID := message.Chat.ID
 		newID := message.MigrateToChatID
 		b.log.Info("chat migrating to supergroup", "old", oldID, "new", newID)
+		// Статус подтверждения читается ДО MigrateChat — она удаляет старую
+		// строку реестра; иначе мигрировавший approved-чат молча ушёл бы в
+		// ожидание подтверждения как «новый».
+		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
 		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
 			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
 		}
@@ -551,6 +601,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		oldID := message.MigrateFromChatID
 		newID := message.Chat.ID
 		b.log.Info("chat migrated from basic group", "old", oldID, "new", newID)
+		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
 		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
 			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
 		}
@@ -558,12 +609,13 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	}
 
 	// Всё дальше — обслуживание чата: реестр, капчи по сервис-сообщениям,
-	// статистика, анонсы, спам-чек. Посторонние чаты (вне ALLOWED_CHATS) не
-	// обслуживаем — иначе первое же сообщение заносит чат в реестр и открывает
-	// его админам DM-меню (вплоть до включения ИИ-антиспама за счёт владельца).
-	// Ветки миграции выше гейта: MigrateFromChatID приходит уже с НОВЫМ
-	// chat_id, которого в ALLOWED_CHATS ещё нет.
-	if !b.chatAllowed(message.Chat.ID) {
+	// статистика, анонсы, спам-чек. Посторонние чаты (вне ALLOWED_CHATS) и
+	// чаты, не подтверждённые владельцем (pending/rejected), не обслуживаем —
+	// иначе первое же сообщение заносит чат в реестр и открывает его админам
+	// DM-меню (вплоть до включения ИИ-антиспама за счёт владельца). Ветки
+	// миграции выше гейта: MigrateFromChatID приходит уже с НОВЫМ chat_id,
+	// которого в ALLOWED_CHATS ещё нет.
+	if !b.chatServiceable(message.Chat.ID) {
 		return nil
 	}
 
@@ -684,7 +736,7 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
 		return nil
 	}
-	if !b.chatAllowed(message.Chat.ID) {
+	if !b.chatServiceable(message.Chat.ID) {
 		return nil
 	}
 	if message.From == nil || message.From.IsBot {

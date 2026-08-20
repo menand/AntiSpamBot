@@ -15,6 +15,17 @@ type ChatInfo struct {
 	Username string // публичный @username чата; "" = приватный
 }
 
+// Статусы подтверждения чата владельцем бота (chats.approval_status).
+// 'approved' — бот работает в чате (значение по умолчанию: строки,
+// созданные до введения подтверждения, считаются approved); 'pending' —
+// ждёт решения владельца, чат полностью инертен; 'rejected' — владелец
+// отклонил (обычно бот выходит из чата, строка удаляется).
+const (
+	ChatApproved = "approved"
+	ChatPending  = "pending"
+	ChatRejected = "rejected"
+)
+
 func (d *DB) RememberChat(ctx context.Context, info ChatInfo) error {
 	_, err := d.sql.ExecContext(ctx, `
 		INSERT INTO chats (chat_id, title, type, username, updated_at)
@@ -52,6 +63,86 @@ func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) 
 	c.Type = ctype.String
 	c.Username = uname.String
 	return c, true, nil
+}
+
+// GetChatApproval возвращает статус подтверждения чата. exists=false — чат
+// не в реестре (никогда не регистрировался).
+func (d *DB) GetChatApproval(ctx context.Context, chatID int64) (status string, exists bool, err error) {
+	err = d.sql.QueryRowContext(ctx,
+		`SELECT approval_status FROM chats WHERE chat_id = ?`, chatID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("get chat approval: %w", err)
+	}
+	return status, true, nil
+}
+
+// SetChatApproval записывает статус подтверждения чата (upsert). Вызывается
+// только из точек, владеющих статусом: handleMyChatMember и
+// carryApprovalOnMigrate. Восстановление отклонённого чата — отдельный
+// условный путь (ReapproveChat), чтобы не воскресить мёртвый чат гонкой с
+// dropChat.
+func (d *DB) SetChatApproval(ctx context.Context, chatID int64, status string) error {
+	if status != ChatApproved && status != ChatPending && status != ChatRejected {
+		return fmt.Errorf("set chat approval: invalid status %q", status)
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chats (chat_id, approval_status, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET
+			approval_status = excluded.approval_status,
+			updated_at = excluded.updated_at
+	`, chatID, status, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("set chat approval: %w", err)
+	}
+	return nil
+}
+
+// ReapproveChat — страховочный повторный апрув отклонённого чата: переводит
+// его из rejected в approved ТОЛЬКО если строка ещё существует. Возвращает
+// false, когда чат не был rejected — например, строка уже удалена (бот всё же
+// вышел из чата после отклонения, dropChat). В отличие от SetChatApproval
+// (слепой upsert), ReapproveChat не может воскресить мёртвый чат гонкой с
+// dropChat: условный UPDATE по 0 строк ничего не создаёт.
+func (d *DB) ReapproveChat(ctx context.Context, chatID int64) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, `
+		UPDATE chats SET approval_status = ?, updated_at = ?
+		WHERE chat_id = ? AND approval_status = ?
+	`, ChatApproved, time.Now().Unix(), chatID, ChatRejected)
+	if err != nil {
+		return false, fmt.Errorf("reapprove chat: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("reapprove chat rows: %w", err)
+	}
+	return n == 1, nil
+}
+
+// ClaimChatApproval атомарно переводит чат из pending в status. Возвращает
+// true, только если переход сделал ИМЕННО этот вызывающий. Нужен, чтобы
+// первое нажатие кнопки владельца выигрывало гонку между владельцами
+// (telego обрабатывает callback'и параллельно): два владельца, жмущие «Да»
+// и «Нет» одновременно, не могут перезаписать друг друга.
+func (d *DB) ClaimChatApproval(ctx context.Context, chatID int64, status string) (bool, error) {
+	if status != ChatApproved && status != ChatRejected {
+		return false, fmt.Errorf("claim chat approval: invalid status %q", status)
+	}
+	res, err := d.sql.ExecContext(ctx, `
+		UPDATE chats SET approval_status = ?, updated_at = ?
+		WHERE chat_id = ? AND approval_status = ?
+	`, status, time.Now().Unix(), chatID, ChatPending)
+	if err != nil {
+		return false, fmt.Errorf("claim chat approval: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("claim chat approval rows: %w", err)
+	}
+	return n == 1, nil
 }
 
 // ChatSettings — строка пер-чатовых настроек. Nullable-поля означают

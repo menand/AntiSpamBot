@@ -12,17 +12,25 @@ import (
 // управлять: для OWNER_IDS — все, для остальных — только чаты, где юзер
 // админ/создатель. Проверки админства идут через 6-часовой кэш, поэтому
 // только первое открытие меню стоит не-владельцу N API-запросов при N
-// известных чатах.
+// известных чатах. Чаты, не подтверждённые владельцем (pending/rejected),
+// не показываем: решения по ним принимаются ЛС-вопросом, а меню/статистика
+// их засветили бы пустыми данными.
 func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, error) {
 	all, err := b.db.ListChats(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if b.isOwner(userID) {
-		return all, nil
-	}
-	out := make([]storage.ChatInfo, 0, len(all))
+	approved := make([]storage.ChatInfo, 0, len(all))
 	for _, c := range all {
+		if b.chatApproved(c.ChatID) {
+			approved = append(approved, c)
+		}
+	}
+	if b.isOwner(userID) {
+		return approved, nil
+	}
+	out := make([]storage.ChatInfo, 0, len(approved))
+	for _, c := range approved {
 		if b.isChatAdminCached(ctx, c.ChatID, userID) {
 			out = append(out, c)
 		}
