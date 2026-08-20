@@ -23,6 +23,8 @@ import (
 //	menu:add                — инструкция «как добавить меня в группу»
 //	menu:chats              — список чатов
 //	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,yesterday,daybefore,week,month,all}
+//	menu:leave:<chat>       — владелец: экран подтверждения выхода из чата
+//	menu:leavec:<chat>      — владелец: выход подтверждён, вывести бота из чата
 const (
 	cbMain  = "menu:main"
 	cbHelp  = "menu:help"
@@ -324,6 +326,37 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			b.log.Warn("set captcha mode", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
+	case "leave":
+		// «Выйти из чата» из настроек чата: только владелец, только после
+		// явного подтверждения (выход необратим без повторного добавления).
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		chatID, ok := menuChatID(parts)
+		if !ok {
+			return nil
+		}
+		text := fmt.Sprintf(
+			"🚪 Выйти из чата «%s»?\n\n"+
+				"Бот перестанет работать в нём: капчи, статистика, ИИ-антиспам и ежедневные сводки.\n"+
+				"Статистика за прошлое останется в архиве.",
+			html.EscapeString(b.chatTitle(ctx, chatID)))
+		kb := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
+			tu.InlineKeyboardButton("✅ Да, выйти").
+				WithCallbackData(fmt.Sprintf("menu:leavec:%d", chatID)),
+			tu.InlineKeyboardButton("⬅️ Отмена").
+				WithCallbackData(fmt.Sprintf("menu:settings:%d", chatID)),
+		}}}
+		return b.editWithMenu(ctx, query, text, kb)
+	case "leavec":
+		if !b.isOwner(query.From.ID) {
+			return nil
+		}
+		chatID, ok := menuChatID(parts)
+		if !ok {
+			return nil
+		}
+		return b.leaveChatByOwner(ctx, query, chatID)
 	}
 	return nil
 }
@@ -346,6 +379,81 @@ func (b *Bot) chatCallbackTarget(ctx *th.Context, query telego.CallbackQuery, pa
 		return 0, false
 	}
 	return chatID, true
+}
+
+// menuChatID достаёт chatID из "menu:<key>:<chatID>". Доступа НЕ проверяет —
+// вызывающая ветка решает сама: leave-ветки требуют isOwner (chatCallbackTarget
+// с его canManageChat пропустил бы и админа чата).
+func menuChatID(parts []string) (int64, bool) {
+	if len(parts) < 3 {
+		return 0, false
+	}
+	chatID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return chatID, true
+}
+
+// leaveChatByOwner — подтверждённый владельцем выход из чата (menu:leavec).
+// Сразу убирает кнопки с экрана подтверждения («Выхожу из чата…») — двойной
+// клик по «Да, выйти» защищён leaveInflight. Сам выход — в фоне через
+// leaveChatAndCleanup; результат приходит в то же ЛС-сообщение: успех —
+// «бот вышел», ошибка — текст с кнопкой «🔁 Повторить».
+func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chatID int64) error {
+	b.leaveMu.Lock()
+	if b.leaveInflight[chatID] {
+		b.leaveMu.Unlock()
+		return nil
+	}
+	b.leaveInflight[chatID] = true
+	b.leaveMu.Unlock()
+
+	title := html.EscapeString(b.chatTitle(ctx, chatID))
+	dmChat := query.Message.GetChat()
+	msgID := query.Message.GetMessageID()
+
+	if _, err := b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
+		ChatID:      tu.ID(dmChat.ID),
+		MessageID:   msgID,
+		Text:        "🚪 Выхожу из чата…",
+		ReplyMarkup: emptyKeyboard(),
+	}); err != nil && !isNotModified(err) {
+		b.log.Warn("edit leave pending", "err", err, "chat", chatID)
+	}
+
+	b.leaveChatAndCleanup(chatID, "owner requested leave", func(leaveErr error) {
+		defer func() {
+			b.leaveMu.Lock()
+			delete(b.leaveInflight, chatID)
+			b.leaveMu.Unlock()
+		}()
+		text := fmt.Sprintf("🚪 Бот вышел из чата «%s»", title)
+		kb := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
+			tu.InlineKeyboardButton("⬅️ Меню").WithCallbackData(cbMain),
+		}}}
+		if leaveErr != nil {
+			text = fmt.Sprintf("⚠️ Не получилось выйти из чата «%s»:\n<code>%s</code>",
+				title, html.EscapeString(leaveErr.Error()))
+			kb = &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{
+				{
+					tu.InlineKeyboardButton("🔁 Повторить").
+						WithCallbackData(fmt.Sprintf("menu:leavec:%d", chatID)),
+					tu.InlineKeyboardButton("⬅️ Меню").WithCallbackData(cbMain),
+				},
+			}}
+		}
+		if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
+			ChatID:      tu.ID(dmChat.ID),
+			MessageID:   msgID,
+			Text:        text,
+			ParseMode:   telego.ModeHTML,
+			ReplyMarkup: kb,
+		}); err != nil && !isNotModified(err) {
+			b.log.Warn("edit leave result", "err", err, "chat", chatID)
+		}
+	})
+	return nil
 }
 
 // toggleChatSetting — общее тело пер-чатовых тогглов настроек: read-modify-write.
@@ -508,6 +616,8 @@ func (b *Bot) addInstructionsText() string {
    ✅ Удалять сообщения
 5. У @BotFather выключи Privacy Mode для меня (иначе не увижу сообщения):
    <code>/mybots → @%s → Bot Settings → Group Privacy → Turn off</code>
+
+После добавления владелец бота подтвердит чат в ЛС — до этого я в нём не работаю.
 
 Готово! Следующий, кто зайдёт в чат, получит капчу.`, username, username)
 }
@@ -707,6 +817,14 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		rows = append(rows,
 			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"),
 			intPresetRow(chatID, "svm", spamMargin, []int{2, 3, 5}, " гол."))
+	}
+	// «Выйти из чата» — только владелец бота: админам кнопку не показываем
+	// (вывести бота из чата может лишь владелец, с подтверждением).
+	if b.isOwner(query.From.ID) {
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton("🚪 Выйти из чата").
+				WithCallbackData(fmt.Sprintf("menu:leave:%d", chatID)),
+		})
 	}
 	rows = append(rows, []telego.InlineKeyboardButton{
 		tu.InlineKeyboardButton("⬅️ К статистике").

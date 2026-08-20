@@ -51,6 +51,12 @@ func (b *Bot) maybeSendDigests(ctx context.Context) {
 		return
 	}
 	for _, chatID := range chatIDs {
+		// Сводка — пер-чатовая активность: только для подтверждённых чатов.
+		// Защита от призрачных рассылок, если chat_settings пережили уход
+		// бота (reject/kick) или запись отключения сводки при reject не прошла.
+		if !b.chatApproved(chatID) {
+			continue
+		}
 		b.sendDailyDigest(ctx, chatID, from, until)
 	}
 	b.maybeSendDMReports(ctx, now, from, until, today)

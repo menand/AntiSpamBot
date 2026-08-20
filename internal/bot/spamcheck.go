@@ -144,16 +144,18 @@ func (b *Bot) spamGatesPass(chatID, userID int64, s storage.ChatSettings) (total
 		return total, true
 	}
 	// Доверие кросс-чатовое: наговорил на белый список в ЛЮБОМ одном
-	// разрешённом чате бота — доверяем и здесь. Запрос только для новичков —
-	// старожилы уже отсеялись пер-чатовым гейтом выше. Фильтр chatAllowed не
-	// даёт нафармить доверие в постороннем чате (работает при ALLOWED_CHATS).
+	// разрешённом и подтверждённом чате бота — доверяем и здесь. Запрос только
+	// для новичков — старожилы уже отсеялись пер-чатовым гейтом выше. Фильтр
+	// chatAllowed не даёт нафармить доверие в постороннем чате (работает при
+	// ALLOWED_CHATS); chatApproved — в чате, который ждёт решения владельца
+	// (pending) и сообщений не накопил.
 	totals, err := b.db.UserMessageTotalsByChat(b.runCtx, userID)
 	if err != nil {
 		b.log.Warn("spam gates: totals by chat", "err", err, "user", userID)
 		return 0, true
 	}
 	for cid, n := range totals {
-		if n > wl && b.chatAllowed(cid) {
+		if n > wl && b.chatAllowed(cid) && b.chatApproved(cid) {
 			return total, true
 		}
 	}
@@ -801,7 +803,7 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 	var banned []string
 	for _, c := range chats {
 		if c.ChatID == originChatID || (c.Type != "group" && c.Type != "supergroup") ||
-			!b.chatAllowed(c.ChatID) {
+			!b.chatServiceable(c.ChatID) {
 			continue
 		}
 		if err := b.api.BanChatMember(b.runCtx, &telego.BanChatMemberParams{

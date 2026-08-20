@@ -176,14 +176,14 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 }
 
 // modPrologue — общие ворота всех админских команд в группе: тип чата,
-// chatAllowed, отсев чужих адресатов (/cmd@ДругойБот), доступ. Возвращает
+// chatServiceable, отсев чужих адресатов (/cmd@ДругойБот), доступ. Возвращает
 // ok=false, если команду надо проигнорировать или отказ уже отправлен.
 func (b *Bot) modPrologue(ctx *th.Context, message telego.Message) (int64, bool) {
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
 		return 0, false
 	}
 	chatID := message.Chat.ID
-	if !b.chatAllowed(chatID) || message.From == nil {
+	if !b.chatServiceable(chatID) || message.From == nil {
 		return 0, false
 	}
 	if !b.commandForUs(message.Text) {
@@ -247,7 +247,7 @@ func (b *Bot) handleGroupHelpCommand(_ *th.Context, message telego.Message) erro
 		return nil
 	}
 	chatID := message.Chat.ID
-	if !b.chatAllowed(chatID) || message.From == nil || !b.commandForUs(message.Text) {
+	if !b.chatServiceable(chatID) || message.From == nil || !b.commandForUs(message.Text) {
 		return nil
 	}
 	var recv int64
