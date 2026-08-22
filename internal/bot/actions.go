@@ -245,17 +245,20 @@ func (b *Bot) unban(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// ban банит юзера перманентно. Ретраится: это терминальное действие пути
-// провала капчи, после него бэкофф уже некому заморить.
-func (b *Bot) ban(ctx context.Context, chatID, userID int64) error {
-	err := retryTG(ctx, func() error {
+// banShort — перманентный бан на короткой лестнице: путь провала капчи и
+// реплай-чека живёт в 10-секундном cleanup-контексте, полный tgBackoffs
+// (7 c чистого сна плюс растяжки retry_after) там не помещается — обрыв
+// посреди лестницы означал бы вечный мьют без шанса на восстановление.
+// На 429 retryWith по-прежнему растягивает ожидание до retry_after.
+func (b *Bot) banShort(ctx context.Context, chatID, userID int64) error {
+	err := retryWith(ctx, kickUnbanBackoffs, func() error {
 		return b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
 			ChatID: tu.ID(chatID),
 			UserID: userID,
 		})
 	})
 	if err != nil {
-		return fmt.Errorf("ban after retries: %w", err)
+		return fmt.Errorf("ban (short ladder) after retries: %w", err)
 	}
 	return nil
 }

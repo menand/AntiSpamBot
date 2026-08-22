@@ -292,3 +292,144 @@ func TestMemberJoinedAt(t *testing.T) {
 		t.Fatalf("ts mismatch: got %v want %v", got, ts)
 	}
 }
+
+func TestPruneEvents(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	now := time.Now()
+	_ = db.RecordEvent(ctx, 1, 10, EventJoin, now.Add(-200*24*time.Hour), "")
+	_ = db.RecordEvent(ctx, 1, 10, EventPass, now.Add(-200*24*time.Hour), "")
+	_ = db.RecordEvent(ctx, 1, 11, EventJoin, now.Add(-10*24*time.Hour), "")
+	_ = db.RecordEvent(ctx, 1, 12, EventJoin, now, "")
+
+	n, err := db.PruneEvents(ctx, now.Add(-180*24*time.Hour), 1)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("pruned %d, want 2 (batch=1 forces several chunks)", n)
+	}
+	var left int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM events`).Scan(&left); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if left != 2 {
+		t.Fatalf("left %d rows, want 2 (fresh events survive)", left)
+	}
+}
+
+func TestDeletePendingIfMsg(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	exp := time.Now().Add(30 * time.Second).Truncate(time.Second)
+
+	if err := db.PutPending(ctx, PendingRow{ChatID: 1, UserID: 2, MessageID: 100, CorrectIdx: 1, ExpiresAt: exp}); err != nil {
+		t.Fatal(err)
+	}
+	// Чужой message_id — удаление обязано промахнуться (строка новой капчи).
+	if err := db.DeletePendingIfMsg(ctx, 1, 2, 999, 0); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_captchas`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("guarded delete must not remove a different captcha, left %d", n)
+	}
+	// Совпавший message_id удаляет.
+	if err := db.DeletePendingIfMsg(ctx, 1, 2, 100, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_captchas`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("matching delete must remove the row, left %d", n)
+	}
+}
+
+func TestDeletePendingReplyIf(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	exp := time.Now().Add(30 * time.Second).Truncate(time.Second)
+
+	if err := db.PutPendingReply(ctx, PendingReply{ChatID: 1, UserID: 2, ExpiresAt: exp}); err != nil {
+		t.Fatal(err)
+	}
+	// Чужой дедлайн (перевзведённое ожидание) — не трогаем.
+	if err := db.DeletePendingReplyIf(ctx, 1, 2, exp.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_replies`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("guarded delete must not remove a re-armed wait, left %d", n)
+	}
+	if err := db.DeletePendingReplyIf(ctx, 1, 2, exp); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_replies`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("matching delete must remove the row, left %d", n)
+	}
+}
+
+// TestPendingEphemeralRoundTripAndGuardedDelete — ephemeral_msg_id обязан
+// переживать round-trip (restorePending восстанавливает по нему удаление
+// эфемерки) и участвовать в guard-удалении наравне с обычным message_id.
+func TestPendingEphemeralRoundTripAndGuardedDelete(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	exp := time.Now().Add(30 * time.Second).Truncate(time.Second)
+	if err := db.PutPending(ctx, PendingRow{
+		ChatID: 1, UserID: 2, MessageID: 0, CorrectIdx: 1,
+		ExpiresAt: exp, EphemeralID: 55,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.LoadAllPending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].EphemeralID != 55 {
+		t.Fatalf("ephemeral_msg_id lost in roundtrip: %+v", rows)
+	}
+
+	var n int
+	count := func() {
+		if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_captchas`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Чужой обычный message_id эфемерную строку не трогает.
+	if err := db.DeletePendingIfMsg(ctx, 1, 2, 999, 0); err != nil {
+		t.Fatal(err)
+	}
+	count()
+	if n != 1 {
+		t.Fatalf("regular-id guard must keep ephemeral row, left %d", n)
+	}
+	// Чужой ephemeral id — тоже.
+	if err := db.DeletePendingIfMsg(ctx, 1, 2, 0, 56); err != nil {
+		t.Fatal(err)
+	}
+	count()
+	if n != 1 {
+		t.Fatalf("wrong ephemeral id must not delete the row, left %d", n)
+	}
+	// Свой ephemeral id удаляет.
+	if err := db.DeletePendingIfMsg(ctx, 1, 2, 0, 55); err != nil {
+		t.Fatal(err)
+	}
+	count()
+	if n != 0 {
+		t.Fatalf("matching ephemeral delete missed, left %d", n)
+	}
+}

@@ -96,17 +96,38 @@ func (d *DB) HasPendingVoteForAuthor(ctx context.Context, chatID, authorID int64
 	return true, nil
 }
 
-// UpsertBallot записывает голос; повторное нажатие того же юзера меняет голос.
-func (d *DB) UpsertBallot(ctx context.Context, chatID int64, botMsgID int, voterID int64, isSpam bool) error {
-	_, err := d.sql.ExecContext(ctx, `
+// UpsertBallot записывает голос; повторное нажатие того же юзера меняет
+// голос. Живость голосования перепроверяется В ТОЙ ЖЕ транзакции: клик,
+// заехавший в окне между чтением плашки и записью бюллетеня, иначе навсегда
+// осиротил бы строку (сирот никто не чистит) и получил бы ложное «Голос
+// учтён». ok=false — голосование уже закрыто.
+func (d *DB) UpsertBallot(ctx context.Context, chatID int64, botMsgID int, voterID int64, isSpam bool) (bool, error) {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("upsert ballot: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // откат после Commit — no-op
+	var one int
+	err = tx.QueryRowContext(ctx,
+		`SELECT 1 FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?`,
+		chatID, botMsgID).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("upsert ballot: vote check: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO spam_ballots (chat_id, bot_msg_id, voter_id, is_spam)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(chat_id, bot_msg_id, voter_id) DO UPDATE SET is_spam = excluded.is_spam
-	`, chatID, botMsgID, voterID, boolToInt(isSpam))
-	if err != nil {
-		return fmt.Errorf("upsert ballot: %w", err)
+	`, chatID, botMsgID, voterID, boolToInt(isSpam)); err != nil {
+		return false, fmt.Errorf("upsert ballot: %w", err)
 	}
-	return nil
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("upsert ballot: commit: %w", err)
+	}
+	return true, nil
 }
 
 func (d *DB) CountBallots(ctx context.Context, chatID int64, botMsgID int) (yes, no int, err error) {
@@ -118,6 +139,30 @@ func (d *DB) CountBallots(ctx context.Context, chatID int64, botMsgID int) (yes,
 		return 0, 0, fmt.Errorf("count ballots: %w", err)
 	}
 	return yes, no, nil
+}
+
+// YoungSpamVotes — живые голосования (не старше cutoff): для стартовой
+// реконсиляции кворума, набранного прямо перед крахом процесса.
+func (d *DB) YoungSpamVotes(ctx context.Context, cutoff time.Time) ([]SpamVote, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at
+		FROM spam_votes WHERE created_at >= ?
+	`, cutoff.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("young spam votes: %w", err)
+	}
+	defer rows.Close()
+	var out []SpamVote
+	for rows.Next() {
+		var v SpamVote
+		var at int64
+		if err := rows.Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID, &v.Prob, &at); err != nil {
+			return nil, fmt.Errorf("scan young vote: %w", err)
+		}
+		v.CreatedAt = time.Unix(at, 0)
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // ExpiredSpamVotes — голосования старше olderThan (для часового свипера:
@@ -471,21 +516,19 @@ func (d *DB) PutGreeting(ctx context.Context, chatID, userID int64, messageID in
 	return nil
 }
 
-// TakeGreetingMsg возвращает и удаляет запомненное приветствие юзера.
+// TakeGreetingMsg атомарно изымает запомненное приветствие юзера:
+// DELETE ... RETURNING делает SELECT+DELETE одной инструкцией — двойной
+// вызов (гонка /kick и спам-вердикта) больше не возвращает ok=true обоим.
 func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bool, error) {
 	var msgID int
 	err := d.sql.QueryRowContext(ctx,
-		`SELECT message_id FROM greetings WHERE chat_id = ? AND user_id = ?`,
+		`DELETE FROM greetings WHERE chat_id = ? AND user_id = ? RETURNING message_id`,
 		chatID, userID).Scan(&msgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	if err != nil {
 		return 0, false, fmt.Errorf("take greeting: %w", err)
-	}
-	if _, err := d.sql.ExecContext(ctx,
-		`DELETE FROM greetings WHERE chat_id = ? AND user_id = ?`, chatID, userID); err != nil {
-		return 0, false, fmt.Errorf("delete greeting row: %w", err)
 	}
 	return msgID, true, nil
 }
@@ -549,4 +592,25 @@ func (d *DB) PruneGreetings(ctx context.Context, olderThan time.Time) error {
 		return fmt.Errorf("prune greetings: %w", err)
 	}
 	return nil
+}
+
+// DeleteChatSpamVotes сносит все голосования и бюллетени чата. Вызывается,
+// когда бот покидает чат (dropChat): оставшаяся плашка жила бы до суточного
+// свипа, и золотой голос в мёртвом чате выдал бы глобальный бан. Транзакция —
+// как в TakeSpamVote: краш посреди двух DELETE не должен оставлять сирот.
+func (d *DB) DeleteChatSpamVotes(ctx context.Context, chatID int64) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete chat spam votes: begin: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // откат после успешного Commit — no-op
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_ballots WHERE chat_id = ?`, chatID); err != nil {
+		return fmt.Errorf("delete chat spam ballots: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM spam_votes WHERE chat_id = ?`, chatID); err != nil {
+		return fmt.Errorf("delete chat spam votes: %w", err)
+	}
+	return tx.Commit()
 }

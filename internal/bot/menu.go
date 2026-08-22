@@ -148,14 +148,14 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		// Экран настроек: читаем напрямую и прерываемся на ошибке, иначе
 		// покажем «стандартный» вместо реально сохранённого текста. Арм
-		// состояния — только после удачного чтения, чтобы не оставить
-		// взведённый ввод без отправленного промпта.
+		// состояния — только после удачных чтения И отправки промпта:
+		// упавшая отправка (429, сеть) оставила бы взведённый ввод без
+		// промпта, и следующее обычное ЛС админа молча стало бы шаблоном.
 		s, err := b.db.GetChatSettings(ctx, chatID)
 		if err != nil {
 			b.log.Warn("get chat settings", "err", err, "chat", chatID)
 			return nil
 		}
-		b.setGreetingInputPending(query.From.ID, chatID)
 		current := "стандартный"
 		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
 			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
@@ -167,8 +167,16 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 				"Запрос действует 15 минут.\n\n"+
 				"Текущий текст: %s",
 			html.EscapeString(b.chatTitle(ctx, chatID)), current)
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
-			WithParseMode(telego.ModeHTML))
+		if _, serr := b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
+			WithParseMode(telego.ModeHTML)); serr != nil {
+			b.log.Warn("send greeting input prompt", "err", serr, "chat", chatID)
+			// На query уже ответили в начале хендлера — второй Answer
+			// Telegram отбросил бы молча, поэтому объясняем сообщением.
+			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
+				"⚠️ Не получилось отправить запрос — попробуй ещё раз."))
+			return nil
+		}
+		b.setGreetingInputPending(query.From.ID, chatID)
 		return nil
 	case "max":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
@@ -252,14 +260,17 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !ok {
 			return nil
 		}
-		// Тоггл read-modify-write, как toggleChatSetting, но с гейтом по
-		// наличию LLM-ключа между чтением и записью — поэтому развёрнут.
+		// Тоггл read-modify-write, как toggleChatSetting (тот же мьютекс),
+		// но с гейтом по наличию LLM-ключа между чтением и записью.
+		b.toggleMu.Lock()
 		s, err := b.db.GetChatSettings(ctx, chatID)
 		if err != nil {
+			b.toggleMu.Unlock()
 			b.log.Warn("get chat settings", "err", err, "chat", chatID)
 			return nil
 		}
 		if !s.SpamCheckEnabled && !b.spamAIEnabled() {
+			b.toggleMu.Unlock()
 			// На query уже ответили в начале хендлера — второй Answer (алерт)
 			// Telegram отбросил бы молча, поэтому объясняем обычным
 			// сообщением: меню живёт в личке, оно ляжет прямо под ним.
@@ -270,6 +281,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
 			b.log.Warn("set spam_check_enabled", "err", err)
 		}
+		b.toggleMu.Unlock()
 		return b.renderChatSettings(ctx, query, chatID)
 	case "swl":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
@@ -339,7 +351,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		text := fmt.Sprintf(
 			"🚪 Выйти из чата «%s»?\n\n"+
 				"Бот перестанет работать в нём: капчи, статистика, ИИ-антиспам и ежедневные сводки.\n"+
-				"Статистика за прошлое останется в архиве.",
+				"Статистика за прошлые периоды останется в архиве.",
 			html.EscapeString(b.chatTitle(ctx, chatID)))
 		kb := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
 			tu.InlineKeyboardButton("✅ Да, выйти").
@@ -378,6 +390,12 @@ func (b *Bot) chatCallbackTarget(ctx *th.Context, query telego.CallbackQuery, pa
 	if !b.canManageChat(ctx, query.From.ID, chatID) {
 		return 0, false
 	}
+	// Не обслуживаемый чат (вне ALLOWED_CHATS / pending / rejected) кнопками
+	// не управляется: старые кнопки в ЛС переживают reject и кик бота, а
+	// настройки мёртвого чата активировались бы при его возврате.
+	if !b.chatServiceable(chatID) {
+		return 0, false
+	}
 	return chatID, true
 }
 
@@ -408,6 +426,17 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 	}
 	b.leaveInflight[chatID] = true
 	b.leaveMu.Unlock()
+	// Флаг обязан сняться при любом исходе: паника между взводом и запуском
+	// фоновой горутины иначе защёлкнула бы его до рестарта процесса, и
+	// кнопка выхода молча перестала бы работать.
+	launched := false
+	defer func() {
+		if !launched {
+			b.leaveMu.Lock()
+			delete(b.leaveInflight, chatID)
+			b.leaveMu.Unlock()
+		}
+	}()
 
 	title := html.EscapeString(b.chatTitle(ctx, chatID))
 	dmChat := query.Message.GetChat()
@@ -453,6 +482,7 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 			b.log.Warn("edit leave result", "err", err, "chat", chatID)
 		}
 	})
+	launched = true
 	return nil
 }
 
@@ -462,6 +492,10 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 // callbacks» из CLAUDE.md): начатый тоггл не должен теряться на shutdown.
 func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, chatID int64,
 	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string) error {
+	// Чтение+запись под общим мьютексом: параллельный даблклик иначе дважды
+	// прочёл бы одно значение и записал одну инверсию вместо двух.
+	b.toggleMu.Lock()
+	defer b.toggleMu.Unlock()
 	s, err := b.db.GetChatSettings(ctx, chatID)
 	if err != nil {
 		b.log.Warn("get chat settings", "err", err, "chat", chatID)
@@ -479,6 +513,10 @@ func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, cha
 // toggleChatSetting.
 func (b *Bot) toggleOwnerSetting(ctx *th.Context, query telego.CallbackQuery,
 	enabled func(context.Context, int64) (bool, error), set func(context.Context, int64, bool) error, what string) error {
+	// Тот же мьютекс, что у toggleChatSetting: параллельные клики по
+	// глобальным тогглам главного меню.
+	b.toggleMu.Lock()
+	defer b.toggleMu.Unlock()
 	on, err := enabled(ctx, query.From.ID)
 	if err != nil {
 		b.log.Warn("get "+what, "err", err, "user", query.From.ID)
@@ -604,7 +642,9 @@ const helpText = `📖 <b>Справка</b>
 func (b *Bot) addInstructionsText() string {
 	username := b.Username()
 	if username == "" {
-		username = "your_bot"
+		// GetMe ещё не отвечал (нормально только в тестах): нейтральная
+		// русская заглушка вместо английского your_bot.
+		username = "имя_бота"
 	}
 	return fmt.Sprintf(`➕ <b>Добавить меня в группу</b>
 
@@ -646,7 +686,7 @@ func chatsListView(chats []storage.ChatInfo, p statsPeriod, withBack bool) (stri
 	for _, c := range chats {
 		label := c.Title
 		if label == "" {
-			label = fmt.Sprintf("Chat %d", c.ChatID)
+			label = chatTitleFallback(c.ChatID)
 		}
 		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, p)
 		rows = append(rows, []telego.InlineKeyboardButton{
@@ -926,6 +966,12 @@ func periodButton(chatID int64, want, current statsPeriod, label string) telego.
 		WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, want))
 }
 
+// chatTitleFallback — «Чат <id>» для чата без названия (не в реестре / тайтл
+// не успели прочитать). Русский фолбэк во всех поверхностях.
+func chatTitleFallback(chatID int64) string {
+	return fmt.Sprintf("Чат %d", chatID)
+}
+
 // ctx — context.Context, а не *th.Context: хелпером пользуются и уведомления
 // антиспама на runCtx.
 func (b *Bot) chatTitle(ctx context.Context, chatID int64) string {
@@ -933,7 +979,7 @@ func (b *Bot) chatTitle(ctx context.Context, chatID int64) string {
 	if err == nil && ok {
 		return titleOrID(c)
 	}
-	return fmt.Sprintf("Chat %d", chatID)
+	return chatTitleFallback(chatID)
 }
 
 // lastStatsPeriod — период статистики, который юзер выбирал последним; нет
@@ -947,21 +993,21 @@ func (b *Bot) lastStatsPeriod(ctx context.Context, userID int64) statsPeriod {
 }
 
 // chatLink — chatTitle в виде HTML-ссылки на чат (chatLinkHTML); чата нет в
-// реестре — плоский «Chat <id>».
+// реестре — плоский «Чат <id>».
 func (b *Bot) chatLink(ctx context.Context, chatID int64) string {
 	c, ok, err := b.db.GetChat(ctx, chatID)
 	if err == nil && ok {
 		return chatLinkHTML(c)
 	}
-	return fmt.Sprintf("«Chat %d»", chatID)
+	return "«" + chatTitleFallback(chatID) + "»"
 }
 
-// titleOrID — «Название» или «Chat <id>», когда названия в реестре нет.
+// titleOrID — «Название» или «Чат <id>», когда названия в реестре нет.
 func titleOrID(c storage.ChatInfo) string {
 	if c.Title != "" {
 		return c.Title
 	}
-	return fmt.Sprintf("Chat %d", c.ChatID)
+	return chatTitleFallback(c.ChatID)
 }
 
 func (b *Bot) editWithMenu(ctx *th.Context, query telego.CallbackQuery, text string, kb *telego.InlineKeyboardMarkup) error {

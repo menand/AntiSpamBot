@@ -69,7 +69,9 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	if permanent {
 		kind = storage.EventBan
 	}
-	_ = b.db.RecordEvent(b.runCtx, chatID, targetID, kind, time.Now(), reason)
+	if err := b.db.RecordEvent(b.runCtx, chatID, targetID, kind, time.Now(), reason); err != nil {
+		b.log.Warn("record mod event", "err", err, "chat", chatID, "target", targetID)
+	}
 	b.cleanupTargetTraces(chatID, targetID)
 	// revoke обычно уже стирает исходное сообщение цели; ручное удаление —
 	// страховка на случай, если конкретно оно осталось (тот же приём, что и
@@ -162,13 +164,17 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	// фиксируем пасс здесь: капча уже позади, а невозможность ответить — не
 	// вина юзера (раньше этот пасс писался сразу на капче, поведение то же).
 	if b.cancelReplyWait(chatID, targetID) {
-		_ = b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), "")
+		if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (muted)", "err", err)
+		}
 	}
 	// Событие mute питает список «10 последних» команды /unmute (в воронку
 	// статистики не идёт). Наказательный минутный мьют punishNonAdmin сюда
 	// не пишется — это не админское решение о юзере.
-	_ = b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventMute, time.Now(),
-		storage.ReasonModPrefix+fmt.Sprintf("%d", message.From.ID))
+	if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventMute, time.Now(),
+		storage.ReasonModPrefix+fmt.Sprintf("%d", message.From.ID)); err != nil {
+		b.log.Warn("record mute event", "err", err)
+	}
 	b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
 	b.log.Info("mute command", "chat", chatID, "target", targetID,
 		"minutes", int(d.Minutes()), "by", message.From.ID)
@@ -194,13 +200,26 @@ func (b *Bot) modPrologue(ctx *th.Context, message telego.Message) (int64, bool)
 	if sc := message.SenderChat; sc != nil && sc.ID == chatID {
 		return chatID, true
 	}
-	allowed, sure := b.canManageChatVerified(ctx, message.From.ID, chatID)
-	if !allowed {
-		// Наказываем только по подтверждённому «не админ»: на ошибке
-		// getChatMember молча игнорируем — настоящий админ повторит команду.
-		if sure {
-			b.punishNonAdmin(ctx, message)
+	if b.isOwner(message.From.ID) {
+		return chatID, true
+	}
+	// Админство проверяем ЖИВО, мимо кэш-негатива: в чатах, где бот сам не
+	// админ, Telegram chat_member-события не доставляет, и свежепроизведённый
+	// админ сидел бы в негативном кэше все 10 минут TTL — а наказывать по
+	// устаревшему «не админ» нельзя. Ошибка живой проверки: команду разрешаем
+	// по кэшу (сетевой шторм не должен обезоруживать настоящего админа), но
+	// наказание допустимо только по свежему подтверждённому «не админ».
+	isAdmin, sure := b.isChatAdminFresh(ctx, chatID, message.From.ID)
+	if !sure {
+		if b.isChatAdminCached(ctx, chatID, message.From.ID) {
+			return chatID, true
 		}
+		// На ошибке getChatMember молча игнорируем — настоящий админ повторит
+		// команду.
+		return 0, false
+	}
+	if !isAdmin {
+		b.punishNonAdmin(ctx, message)
 		return 0, false
 	}
 	return chatID, true
@@ -418,10 +437,17 @@ func firstUsernameArg(text string) string {
 	return ""
 }
 
-// cleanupTargetTraces сносит наши сообщения о цели: приветствие и активную
-// плашку голосования. Чужие сообщения с упоминанием цели удалить нельзя —
-// Bot API не ищет по истории, а тексты мы не храним.
+// cleanupTargetTraces сносит наши сообщения о цели и гасит её активные
+// проверки: приветствие, плашку голосования, капчу и reply-wait. Капча нужна:
+// /kick по цели с активной капчей иначе дал бы таймауту право записать СВОЙ
+// kick/ban поверх только что записанного события команды (двойной счёт в
+// воронке). Reply-wait — по той же причине: waitTimeout кикнул бы за
+// «молчание» того, кого уже кикнули. Без событий — их пишет команда.
+// Чужие сообщения с упоминанием цели удалить нельзя — Bot API не ищет по
+// истории, а тексты мы не храним.
 func (b *Bot) cleanupTargetTraces(chatID, targetID int64) {
+	b.cancelCaptchaSilent(chatID, targetID)
+	b.cancelReplyWait(chatID, targetID)
 	if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, chatID, targetID); err == nil && ok {
 		if err := b.deleteMessage(b.runCtx, chatID, msgID); err != nil {
 			b.log.Debug("delete greeting of moderated user", "err", err, "chat", chatID)

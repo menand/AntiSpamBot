@@ -118,7 +118,9 @@ func periodLabel(p statsPeriod) string {
 	case periodDay:
 		return "сегодня"
 	case periodYesterday:
-		return "вчера"
+		// «За вчера» — просторечие; родительный падеж с предлогом «за»
+		// требует винительного: «за вчерашний день».
+		return "вчерашний день"
 	case periodDayBefore:
 		return "позавчера"
 	case periodMonth:

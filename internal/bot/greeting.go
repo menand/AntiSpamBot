@@ -33,14 +33,15 @@ type greetInputState struct {
 }
 
 // maybeSendGreeting шлёт приветствие (s передан вызывающим, чтобы не читать
-// настройки дважды). Взвод reply-ожидания — НЕ здесь: onSuccess делает его
-// сразу после release, до этого сетевого round-trip'а, иначе юзер успел бы
-// написать в окне release→arm и был бы кикнут за молчание, хотя ответил.
-func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) {
+// настройки дважды) и сообщает, ушло ли оно. Взвод reply-ожидания — НЕ здесь:
+// onSuccess делает это сразу после release, до этого сетевого round-trip'а,
+// иначе юзер успел бы написать в окне release→arm и был бы кикнут за
+// молчание, хотя ответил.
+func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) bool {
 	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
 	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
 	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
-		return
+		return true
 	}
 	infos, err := b.db.GetUserInfos(ctx, []int64{userID})
 	if err != nil {
@@ -56,16 +57,25 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, cha
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
 	}
-	sent, err := b.api.SendMessage(ctx, params)
-	if err != nil {
+	// Ретраится той же лестницей, что отправка капчи: 429 прилетает ровно во
+	// время масс-джойна, а при включённом reply-check провал здесь означает
+	// кик юзера за «молчание» — приветствие-якорь с требованием он никогда
+	// не видел.
+	var sent *telego.Message
+	if err = retryTG(ctx, func() error {
+		var e error
+		sent, e = b.api.SendMessage(ctx, params)
+		return e
+	}); err != nil || sent == nil {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
-		return
+		return false
 	}
 	// Помним id приветствия: при спам-бане юзера revoke стирает только его
 	// сообщения, «Добро пожаловать» бота сносим сами по этой записи.
 	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
 		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
+	return true
 }
 
 // renderGreeting собирает текст приветствия. Шаблон с сохранёнными
@@ -153,9 +163,11 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	text := strings.TrimSpace(message.Text)
 	switch {
 	case text == "":
-		// Медиа/стикер/пусто — продолжаем ждать настоящий текст.
-		b.setGreetingInputPending(message.From.ID, chatID)
+		// Медиа/стикер/пусто — продолжаем ждать настоящий текст. Перевзвод
+		// после отправки: упавшая подсказка не должна оставить взведённый
+		// ввод без промпта (следующее ЛС молча стало бы шаблоном).
 		reply("Нужно обычное текстовое сообщение. Пришли текст приветствия, «-» для сброса или /cancel для отмены.")
+		b.setGreetingInputPending(message.From.ID, chatID)
 		return nil
 	case strings.HasPrefix(text, "/"):
 		// Любая команда (включая /cancel) отменяет флоу ввода.
@@ -184,8 +196,8 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	}
 
 	if len([]rune(saved)) > maxGreetingRunes {
-		b.setGreetingInputPending(message.From.ID, chatID)
 		reply(fmt.Sprintf("Слишком длинно (больше %d символов). Сократи и пришли ещё раз.", maxGreetingRunes))
+		b.setGreetingInputPending(message.From.ID, chatID)
 		return nil
 	}
 

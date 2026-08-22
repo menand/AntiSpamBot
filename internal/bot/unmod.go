@@ -74,6 +74,12 @@ func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action
 
 	// Форма с целью: действие сразу, без плашки.
 	if targetID, _, found := b.resolveModTarget(message); found {
+		// Тот же гард, что у наказывающих команд: unban/unmute/whitelist —
+		// тоже действия над юзером, и целиться ими в админа/владельца/себя
+		// нельзя (release снял бы админу посторонние ограничения).
+		if !b.guardModTarget(ctx, message, targetID) {
+			return nil
+		}
 		if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
 			b.log.Debug("delete unmod command", "err", err, "chat", chatID)
 		}
@@ -183,7 +189,9 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		if _, err := b.db.DeleteSpamBanned(b.runCtx, targetID); err != nil {
 			b.log.Warn("unban: delete spam banned", "err", err, "user", targetID)
 		}
-		_ = b.db.ResetAttempts(b.runCtx, chatID, targetID)
+		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
+			b.log.Warn("unban: reset attempts", "err", err, "chat", chatID, "user", targetID)
+		}
 		return "♻️ " + mention + " разбанен — может зайти заново.", nil
 	case "m":
 		// Снятие мьюта = вернуть дефолтные права чата — ровно то, что release
@@ -201,7 +209,9 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
 			b.log.Warn("whitelist: unban", "err", err, "chat", chatID, "user", targetID)
 		}
-		_ = b.db.ResetAttempts(b.runCtx, chatID, targetID)
+		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
+			b.log.Warn("whitelist: reset attempts", "err", err, "chat", chatID, "user", targetID)
+		}
 		return "🤝 " + mention + " в доверенных — войдёт без капчи.", nil
 	}
 	return "", fmt.Errorf("unknown unmod action %q", action)
@@ -214,6 +224,13 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 		return nil
 	}
 	chatID := query.Message.GetChat().ID
+	// Мёртвый чат (отклонён/кикнут/вне ALLOWED_CHATS) кнопками не
+	// обслуживается — как и все остальные пути.
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Чат больше не обслуживается.").WithShowAlert())
+		return nil
+	}
 	if !b.canManageChat(ctx, query.From.ID, chatID) {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
 			WithText("Эти кнопки только для админов чата.").WithShowAlert())
@@ -229,6 +246,22 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 	action, targetID, ok := parseModChoice(query.Data)
 	if !ok {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	// Лёгкий гард цели без якоря-команды (кнопка): не бот, не сам нажавший,
+	// не админ/владелец. Отказ — тостом: реплаять не на что.
+	switch {
+	case b.me != nil && targetID == b.me.ID:
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Себя трогать не дам.").WithShowAlert())
+		return nil
+	case targetID == query.From.ID:
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Себя-то за что?").WithShowAlert())
+		return nil
+	case b.canManageChat(ctx, targetID, chatID):
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Это админ — не трону.").WithShowAlert())
 		return nil
 	}
 

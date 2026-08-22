@@ -18,6 +18,12 @@ import (
 // простыни длиннее не делают вердикт лучше.
 const profileBioLimit = 500
 
+// profileCheckCooldown — минимальный интервал между ИИ-чеками профиля одного
+// юзера. Чек срабатывает на каждом pass/approve; без кулдауна цикл
+// «вышел-зашёл» (или одобрения подельником-админом) жёг бы LLM-квоту на
+// каждый проход, а inflight дедупит только параллельные проверки.
+const profileCheckCooldown = time.Hour
+
 // maybeProfileCheck — хук в конце onSuccess: после капчи и приветствия
 // профиль новичка (имя/ник/bio/фото) оценивается LLM, и при подозрении в
 // чат вешается плашка «забанить?» на общей инфраструктуре голосования.
@@ -36,6 +42,18 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 	if _, skip := b.spamGatesPass(chatID, userID, s); skip {
 		return
 	}
+	// Перезаходной кулдаун (пер-юзер глобально: вопрос задаётся про
+	// человека, а не про пару чат+юзер). Штамп ставим вместе с захватом
+	// inflight-слота: если проверка не стартовала (слот занят), кулдаун
+	// не расходуем.
+	b.spamMu.Lock()
+	if last, seen := b.profileChecked[userID]; seen && time.Since(last) < profileCheckCooldown {
+		b.spamMu.Unlock()
+		b.log.Debug("profile check skipped: cooldown", "chat", chatID, "user", userID)
+		return
+	}
+	b.spamMu.Unlock()
+
 	// Общий inflight-ключ со спам-чеком сообщений: один вопрос «банить ли X»
 	// за раз.
 	k := chatUser{chatID, userID}
@@ -46,6 +64,7 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 		return
 	}
 	b.spamInflight[k] = struct{}{}
+	b.profileChecked[userID] = time.Now()
 	b.spamMu.Unlock()
 
 	b.goSafe("runProfileCheck", func() {
@@ -174,7 +193,7 @@ func buildProfileFacts(first, last, username, bio string, bioKnown bool, photos 
 
 func profileVoteText(mention string, yes, no, margin int) string {
 	return fmt.Sprintf(
-		"👤 %s вошёл в чат, но профиль выглядит подозрительно. Забанить?\n\n"+
+		"👤 %s вошёл(ла) в чат, но профиль выглядит подозрительно. Забанить?\n\n"+
 			"Голосуйте кнопками — перевес в %d %s решает. Голос админа решает сразу.\n\n"+
 			"🚫 Забанить: <b>%d</b> · ✅ Оставить: <b>%d</b>",
 		mention, margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)

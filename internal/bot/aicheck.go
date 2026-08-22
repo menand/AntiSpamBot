@@ -8,14 +8,17 @@ import (
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
+
+	"github.com/menand/AntiSpamBot/internal/groq"
 )
 
-// spamClassifier — общий срез API всех LLM-клиентов (groq, gemini, gigachat),
-// достаточный для диагностики. Все они удовлетворяют ему как есть.
-type spamClassifier interface {
+// llmClassifier — общий срез API всех LLM-клиентов (groq, gemini, gigachat):
+// единое объявление для цепочки фолбеков classifyVerdict и диагностики
+// aiCheck. Все клиенты удовлетворяют ему как есть (IsSpam — делегат Classify).
+type llmClassifier interface {
 	Enabled() bool
 	Model() string
-	IsSpam(ctx context.Context, facts string) (bool, error)
+	Classify(ctx context.Context, system, facts string) (bool, error)
 }
 
 // aiCheckFacts — безобидный фиксированный вход: реальный вызов проверяет всю
@@ -31,7 +34,7 @@ const aiCheckTimeout = 15 * time.Second
 func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 	providers := []struct {
 		name string
-		c    spamClassifier
+		c    llmClassifier
 	}{
 		{"groq", b.groqc},
 		{"gemini", b.gemic},
@@ -50,7 +53,7 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 			ctx, cancel := context.WithTimeout(b.runCtx, aiCheckTimeout)
 			defer cancel()
 			start := time.Now()
-			spam, err := p.c.IsSpam(ctx, aiCheckFacts)
+			spam, err := p.c.Classify(ctx, groq.SystemPrompt, aiCheckFacts)
 			lines[i] = formatProviderCheck(p.name, p.c.Model(), spam, time.Since(start), err)
 		})
 	}

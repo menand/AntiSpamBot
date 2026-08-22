@@ -266,10 +266,20 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 		b.log.Warn("disable daily stats on leave", "err", err, "chat", chatID)
 	}
 	b.goSafe("leaveChatAndCleanup", func() {
+		// onDone обязан прозвучать при любом исходе — включая панику посреди
+		// retryTG/dropChat: иначе защёлкнувшийся leaveInflight навсегда
+		// обезоружил бы кнопку выхода (см. leaveChatByOwner).
+		completed := false
+		defer func() {
+			if !completed && onDone != nil {
+				onDone(fmt.Errorf("leaveChatAndCleanup panicked"))
+			}
+		}()
 		if err := retryTG(b.runCtx, func() error {
 			return b.api.LeaveChat(b.runCtx, &telego.LeaveChatParams{ChatID: tu.ID(chatID)})
 		}); err != nil {
 			b.log.Warn("leave chat", "err", err, "chat", chatID, "why", why)
+			completed = true
 			if onDone != nil {
 				onDone(err)
 			}
@@ -278,6 +288,7 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 		// Событие my_chat_member(left) тоже вызовет dropChat; здесь чистим
 		// сразу, чтобы строка реестра не пережила выход.
 		b.dropChat(b.runCtx, chatID, why)
+		completed = true
 		if onDone != nil {
 			onDone(nil)
 		}
@@ -290,6 +301,12 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 	chatID := upd.Chat.ID
 	if err := b.db.SetChatApproval(b.runCtx, chatID, storage.ChatPending); err != nil {
 		b.log.Warn("mark chat pending", "err", err, "chat", chatID)
+		// Выходим, не создавая строку реестра: rememberChat записал бы чат с
+		// DEFAULT 'approved', и после рестарта (когда погаснет in-memory
+		// approvalCache) чужой чат стал бы обслуживаемым навсегда, минуя
+		// решение владельца. Без строки чат инертен, следующий my_chat_member
+		// повторит запрос.
+		return
 	}
 	b.setApprovalCache(chatID, false)
 	info := storage.ChatInfo{
@@ -303,7 +320,9 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 		"chat", chatID, "title", upd.Chat.Title, "added_by", upd.From.ID)
 
 	adderLabel := fmt.Sprintf("Кто добавил: %s (id%d)", mentionHTML(upd.From), upd.From.ID)
-	if !b.sendOwnerApprovalPrompt(b.runCtx, chatID, info, adderLabel) {
+	configured, delivered := b.sendOwnerApprovalPrompt(b.runCtx, chatID, info, adderLabel)
+	switch {
+	case !configured:
 		// OWNER_IDS пуст — владельцев нет, спрашивать не у кого; авто-апрув
 		// (прежнее поведение), иначе чат завис бы инертным навсегда.
 		b.log.Info("no owners configured, auto-approving chat", "chat", chatID)
@@ -313,14 +332,26 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 		}
 		b.setApprovalCache(chatID, true)
 		b.checkAdminRights(upd)
+	case !delivered:
+		// Владельцы настроены, но вопрос не доставлен никому (ни разу не
+		// запускали бота в ЛС / закрыли ЛС): честно скажем об этом в чате —
+		// иначе добавивший видит мёртвого бота без объяснений.
+		b.log.Warn("owner approval prompt undelivered — notifying chat", "chat", chatID)
+		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID),
+			"🤖 Бот ждёт подтверждения владельцем. Напишите ему в личку команду /start — "+
+				"он пришлёт туда вопрос об этом чате, и после подтверждения я начну работать.").
+			WithParseMode(telego.ModeHTML)); err != nil {
+			b.log.Warn("send pending hint to chat", "err", err, "chat", chatID)
+		}
 	}
 }
 
-// sendOwnerApprovalPrompt рассылает владельцам ЛС-вопрос о чате. Возвращает
-// false, когда владельцев не настроено (вопрос некому отправить).
-func (b *Bot) sendOwnerApprovalPrompt(ctx context.Context, chatID int64, info storage.ChatInfo, adderLine string) bool {
+// sendOwnerApprovalPrompt рассылает владельцам ЛС-вопрос о чате.
+// configured=false — владельцев не настроено (вопрос некому отправить);
+// delivered — доставился ли вопрос хотя бы одному владельцу.
+func (b *Bot) sendOwnerApprovalPrompt(ctx context.Context, chatID int64, info storage.ChatInfo, adderLine string) (configured, delivered bool) {
 	if len(b.cfg.OwnerIDs) == 0 {
-		return false
+		return false, false
 	}
 	text := fmt.Sprintf(
 		"🤖 <b>Бота добавили в новый чат</b>\n%s\n%s\n\nРаботать боту в этом чате?",
@@ -332,9 +363,11 @@ func (b *Bot) sendOwnerApprovalPrompt(ctx context.Context, chatID int64, info st
 			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true}).
 			WithReplyMarkup(kb)); err != nil {
 			b.log.Warn("send approval request", "err", err, "owner", ownerID, "chat", chatID)
+			continue
 		}
+		delivered = true
 	}
-	return true
+	return true, delivered
 }
 
 func approvalKeyboard(chatID int64) *telego.InlineKeyboardMarkup {
@@ -389,7 +422,7 @@ func (b *Bot) carryApprovalOnMigrate(ctx context.Context, oldID, newID int64) {
 	if status == storage.ChatPending {
 		// Кнопки старого вопроса указывают на мёртвый oldID — переспрашиваем
 		// с новым. Без владельцев — авто-апрув, как при обычном добавлении.
-		if !b.sendOwnerApprovalPrompt(ctx, newID, info, "чат перенесён в новую супергруппу") {
+		if configured, _ := b.sendOwnerApprovalPrompt(ctx, newID, info, "чат перенесён в новую супергруппу"); !configured {
 			if err := b.db.SetChatApproval(ctx, newID, storage.ChatApproved); err != nil {
 				b.log.Warn("auto-approve migrated chat", "err", err, "chat", newID)
 				return

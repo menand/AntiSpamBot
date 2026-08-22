@@ -122,6 +122,26 @@ func (b *Bot) invalidateAdminCache(chatID, userID int64) {
 	b.adminMu.Unlock()
 }
 
+// isChatAdminFresh — живая проверка админства мимо кэша, с обновлением кэша
+// её результатом. Нужна там, где устаревший позитвный ответ кэша опасен
+// (золотой голос): в чатах, где бот сам не админ, chat_member не доставляется
+// и разжалованный админ сидел бы в кэше все 6 часов TTL. Ошибка API —
+// (false, false), вызывающий решает, на что откатываться.
+func (b *Bot) isChatAdminFresh(ctx context.Context, chatID, userID int64) (isAdmin, sure bool) {
+	isAdmin, err := b.isChatAdmin(ctx, chatID, userID)
+	if err != nil {
+		return false, false
+	}
+	ttl := adminCacheTTL
+	if !isAdmin {
+		ttl = adminCacheNegTTL
+	}
+	b.adminMu.Lock()
+	b.adminCache[chatUser{chatID, userID}] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(ttl)}
+	b.adminMu.Unlock()
+	return isAdmin, true
+}
+
 // spamAIEnabled — доступен ли хоть один LLM-провайдер для спам-анализа.
 func (b *Bot) spamAIEnabled() bool {
 	return b.groqc.Enabled() || b.gemic.Enabled() || b.gigac.Enabled()
@@ -164,7 +184,12 @@ func (b *Bot) spamGatesPass(chatID, userID int64, s storage.ChatSettings) (total
 	}
 	// Одна плашка на автора: при вердикте «спам» banRevoke снесёт все его
 	// сообщения, флагать каждое нет смысла.
-	if pending, err := b.db.HasPendingVoteForAuthor(b.runCtx, chatID, userID); err != nil || pending {
+	pending, err := b.db.HasPendingVoteForAuthor(b.runCtx, chatID, userID)
+	if err != nil {
+		b.log.Warn("spam gates: pending vote", "err", err, "chat", chatID, "user", userID)
+		return total, true
+	}
+	if pending {
 		return total, true
 	}
 	return total, false
@@ -384,14 +409,6 @@ func (b *Bot) classifySpam(ctx context.Context, chatID, userID int64, facts stri
 	return b.classifyVerdict(ctx, groq.SystemPrompt, facts, chatID, userID)
 }
 
-// llmClassifier — общий срез API всех LLM-клиентов (groq, gemini, gigachat),
-// достаточный для цепочки фолбеков classifyVerdict.
-type llmClassifier interface {
-	Enabled() bool
-	Model() string
-	Classify(ctx context.Context, system, facts string) (bool, error)
-}
-
 // aiProvider — одна позиция цепочки ИИ-провайдеров.
 type aiProvider struct {
 	name string
@@ -573,10 +590,30 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	if query.Message == nil {
 		return nil
 	}
-	isSpamVote := query.Data == "sv:1"
+	// Строгий парсер: форматтер эмитит ровно sv:0/sv:1; всё остальное —
+	// чужой или битый payload и голосом не считается.
+	var isSpamVote bool
+	switch query.Data {
+	case "sv:1":
+		isSpamVote = true
+	case "sv:0":
+		isSpamVote = false
+	default:
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
 	chatID := query.Message.GetChat().ID
 	botMsgID := query.Message.GetMessageID()
 	voter := query.From.ID
+
+	// Мёртвый чат (отклонён владельцем, бот кикнут, чат вне ALLOWED_CHATS)
+	// вердиктов не выносит: оставшаяся плашка живёт до суточного свипа, а
+	// золотой голос привёл бы к глобальному бану через banEverywhere.
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Голосование уже закрыто."))
+		return nil
+	}
 
 	v, found, err := b.db.GetSpamVote(b.runCtx, chatID, botMsgID)
 	if err != nil {
@@ -606,13 +643,31 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		voteWord = "спам"
 	}
 
-	// Золотой голос: админ или владелец бота решает единолично.
-	if b.isOwner(voter) || b.isChatAdminCached(b.runCtx, chatID, voter) {
-		_ = b.api.AnswerCallbackQuery(ctx,
-			tu.CallbackQuery(query.ID).WithText("Решено голосом админа."))
+	// Золотой голос: админ или владелец бота решает единолично. Админство
+	// проверяем ЖИВО, мимо позитивного кэша: разжалованный админ в чате без
+	// наших прав не выпадает из 6-часового кэша (chat_member не приходит),
+	// а здесь его голос банит глобально. Ошибка живой проверки — откат на
+	// кэш, чтобы сетевой шторм не обезоруживал настоящих админов.
+	golden := b.isOwner(voter)
+	if !golden {
+		isAdmin, sure := b.isChatAdminFresh(b.runCtx, chatID, voter)
+		if !sure {
+			isAdmin = b.isChatAdminCached(b.runCtx, chatID, voter)
+		}
+		golden = isAdmin
+	}
+	if golden {
 		b.log.Info("spam vote ballot", "chat", chatID, "bot_msg", botMsgID,
 			"voter", userLabel(query.From), "vote", voteWord, "golden", true)
-		b.resolveSpamVote(v, isSpamVote, "админ "+userLabel(query.From))
+		// Тост ПОСЛЕ разрешения гонки TakeSpamVote: проигравшему параллельному
+		// админу честное «уже закрыто», а не ложное «решено».
+		taken := b.resolveSpamVote(v, isSpamVote, "админ "+userLabel(query.From))
+		toast := "Решено голосом админа."
+		if !taken {
+			toast = "Голосование уже закрыто."
+		}
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText(toast))
 		return nil
 	}
 
@@ -640,8 +695,16 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		return nil
 	}
 
-	if err := b.db.UpsertBallot(b.runCtx, chatID, botMsgID, voter, isSpamVote); err != nil {
+	ok, err := b.db.UpsertBallot(b.runCtx, chatID, botMsgID, voter, isSpamVote)
+	if err != nil {
 		b.log.Warn("upsert ballot", "err", err, "chat", chatID)
+		return nil
+	}
+	if !ok {
+		// Голосование закрылось в окне между чтением плашки и записью:
+		// сироту-бюллетень не создаём, юзеру честное «закрыто».
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Голосование уже закрыто."))
 		return nil
 	}
 	yes, no, err := b.db.CountBallots(b.runCtx, chatID, botMsgID)
@@ -723,7 +786,9 @@ func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 
 // resolveSpamVote исполняет вердикт. TakeSpamVote атомарен: первый вызвавший
 // исполняет, проигравшие гонку выходят молча — двойной бан/удаление исключены.
-func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
+// Возвращает, достался ли этому вызывавшему исполнять вердикт: тост «Решено»
+// честен только для победителя гонки.
+func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	// Подписчики уведомлений и бюллетени — до Take: он удаляет бюллетени в
 	// своей транзакции. Бюллетени нужны всегда: причина события (vote:<ids>)
 	// пишется в статистику по голосам «за». Проигравший гонку прочитает зря —
@@ -736,19 +801,26 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 	taken, err := b.db.TakeSpamVote(b.runCtx, v.ChatID, v.BotMsgID)
 	if err != nil {
 		b.log.Warn("take spam vote", "err", err, "chat", v.ChatID)
-		return
+		return false
 	}
 	if !taken {
-		return
+		return false
 	}
 	if spam {
+		// Цель могла быть в середине капчи или reply-wait: гасим ДО записи
+		// события, чтобы таймауты не добавили свой kick/noreply поверх
+		// spamban (двойной счёт в воронке).
+		b.cancelCaptchaSilent(v.ChatID, v.AuthorID)
+		b.cancelReplyWait(v.ChatID, v.AuthorID)
 		if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
 			// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
 			// событие spamban не пишем и его приветствие не трогаем.
 			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
 		} else {
-			_ = b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
-				time.Now(), voteReason(ballots))
+			if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
+				time.Now(), voteReason(ballots)); err != nil {
+				b.log.Warn("record spamban event", "err", err, "chat", v.ChatID, "user", v.AuthorID)
+			}
 			// Приветствие бота для этого юзера revoke не трогает — сносим сами.
 			if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
 				if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
@@ -787,6 +859,7 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) {
 			b.notifySpamVerdict(targets, v, spam, why, ballots, alsoBanned)
 		})
 	}
+	return true
 }
 
 // banEverywhere банит юзера во всех группах бота, кроме исходной. Возвращает
@@ -806,6 +879,17 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 			!b.chatServiceable(c.ChatID) {
 			continue
 		}
+		// Пер-чатовое доверие (/whitelist) сильнее глобальной базы: админ,
+		// впустивший юзера в свой чат без капчи, не ожидает его бана там по
+		// чужому вердикту — join-хук соблюдает тот же приоритет. Ошибка
+		// чтения тоже пропускает чат: наказывать нельзя, пока доверие
+		// не опровергнуто (зеркало fail-safe ветки onUserJoined).
+		if trusted, terr := b.db.IsTrusted(b.runCtx, c.ChatID, userID); terr != nil || trusted {
+			if terr != nil {
+				b.log.Warn("ban everywhere: trust check", "err", terr, "chat", c.ChatID)
+			}
+			continue
+		}
 		if err := b.api.BanChatMember(b.runCtx, &telego.BanChatMemberParams{
 			ChatID:         tu.ID(c.ChatID),
 			UserID:         userID,
@@ -821,33 +905,50 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 	return banned
 }
 
-// spamVoteSweepLoop закрывает голосования без кворума: раз в час (и сразу на
-// старте — рестарт мог проспать дедлайны) снимает плашки старше spamVoteTTL.
-func (b *Bot) spamVoteSweepLoop(ctx context.Context) {
-	sweep := func() {
-		// Заодно чистим устаревшие записи приветствий: сообщения старше 48 ч
-		// Telegram боту удалять не даёт, их id бесполезны.
-		if err := b.db.PruneGreetings(ctx, time.Now().Add(-48*time.Hour)); err != nil {
-			b.log.Warn("prune greetings", "err", err)
+// reconcileSpamVotes — одноразово на старте: пересчитываем бюллетени живых
+// голосований. Кворум, набранный прямо перед крахом (бюллетень записан,
+// пересчёт не успел), иначе дожил бы до суточного свипа и был бы смыт как
+// «истёк без кворума» — при том, что сообщество решение приняло. Только на
+// старте: на каждом тике он гонял бы пересчёт наперегонки с живым голосованием.
+func (b *Bot) reconcileSpamVotes(ctx context.Context) {
+	active, err := b.db.YoungSpamVotes(ctx, time.Now().Add(-spamVoteTTL))
+	if err != nil {
+		b.log.Warn("reconcile spam votes", "err", err)
+		return
+	}
+	for _, v := range active {
+		// Мёртвый чат вердиктов не исполняет — тот же гейт, что у sv:-колбэков:
+		// иначе реконсиляция на старте отменила бы фикс 986b872, исполняя
+		// banRevoke + banEverywhere из чата, отклонённого/покинутого офлайн.
+		// Строку не оставляем — свипер снял бы её только через сутки.
+		if !b.chatServiceable(v.ChatID) {
+			if _, err := b.db.TakeSpamVote(ctx, v.ChatID, v.BotMsgID); err != nil {
+				b.log.Warn("reconcile: drop vote of unserviceable chat", "err", err, "chat", v.ChatID)
+			}
+			continue
 		}
-		expired, err := b.db.ExpiredSpamVotes(ctx, time.Now().Add(-spamVoteTTL))
+		yes, no, err := b.db.CountBallots(ctx, v.ChatID, v.BotMsgID)
 		if err != nil {
-			b.log.Warn("expired spam votes", "err", err)
-			return
+			b.log.Warn("reconcile spam votes: count", "err", err, "chat", v.ChatID)
+			continue
 		}
-		for _, v := range expired {
-			taken, err := b.db.TakeSpamVote(ctx, v.ChatID, v.BotMsgID)
-			if err != nil || !taken {
-				continue
-			}
-			if err := b.deleteMessage(ctx, v.ChatID, v.BotMsgID); err != nil {
-				b.log.Warn("delete expired spam vote message", "err", err, "chat", v.ChatID)
-			}
-			b.log.Info("spam vote expired without quorum",
-				"chat", v.ChatID, "user", v.AuthorID)
+		margin := effectiveSpamVoteMargin(b.chatSettings(ctx, v.ChatID))
+		if verdict, decided := voteVerdict(yes, no, margin); decided {
+			b.log.Info("quorum reached before restart — executing verdict",
+				"chat", v.ChatID, "bot_msg", v.BotMsgID, "tally", fmt.Sprintf("%d:%d", yes, no))
+			b.resolveSpamVote(v, verdict, fmt.Sprintf("голоса %d:%d", yes, no))
 		}
 	}
-	sweep()
+}
+
+// spamVoteSweepLoop закрывает голосования без кворума: раз в час снимает
+// плашки старше spamVoteTTL. Немедленного свипа на старте нет сознательно:
+// он выигрывал бы гонку у reconcileChats (два локальных чтения SQLite против
+// сетевого GetChatMember на каждый чат), читал бы ещё не сверенную строку
+// реестра как approved и исполнял вердикт мёртвого чата глобально — стартовый
+// свип делает reconcile-горутина ПОСЛЕ reconcileChats/reconcileSpamVotes
+// (см. Run).
+func (b *Bot) spamVoteSweepLoop(ctx context.Context) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -855,7 +956,52 @@ func (b *Bot) spamVoteSweepLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sweep()
+			b.sweepExpiredVotes(ctx)
 		}
+	}
+}
+
+// sweepExpiredVotes — один проход свипа: чистка устаревших приветствий и
+// закрытие голосований без кворума старше spamVoteTTL.
+func (b *Bot) sweepExpiredVotes(ctx context.Context) {
+	// Заодно чистим устаревшие записи приветствий: сообщения старше 48 ч
+	// Telegram боту удалять не даёт, их id бесполезны.
+	if err := b.db.PruneGreetings(ctx, time.Now().Add(-48*time.Hour)); err != nil {
+		b.log.Warn("prune greetings", "err", err)
+	}
+	expired, err := b.db.ExpiredSpamVotes(ctx, time.Now().Add(-spamVoteTTL))
+	if err != nil {
+		b.log.Warn("expired spam votes", "err", err)
+		return
+	}
+	for _, v := range expired {
+		// Последний шанс кворума: резолв мог не состояться и БЕЗ
+		// рестарта — упавший CountBallots или паника хендлера между
+		// бюллетенем и пересчётом оставляли набранный кворум в таблице,
+		// и свип сметал его как «истёкший». Мёртвый чат вердиктов не
+		// исполняет — его голосования просто снимаются ниже.
+		if b.chatServiceable(v.ChatID) {
+			if yes, no, cerr := b.db.CountBallots(ctx, v.ChatID, v.BotMsgID); cerr == nil {
+				margin := effectiveSpamVoteMargin(b.chatSettings(ctx, v.ChatID))
+				if verdict, decided := voteVerdict(yes, no, margin); decided {
+					b.log.Info("expired vote has a reached quorum — executing",
+						"chat", v.ChatID, "bot_msg", v.BotMsgID,
+						"tally", fmt.Sprintf("%d:%d", yes, no))
+					b.resolveSpamVote(v, verdict, fmt.Sprintf("голоса %d:%d", yes, no))
+					continue
+				}
+			} else {
+				b.log.Warn("spam vote sweep: count ballots", "err", cerr, "chat", v.ChatID)
+			}
+		}
+		taken, err := b.db.TakeSpamVote(ctx, v.ChatID, v.BotMsgID)
+		if err != nil || !taken {
+			continue
+		}
+		if err := b.deleteMessage(ctx, v.ChatID, v.BotMsgID); err != nil {
+			b.log.Warn("delete expired spam vote message", "err", err, "chat", v.ChatID)
+		}
+		b.log.Info("spam vote expired without quorum",
+			"chat", v.ChatID, "user", v.AuthorID)
 	}
 }

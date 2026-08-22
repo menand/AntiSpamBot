@@ -61,31 +61,67 @@ is_quarantined() {
 
 short_id() { echo "${1:7:12}"; }
 
-# DM владельцам из OWNER_IDS; best-effort, токен не логируется.
+# DM владельцам из OWNER_IDS. Возвращает успех, если хотя бы одна отправка
+# прошла (curl без ошибок) — notify_once держит маркер только при успехе.
+# Токен не логируется.
 notify_owners() {
-    local token msg owner
-    token="$(parse_env BOT_TOKEN)" || return 0
-    [ -z "$token" ] && return 0
+    local token msg owner sent=0
+    token="$(parse_env BOT_TOKEN)" || return 1
+    [ -z "$token" ] && return 1
     msg="$1"
     for owner in $(parse_env OWNER_IDS | tr ',' ' '); do
         [ -z "$owner" ] && continue
-        curl -s --max-time 10 -o /dev/null \
+        if curl -s --max-time 10 -o /dev/null \
             "https://api.telegram.org/bot${token}/sendMessage" \
             --data-urlencode "chat_id=${owner}" \
-            --data-urlencode "text=${msg}" || true
+            --data-urlencode "text=${msg}"; then
+            sent=1
+        fi
     done
+    [ "$sent" -eq 1 ]
+}
+
+# notify_once <kind> <msg> — то же, но не чаще раза в сутки на kind: минутный
+# cron при застарелой проблеме (разошедшееся репо, вечный провал pull) иначе
+# захламил бы ЛС владельцев. Маркер пишется ТОЛЬКО после удачной отправки —
+# иначе один сетевой сбой подавил бы алерт на сутки.
+NOTIFY_STATE="/var/lib/antispam/notify-state"
+notify_once() {
+    local kind="$1" msg="$2" today
+    today="$(date +%F)"
+    mkdir -p "$(dirname "$NOTIFY_STATE")" 2>/dev/null || true
+    if [ -f "$NOTIFY_STATE" ] && grep -qxF "${kind}:${today}" "$NOTIFY_STATE" 2>/dev/null; then
+        return 0
+    fi
+    if notify_owners "$msg"; then
+        echo "${kind}:${today}" >> "$NOTIFY_STATE" 2>/dev/null || true
+    fi
 }
 
 # Тихо подтягиваем репо (скрипт/compose); --tags — чтобы git describe на
-# сервере совпадал с релизными тегами.
+# сервере совпадал с релизными тегами. Расхождение репо (локальный хотфикс,
+# правка compose руками) раньше убивало весь скрипт через set -e ДО всякой
+# логики деплоя — и каждый следующий тик умирал там же молча. Теперь: раз в
+# сутки владельцам уходит сигнал, тик завершается с ошибкой в лог.
 git fetch --quiet --tags origin main || true
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-    git merge --ff-only --quiet origin/main
+    if ! git merge --ff-only --quiet origin/main; then
+        echo "!!! $(date -Is) git merge --ff-only failed (repo diverged); deploy skipped"
+        notify_once "merge" "⚠️ Автодеплой стоит: репо на сервере разошлось с origin/main. Нужен ручной git stash/reset на ВДС." || true
+        exit 1
+    fi
 fi
 
 before=$(docker inspect --format '{{.Image}}' menand-antispam 2>/dev/null || true)
-# pull молчит в логе: иначе ~2 строки/минуту вечного шума.
-docker compose pull -q bot >/dev/null 2>&1 || true
+# pull молчит в логе при успехе, но провал теперь различим: заглушенный
+# «|| true» превращал вечный сбой pull (токен, DNS, диск) в тихое «нечего
+# деплоить» — бот не обновлялся бы вообще без единого сигнала.
+pull_failed=0
+pull_out="$(docker compose pull --quiet bot 2>&1)" || pull_failed=1
+if [ "$pull_failed" -eq 1 ]; then
+    echo "!!! $(date -Is) docker compose pull failed: ${pull_out:0:300}"
+    notify_once "pull" "⚠️ Автодеплой: docker compose pull падает — ${pull_out:0:200}. Бот не обновляется." || true
+fi
 after=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
 
 # Нечего деплоить (или CI ещё не дособрал образ) — молчим, лог не растёт.
@@ -112,10 +148,17 @@ if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null 
     SMOKE_FAIL="container not running"
 else
     r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-    sleep 5
-    r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-    if [ "$r1" != "$r2" ]; then
-        SMOKE_FAIL="restart count grew ($r1 -> $r2)"
+    # 25 секунд, а не 5: образ, падающий на t≈20s (первый LLM-вызов, первая
+    # миграция), раньше проскакивал мимо smoke — а следующий тик видел
+    # неизменный image ID и молчал вечно.
+    sleep 25
+    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
+        SMOKE_FAIL="container died within smoke window"
+    else
+        r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
+        if [ "$r1" != "$r2" ]; then
+            SMOKE_FAIL="restart count grew ($r1 -> $r2)"
+        fi
     fi
 fi
 

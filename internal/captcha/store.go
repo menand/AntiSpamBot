@@ -108,6 +108,16 @@ func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
 	return s.inflight[k]
 }
 
+// Get подсматривает активную капчу, не изымая её. Нужен, чтобы проверить
+// идентичность сообщения клика ДО Take: клик по устаревшей клавиатуре не
+// должен разрешать живую капчу.
+func (s *Store) Get(chatID, userID int64) (*Pending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.items[capKey{chatID, userID}]
+	return p, ok
+}
+
 func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -117,6 +127,24 @@ func (s *Store) Take(chatID, userID int64) (*Pending, bool) {
 		delete(s.items, k)
 	}
 	return p, ok
+}
+
+// TakeMatch изымает капчу только при подтверждённой match идентичности
+// (клик по той же клавиатуре) — проверка под тем же мьютом, что и изъятие.
+// Пара Get+Take этим закрытием не является: между ними могла улечься новая
+// капча того же юзера, и клик по старой клавиатуре решил бы её исход.
+// Не совпало (или пусто) — store не трогается, ok=false; разницу между
+// «устаревший клик» и «капчи нет» вызывающий различит через Get.
+func (s *Store) TakeMatch(chatID, userID int64, match func(p *Pending) bool) (*Pending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := capKey{chatID, userID}
+	p, ok := s.items[k]
+	if !ok || !match(p) {
+		return nil, false
+	}
+	delete(s.items, k)
+	return p, true
 }
 
 // TakeChat изымает и возвращает все ожидающие капчи чата. Используется, когда

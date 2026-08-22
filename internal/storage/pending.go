@@ -43,6 +43,22 @@ func (d *DB) DeletePending(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
+// DeletePendingIfMsg удаляет капчу, только если она всё ещё та же самая
+// (совпадают message_id и ephemeral_msg_id). Отложенная очистка из
+// завершившегося флоу не должна стереть строку НОВОЙ капчи того же юзера,
+// успевшей взвестись, пока старый флоу доезжал (например, ретраи release
+// под 429 растянулись на секунды).
+func (d *DB) DeletePendingIfMsg(ctx context.Context, chatID, userID int64, msgID, ephID int) error {
+	_, err := d.sql.ExecContext(ctx,
+		`DELETE FROM pending_captchas WHERE chat_id = ? AND user_id = ?
+		 AND message_id = ? AND ephemeral_msg_id = ?`,
+		chatID, userID, msgID, ephID)
+	if err != nil {
+		return fmt.Errorf("delete pending (guarded): %w", err)
+	}
+	return nil
+}
+
 // DeletePendingChat удаляет все активные капчи чата. Вызывается, когда бот
 // покидает чат (или его выгоняют) — сообщения капч там уже недоступны, и
 // таймауты порождали бы только падающие вызовы kick/ban.
@@ -75,12 +91,14 @@ func (d *DB) PutPendingReply(ctx context.Context, r PendingReply) error {
 	return nil
 }
 
-func (d *DB) DeletePendingReply(ctx context.Context, chatID, userID int64) error {
+// DeletePendingReplyIf — тот же guard, что у DeletePendingIfMsg: очистка
+// по дедлайну, чтобы хвост старого ожидания не стёр строку перевзведённого.
+func (d *DB) DeletePendingReplyIf(ctx context.Context, chatID, userID int64, expiresAt time.Time) error {
 	_, err := d.sql.ExecContext(ctx,
-		`DELETE FROM pending_replies WHERE chat_id = ? AND user_id = ?`,
-		chatID, userID)
+		`DELETE FROM pending_replies WHERE chat_id = ? AND user_id = ? AND expires_at = ?`,
+		chatID, userID, expiresAt.Unix())
 	if err != nil {
-		return fmt.Errorf("delete pending reply: %w", err)
+		return fmt.Errorf("delete pending reply (guarded): %w", err)
 	}
 	return nil
 }

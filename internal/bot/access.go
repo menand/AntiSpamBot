@@ -20,17 +20,19 @@ func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, 
 	if err != nil {
 		return nil, err
 	}
-	approved := make([]storage.ChatInfo, 0, len(all))
+	serviceable := make([]storage.ChatInfo, 0, len(all))
 	for _, c := range all {
-		if b.chatApproved(c.ChatID) {
-			approved = append(approved, c)
+		// Тот же гейт, что у кнопок меню: чат вне ALLOWED_CHATS не должен
+		// висеть в списке с мёртвыми кнопками и попадать в отчёты.
+		if b.chatServiceable(c.ChatID) {
+			serviceable = append(serviceable, c)
 		}
 	}
 	if b.isOwner(userID) {
-		return approved, nil
+		return serviceable, nil
 	}
-	out := make([]storage.ChatInfo, 0, len(approved))
-	for _, c := range approved {
+	out := make([]storage.ChatInfo, 0, len(serviceable))
+	for _, c := range serviceable {
 		if b.isChatAdminCached(ctx, c.ChatID, userID) {
 			out = append(out, c)
 		}
@@ -46,16 +48,6 @@ func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, 
 // принят для золотого голоса в спам-голосовании.
 func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
 	return b.isOwner(userID) || b.isChatAdminCached(ctx, chatID, userID)
-}
-
-// canManageChatVerified — canManageChat, отличающий подтверждённое «не
-// админ» (sure=true) от неизвестности из-за ошибки getChatMember (sure=false).
-// Модкоманды наказывают самозванцев только при sure — см. modPrologue.
-func (b *Bot) canManageChatVerified(ctx context.Context, userID, chatID int64) (allowed, sure bool) {
-	if b.isOwner(userID) {
-		return true, true
-	}
-	return b.isChatAdminVerified(ctx, chatID, userID)
 }
 
 // chatSettings загружает пер-чатовые настройки для РЕЗОЛВИНГА (параметры

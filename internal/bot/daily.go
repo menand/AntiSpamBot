@@ -51,10 +51,11 @@ func (b *Bot) maybeSendDigests(ctx context.Context) {
 		return
 	}
 	for _, chatID := range chatIDs {
-		// Сводка — пер-чатовая активность: только для подтверждённых чатов.
-		// Защита от призрачных рассылок, если chat_settings пережили уход
-		// бота (reject/kick) или запись отключения сводки при reject не прошла.
-		if !b.chatApproved(chatID) {
+		// Сводка — пер-чатовая активность: только для обслуживаемых чатов
+		// (ALLOWED_CHATS + подтверждён владельцем). Защита от призрачных
+		// рассылок, если chat_settings пережили уход бота или запись
+		// отключения сводки при reject не прошла.
+		if !b.chatServiceable(chatID) {
 			continue
 		}
 		b.sendDailyDigest(ctx, chatID, from, until)
@@ -131,7 +132,9 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 		var apiErr *telegoapi.Error
 		if errors.As(err, &apiErr) && apiErr.ErrorCode == 403 {
 			b.log.Info("dm report: user blocked bot, unsubscribing", "user", userID)
-			_ = b.db.SetDailyReport(ctx, userID, false)
+			if err := b.db.SetDailyReport(ctx, userID, false); err != nil {
+				b.log.Warn("dm report: unsubscribe", "err", err, "user", userID)
+			}
 			return
 		}
 		// Прочие ошибки — не помечаем: ретрай на следующем тике до конца дня
@@ -147,12 +150,18 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 
 // reportLine — однострочная сводка чата для ЛС-отчёта: только счётчики, без
 // имён и топов («без излишних деталей»). Бан = обычные + спам-вердикты.
+// Пустота — как в digestHasContent: день с сообщениями, но без событий
+// воронки не называется «без событий».
 func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	c.Title = truncateLabel(titleOrID(c), 60) // рун-безопасно; простыня в названии чата не съест бюджет отчёта
 	link := chatLinkHTML(c)
 	banned := s.Banned + s.SpamBanned
-	if s.Joined+s.Passed+s.Kicked+s.Left+banned == 0 {
+	msgs := s.MsgNewcomer + s.MsgOldtimer
+	switch {
+	case s.Joined+s.Passed+s.Kicked+s.Left+banned+msgs == 0:
 		return fmt.Sprintf("%s — без событий", link)
+	case s.Joined+s.Passed+s.Kicked+s.Left+banned == 0:
+		return fmt.Sprintf("%s — сообщений: %d, событий воронки нет", link, msgs)
 	}
 	line := fmt.Sprintf("%s — вступило %d, прошло %d, вышли сами %d, кик %d, бан %d",
 		link, s.Joined, s.Passed, s.Left, s.Kicked, banned)
@@ -168,7 +177,14 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 // день дважды, если 5-минутный тик пересекал полночь). Маркер отправки —
 // день `until`: полночь МСК принадлежит наступившим суткам.
 func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until time.Time) {
+	// In-process дедуп: сводка за этот день уже уходила в текущем процессе.
+	b.digestMu.Lock()
+	sent := b.digestSent[chatID]
+	b.digestMu.Unlock()
 	today := storage.DayOf(until)
+	if sent == today {
+		return
+	}
 
 	s, err := b.db.QueryStats(ctx, chatID, from, until)
 	if err != nil {
@@ -196,7 +212,12 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 	// Нечего рассказывать — чат затих, не спамим пустой сводкой.
 	if !digestHasContent(s, topWriters, topFailers, newMembers, banned) {
 		// Но помечаем отправленной, чтобы не перепроверять десятки раз за день.
-		_ = b.db.MarkDailyStatsSent(ctx, chatID, today)
+		if err := b.db.MarkDailyStatsSent(ctx, chatID, today); err != nil {
+			b.log.Warn("daily digest: mark sent (empty)", "err", err, "chat", chatID)
+		}
+		b.digestMu.Lock()
+		b.digestSent[chatID] = today
+		b.digestMu.Unlock()
 		return
 	}
 
@@ -208,7 +229,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 	}
 
 	header := "🌅 <b>Сводка за сутки</b>\n\n"
-	body := renderStats(periodYesterday, "вчера", s, b.cfg.NewcomerDays,
+	body := renderStats(periodYesterday, "вчерашний день", s, b.cfg.NewcomerDays,
 		newMembers, topWriters, topFailers, banned, infos)
 
 	_, err = b.api.SendMessage(ctx,
@@ -223,6 +244,12 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 	if err := b.db.MarkDailyStatsSent(ctx, chatID, today); err != nil {
 		b.log.Warn("daily digest: mark sent", "err", err, "chat", chatID)
 	}
+	// In-process маркер поверх БД: если запись маркера упала после успешной
+	// отправки, следующий тик (5 мин) без него разослал бы тот же дайджест
+	// заново — до полуночи. БД остаётся авторитетом между рестартами.
+	b.digestMu.Lock()
+	b.digestSent[chatID] = today
+	b.digestMu.Unlock()
 	b.log.Info("daily digest sent",
 		"chat", chatID,
 		"messages", s.MsgNewcomer+s.MsgOldtimer,

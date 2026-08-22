@@ -92,3 +92,26 @@ func (d *DB) SweepAttempts(ctx context.Context, ttl time.Duration) error {
 	}
 	return nil
 }
+
+// PruneEvents удаляет события старше cutoff порциями не больше batch — одна
+// инструкция не должна подолгу держать единственное соединение. Возвращает
+// число удалённых строк. Вызывается из полусуточного sweeper'а.
+func (d *DB) PruneEvents(ctx context.Context, cutoff time.Time, batch int64) (int64, error) {
+	var total int64
+	for {
+		res, err := d.sql.ExecContext(ctx,
+			`DELETE FROM events WHERE id IN (SELECT id FROM events WHERE at < ? ORDER BY at LIMIT ?)`,
+			cutoff.Unix(), batch)
+		if err != nil {
+			return total, fmt.Errorf("prune events: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, fmt.Errorf("prune events: rows affected: %w", err)
+		}
+		total += n
+		if n < batch {
+			return total, nil
+		}
+	}
+}

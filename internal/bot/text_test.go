@@ -140,7 +140,7 @@ func TestChatLinkHTML(t *testing.T) {
 		{"title escaped", storage.ChatInfo{ChatID: -12345, Title: "A<b>&"},
 			"«A&lt;b&gt;&amp;»"},
 		{"no title", storage.ChatInfo{ChatID: -12345},
-			"«Chat -12345»"},
+			"«Чат -12345»"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
