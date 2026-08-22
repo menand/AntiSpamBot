@@ -732,42 +732,17 @@ func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error
 
 func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatID int64, p statsPeriod) error {
 	from, until := statsRange(p, time.Now())
-	s, err := b.db.QueryStats(ctx, chatID, from, until)
+	v, err := b.loadStatsView(ctx, chatID, from, until)
 	if err != nil {
 		b.log.Warn("query stats (menu)", "err", err)
 		return nil
-	}
-	topWriters, err := b.db.TopWriters(ctx, chatID, from, until, 5)
-	if err != nil {
-		b.log.Warn("top writers (menu)", "err", err)
-	}
-	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
-	topFailers, err := b.db.TopFailers(ctx, chatID, from, until, -1)
-	if err != nil {
-		b.log.Warn("top failers (menu)", "err", err)
-	}
-	newMembers, err := b.db.PassedUsers(ctx, chatID, from, until)
-	if err != nil {
-		b.log.Warn("passed users (menu)", "err", err)
-	}
-	banned, err := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
-	if err != nil {
-		b.log.Warn("banned users (menu)", "err", err)
-	}
-	infos, err := b.db.GetUserInfos(ctx,
-		collectUserIDs(topWriters, topFailers, newMembers, banned))
-	if err != nil {
-		b.log.Warn("user infos (menu)", "err", err)
-	}
-	if infos == nil {
-		infos = map[int64]storage.UserInfo{}
 	}
 
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf("<b>%s</b>\n\n%s",
 		html.EscapeString(title),
-		renderStats(p, periodLabel(p), s, b.cfg.NewcomerDays,
-			newMembers, topWriters, topFailers, banned, infos))
+		renderStats(p, periodLabel(p), v.s, b.cfg.NewcomerDays,
+			v.newMembers, v.topWriters, v.topFailers, v.banned, v.infos))
 
 	rows := [][]telego.InlineKeyboardButton{
 		{

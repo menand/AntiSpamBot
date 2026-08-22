@@ -126,6 +126,31 @@ func TestQueryStatsExcludesUntilDay(t *testing.T) {
 	}
 }
 
+func TestQueryStatsSplitsModReasons(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	now := time.Now()
+
+	// Воронка капчи.
+	_ = db.RecordEvent(ctx, 1, 10, EventKick, now, "captcha")
+	_ = db.RecordEvent(ctx, 1, 11, EventBan, now, "noreply")
+	// Команды админов поверх старожилов: в Kicked/Banned воронки не идут,
+	// иначе «% от Joined» считал бы бан старожила провалом новичка.
+	_ = db.RecordEvent(ctx, 1, 12, EventKick, now, ReasonModPrefix+"42")
+	_ = db.RecordEvent(ctx, 1, 13, EventBan, now, ReasonModPrefix+"43")
+
+	s, err := db.QueryStats(ctx, 1, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Kicked != 1 || s.Banned != 1 {
+		t.Errorf("funnel kicked=%d banned=%d, want 1/1 (mod reasons excluded)", s.Kicked, s.Banned)
+	}
+	if s.ModKicked != 1 || s.ModBanned != 1 {
+		t.Errorf("mod kicked=%d banned=%d, want 1/1", s.ModKicked, s.ModBanned)
+	}
+}
+
 func TestAttempts(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

@@ -130,8 +130,10 @@ func (d *DB) IncMessage(ctx context.Context, chatID int64, when time.Time, newco
 type Stats struct {
 	Joined      int
 	Passed      int
-	Kicked      int
-	Banned      int
+	Kicked      int // воронка капчи: БЕЗ командных киков (mod:<id>)
+	Banned      int // воронка капчи: БЕЗ командных банов (mod:<id>)
+	ModKicked   int // /kick командой админа — вне воронки, см. renderStats
+	ModBanned   int // /ban командой админа — аналогично
 	SpamBanned  int // баны ИИ-антиспама; отдельно от воронки капчи
 	Left        int // вышли сами посреди капчи (ни пасс, ни кик)
 	Aborted     int // капча сорвалась по вине инфраструктуры (не «вышли сами»)
@@ -144,8 +146,15 @@ type Stats struct {
 func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time) (Stats, error) {
 	s := Stats{PeriodFrom: from, PeriodUntil: until}
 
+	// Командные события (/kick|/ban, reason = mod:<id>) считаются в
+	// ModKicked/ModBanned и из воронки Kicked/Banned исключены: блок в
+	// renderStats делит их на «Новых участников», и бан старожила командой
+	// рендерился как «Забанены: N (100%)» у новичков. Списки юзеров
+	// (TopFailers/EventUsers) причины не фильтруют — там видно всё.
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT kind, COUNT(*) FROM events
+		SELECT kind, COUNT(*),
+		       COALESCE(SUM(CASE WHEN reason LIKE 'mod:%' THEN 1 ELSE 0 END), 0)
+		FROM events
 		WHERE chat_id = ? AND at >= ? AND at < ?
 		GROUP BY kind
 	`, chatID, from.Unix(), until.Unix())
@@ -154,8 +163,8 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 	}
 	for rows.Next() {
 		var kind string
-		var n int
-		if err := rows.Scan(&kind, &n); err != nil {
+		var n, modN int
+		if err := rows.Scan(&kind, &n, &modN); err != nil {
 			rows.Close()
 			return s, fmt.Errorf("scan event: %w", err)
 		}
@@ -165,9 +174,11 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 		case EventPass:
 			s.Passed = n
 		case EventKick:
-			s.Kicked = n
+			s.ModKicked = modN
+			s.Kicked = n - modN
 		case EventBan:
-			s.Banned = n
+			s.ModBanned = modN
+			s.Banned = n - modN
 		case EventSpamBan:
 			s.SpamBanned = n
 		case EventLeft:

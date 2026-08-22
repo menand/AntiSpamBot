@@ -45,6 +45,51 @@ func collectUserIDs(lists ...[]storage.UserCount) []int64 {
 	return out
 }
 
+// statsView — всё, что нужно отрисовке статистики за период: и меню
+// (renderChatStats), и дайджест (sendDailyDigest) питаются из одной загрузки,
+// чтобы новый блок не приходилось добавлять в два места.
+type statsView struct {
+	s                      storage.Stats
+	topWriters, topFailers []storage.UserCount
+	newMembers, banned     []storage.UserCount
+	infos                  map[int64]storage.UserInfo
+}
+
+// loadStatsView грузит счётчики, списки и имена одним куском. Ошибка
+// QueryStats возвращается вызывающему (оба прерывают отрисовку); ошибки
+// остальных запросов лишь логируются — блоки с пустыми списками лучше
+// частичной статистики. renderStats сам режет длину, поэтому лимит топов
+// тот же, что был у обоих вызывающих: 5 писателей, все фейлеры (-1).
+func (b *Bot) loadStatsView(ctx context.Context, chatID int64, from, until time.Time) (statsView, error) {
+	v := statsView{infos: map[int64]storage.UserInfo{}}
+
+	s, err := b.db.QueryStats(ctx, chatID, from, until)
+	if err != nil {
+		return v, fmt.Errorf("query stats: %w", err)
+	}
+	v.s = s
+
+	if v.topWriters, err = b.db.TopWriters(ctx, chatID, from, until, 5); err != nil {
+		b.log.Warn("stats view: top writers", "err", err, "chat", chatID)
+	}
+	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
+	if v.topFailers, err = b.db.TopFailers(ctx, chatID, from, until, -1); err != nil {
+		b.log.Warn("stats view: top failers", "err", err, "chat", chatID)
+	}
+	if v.newMembers, err = b.db.PassedUsers(ctx, chatID, from, until); err != nil {
+		b.log.Warn("stats view: passed users", "err", err, "chat", chatID)
+	}
+	if v.banned, err = b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan); err != nil {
+		b.log.Warn("stats view: banned users", "err", err, "chat", chatID)
+	}
+	if v.infos, err = b.db.GetUserInfos(ctx,
+		collectUserIDs(v.topWriters, v.topFailers, v.newMembers, v.banned)); err != nil {
+		b.log.Warn("stats view: user infos", "err", err, "chat", chatID)
+		v.infos = map[int64]storage.UserInfo{}
+	}
+	return v, nil
+}
+
 func (b *Bot) isChatAdmin(ctx context.Context, chatID, userID int64) (bool, error) {
 	m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(chatID),
@@ -189,7 +234,11 @@ func renderStats(
 			// в чате и был выпущен без капчи.
 			fmt.Fprintf(&sb, "• Не удалось проверить: %d\n", s.Aborted)
 		}
-		pending := s.Joined - s.Passed - s.Kicked - s.Banned - s.Left - s.Aborted
+		// Командные кики/баны тоже вычитаются: новичок, командой убранный в
+		// том же окне, не должен остаться «в процессе». Перевычитка (команда
+		// по старожилу) даёт отрицательное — гасится условием pending > 0.
+		pending := s.Joined - s.Passed - s.Kicked - s.Banned -
+			s.ModKicked - s.ModBanned - s.Left - s.Aborted
 		if pending > 0 {
 			fmt.Fprintf(&sb, "• В процессе: %d\n", pending)
 		}
@@ -198,6 +247,12 @@ func renderStats(
 	// строкой и без процента от Joined.
 	if s.SpamBanned > 0 {
 		fmt.Fprintf(&sb, "🤖 <b>Забанено ИИ-антиспамом:</b> %d\n", s.SpamBanned)
+	}
+	// Команды админов (/kick /ban) — тоже вне воронки: их жертва чаще всего
+	// не из «новых участников» окна, процент от Joined был бы ложью.
+	if s.ModKicked > 0 || s.ModBanned > 0 {
+		fmt.Fprintf(&sb, "🛡 <b>Командами админов:</b> кикнуто %d, забанено %d\n",
+			s.ModKicked, s.ModBanned)
 	}
 
 	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
