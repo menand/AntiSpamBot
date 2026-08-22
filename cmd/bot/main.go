@@ -55,6 +55,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Второй сигнал — принудительный выход: зависший bh.Stop()/db.Close()
+	// иначе держал бы процесс вечно (вне Docker его некому добить по таймауту).
+	// Единственный в процессе голый go: тело не может запаниковать (только
+	// чтения канала и os.Exit), а b.goSafe недоступен — Bot ещё не создан.
+	force := make(chan os.Signal, 1)
+	signal.Notify(force, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-force // первый сигнал расходится и в NotifyContext
+		<-force
+		os.Exit(130)
+	}()
+
 	log.Info("starting bot", "username", b.Username())
 	if err := b.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("bot run", "err", err)

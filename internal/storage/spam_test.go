@@ -31,11 +31,13 @@ func TestSpamVoteLifecycle(t *testing.T) {
 		t.Fatal("author 43 has no vote")
 	}
 
-	// Голоса: upsert + переголосование.
-	_ = db.UpsertBallot(ctx, -1, 100, 7, true)
-	_ = db.UpsertBallot(ctx, -1, 100, 8, true)
-	_ = db.UpsertBallot(ctx, -1, 100, 9, false)
-	_ = db.UpsertBallot(ctx, -1, 100, 9, true) // передумал
+	// Голоса: upsert + переголосование. Все — при живом голосовании.
+	if ok, err := db.UpsertBallot(ctx, -1, 100, 7, true); err != nil || !ok {
+		t.Fatalf("ballot on live vote: ok=%v err=%v", ok, err)
+	}
+	_, _ = db.UpsertBallot(ctx, -1, 100, 8, true)
+	_, _ = db.UpsertBallot(ctx, -1, 100, 9, false)
+	_, _ = db.UpsertBallot(ctx, -1, 100, 9, true) // передумал
 	yes, no, err := db.CountBallots(ctx, -1, 100)
 	if err != nil || yes != 3 || no != 0 {
 		t.Fatalf("want 3:0 after re-vote, got %d:%d err=%v", yes, no, err)
@@ -135,8 +137,8 @@ func TestListBallots(t *testing.T) {
 
 	v := SpamVote{ChatID: -1, BotMsgID: 100, TargetMsgID: 99, AuthorID: 42, Prob: 95, CreatedAt: time.Now()}
 	_ = db.PutSpamVote(ctx, v)
-	_ = db.UpsertBallot(ctx, -1, 100, 7, true)
-	_ = db.UpsertBallot(ctx, -1, 100, 8, false)
+	_, _ = db.UpsertBallot(ctx, -1, 100, 7, true)
+	_, _ = db.UpsertBallot(ctx, -1, 100, 8, false)
 
 	ballots, err := db.ListBallots(ctx, -1, 100)
 	if err != nil || len(ballots) != 2 {
@@ -346,5 +348,53 @@ func TestVersionNotify(t *testing.T) {
 	_ = db.SetVersionNotify(ctx, 1, true)
 	if outs, _ := db.VersionNotifyOptOuts(ctx); len(outs) != 0 {
 		t.Fatalf("after re-enable opt-outs = %v, want empty", outs)
+	}
+}
+
+func TestUpsertBallotOnClosedVote(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	// Голосование не создавалось: бюллетень-сироту не пишем, ok=false.
+	ok, err := db.UpsertBallot(ctx, -5, 77, 9, true)
+	if err != nil {
+		t.Fatalf("upsert on missing vote: %v", err)
+	}
+	if ok {
+		t.Fatal("ballot on closed vote must be rejected")
+	}
+	yes, no, err := db.CountBallots(ctx, -5, 77)
+	if err != nil || yes != 0 || no != 0 {
+		t.Fatalf("no orphan ballots expected, got %d:%d err=%v", yes, no, err)
+	}
+
+	// Живое голосование принимает бюллетень, закрытое — больше нет.
+	if err := db.PutSpamVote(ctx, SpamVote{ChatID: -5, BotMsgID: 78, AuthorID: 42, Prob: 100, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := db.UpsertBallot(ctx, -5, 78, 9, true); err != nil || !ok {
+		t.Fatalf("ballot on live vote: ok=%v err=%v", ok, err)
+	}
+	taken, err := db.TakeSpamVote(ctx, -5, 78)
+	if err != nil || !taken {
+		t.Fatalf("take: %v %v", taken, err)
+	}
+	if ok, _ := db.UpsertBallot(ctx, -5, 78, 9, false); ok {
+		t.Fatal("ballot after take must be rejected")
+	}
+}
+
+func TestYoungSpamVotes(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	now := time.Now()
+	_ = db.PutSpamVote(ctx, SpamVote{ChatID: -1, BotMsgID: 1, AuthorID: 42, Prob: 100, CreatedAt: now})
+	_ = db.PutSpamVote(ctx, SpamVote{ChatID: -1, BotMsgID: 2, AuthorID: 43, Prob: 100, CreatedAt: now.Add(-25 * time.Hour)})
+
+	young, err := db.YoungSpamVotes(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("young: %v", err)
+	}
+	if len(young) != 1 || young[0].BotMsgID != 1 {
+		t.Fatalf("want only the fresh vote, got %+v", young)
 	}
 }

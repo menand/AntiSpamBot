@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/mymmrac/telego"
+
+	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/mymmrac/telego/telegoapi"
 )
 
@@ -94,5 +96,27 @@ func TestPickedVsCorrect(t *testing.T) {
 				t.Errorf("pickedVsCorrect() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestStaleCaptchaClick(t *testing.T) {
+	live := &captcha.Pending{MessageID: 100, EphemeralID: 0}
+	if staleCaptchaClick(live, &telego.Message{MessageID: 100}) {
+		t.Fatal("same message id must not be stale")
+	}
+	if !staleCaptchaClick(live, &telego.Message{MessageID: 200}) {
+		t.Fatal("different message id must be stale")
+	}
+	// Эфемерная капча: обычные message_id нулевые, сравнивается ephemeral id.
+	eph := &captcha.Pending{MessageID: 0, EphemeralID: 55}
+	if staleCaptchaClick(eph, &telego.Message{EphemeralMessageID: 55}) {
+		t.Fatal("matching ephemeral id must not be stale")
+	}
+	if !staleCaptchaClick(eph, &telego.Message{EphemeralMessageID: 56}) {
+		t.Fatal("different ephemeral id must be stale")
+	}
+	// Недоступное сообщение (nil) проверке не поддаётся — не stale.
+	if staleCaptchaClick(live, nil) || staleCaptchaClick(nil, &telego.Message{}) {
+		t.Fatal("nil inputs must not be treated as stale")
 	}
 }

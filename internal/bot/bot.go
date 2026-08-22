@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +25,16 @@ import (
 )
 
 const attemptsTTL = 24 * time.Hour
+
+// eventRetentionDays — сколько дней хранить события воронки: таблица events
+// до сих пор росла вечно, а единственное соединение SQLite делало каждый
+// digest-запрос медленнее. 180 дней с запасом покрывают все окна статистики
+// (день/неделя/месяц) и списки «10 последних» модкоманд.
+const eventRetentionDays = 180
+
+// eventPruneBatch — порция одного DELETE при подрезке: одна инструкция не
+// должна подолгу держать единственное соединение.
+const eventPruneBatch = 5000
 
 type Bot struct {
 	api   *telego.Bot
@@ -65,8 +78,23 @@ type Bot struct {
 	// бесконечными правками одного сообщения жечь LLM-квоту. Unbounded по
 	// тому же соглашению, что userCache (запись ~40 байт на активного юзера).
 	editChecked map[chatUser]time.Time
-	adminMu     sync.Mutex
-	adminCache  map[chatUser]adminCacheEntry
+	// profileChecked — время последнего ИИ-чека ПРОФИЛЯ по юзеру (глобально,
+	// не per-chat): чек срабатывает на каждом pass/approve, и цикл
+	// «вышел-зашёл» без кулдауна жёг бы LLM-квоту на каждый проход.
+	// Unbounded по тому же соглашению, что editChecked.
+	profileChecked map[int64]time.Time
+	// digestSent — in-process маркер «сводка за today уже ушла в чат»:
+	// страховка от видимого дубля, если запись маркера в БД упала после
+	// успешной отправки. Авторитетен между рестартами всё равно
+	// last_daily_stats_day.
+	digestMu   sync.Mutex
+	digestSent map[int64]string
+	// toggleMu сериализует read-modify-write тогглов настроек: telego
+	// обрабатывает колбэки параллельно, и даблклик без него дважды читал бы
+	// одно значение, записывая одну инверсию вместо двух.
+	toggleMu   sync.Mutex
+	adminMu    sync.Mutex
+	adminCache map[chatUser]adminCacheEntry
 
 	// Кэш статуса подтверждения чатов (chats.approval_status): частые чтения
 	// на каждом групповом сообщении (гейт chatServiceable), редкие записи
@@ -98,23 +126,25 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		version = "dev"
 	}
 	return &Bot{
-		api:           api,
-		cfg:           cfg,
-		store:         captcha.NewStore(),
-		replies:       newReplyStore(),
-		log:           log,
-		version:       version,
-		chatCache:     make(map[int64]storage.ChatInfo),
-		userCache:     make(map[int64]storage.UserInfo),
-		greetInput:    make(map[int64]greetInputState),
-		groqc:         groq.New(cfg.GroqAPIKey, cfg.GroqModel),
-		gemic:         gemini.New(cfg.GeminiAPIKey, cfg.GeminiModel),
-		gigac:         gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
-		spamInflight:  make(map[chatUser]struct{}),
-		editChecked:   make(map[chatUser]time.Time),
-		adminCache:    make(map[chatUser]adminCacheEntry),
-		approvalCache: make(map[int64]bool),
-		leaveInflight: make(map[int64]bool),
+		api:            api,
+		cfg:            cfg,
+		store:          captcha.NewStore(),
+		replies:        newReplyStore(),
+		log:            log,
+		version:        version,
+		chatCache:      make(map[int64]storage.ChatInfo),
+		userCache:      make(map[int64]storage.UserInfo),
+		greetInput:     make(map[int64]greetInputState),
+		groqc:          groq.New(cfg.GroqAPIKey, cfg.GroqModel),
+		gemic:          gemini.New(cfg.GeminiAPIKey, cfg.GeminiModel),
+		gigac:          gigachat.New(cfg.GigaChatAuthKey, cfg.GigaChatScope, cfg.GigaChatModel, groq.SystemPrompt),
+		spamInflight:   make(map[chatUser]struct{}),
+		editChecked:    make(map[chatUser]time.Time),
+		profileChecked: make(map[int64]time.Time),
+		digestSent:     make(map[int64]string),
+		adminCache:     make(map[chatUser]adminCacheEntry),
+		approvalCache:  make(map[int64]bool),
+		leaveInflight:  make(map[int64]bool),
 	}, nil
 }
 
@@ -152,9 +182,22 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	b.goSafe("attemptsSweepLoop", func() { b.attemptsSweepLoop(ctx) })
 	b.goSafe("dailyDigestLoop", func() { b.dailyDigestLoop(ctx) })
-	b.goSafe("reconcileChats", func() { b.reconcileChats(ctx) })
+	b.goSafe("reconcileChats", func() {
+		// Реконсиляция голосов — строго ПОСЛЕ сверки реестра: чат, из
+		// которого бота кикнули офлайн, ещё читается approved (my_chat_member
+		// не приходит), и стартовый гейт chatServiceable в reconcileSpamVotes
+		// выиграл бы гонку и исполнил вердикт мёртвого чата.
+		b.reconcileChats(ctx)
+		b.reconcileSpamVotes(ctx)
+		// Стартовый свип истёкших голосований — здесь же, последним:
+		// spamVoteSweepLoop начинает только с часового тика, и без этого
+		// вызова голосования, проспавшие дедлайн за время простоя, висели
+		// бы до первого часового тика.
+		b.sweepExpiredVotes(ctx)
+	})
 	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
 	b.goSafe("announceVersion", func() { b.announceVersion(ctx) })
+	b.goSafe("healthbeat", func() { b.healthbeat(ctx) })
 	var providers []string
 	for _, p := range b.aiProviders() {
 		if p.c.Enabled() {
@@ -304,6 +347,24 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 	return len(rows), nil
 }
 
+// healthbeat раз в минуту освежает файл-сердцебиение рядом с БД. HEALTHCHECK
+// образа смотрит на его свежесть: зависший процесс (дедлок, клин long-poll)
+// снаружи выглядит «running», и restart-policy его не трогает. Молчащий лог
+// признаком смерти служить не может — в тихом чате бот не пишет в лог часами.
+func (b *Bot) healthbeat(ctx context.Context) {
+	path := filepath.Join(filepath.Dir(b.cfg.DBPath), ".heartbeat")
+	for {
+		if err := os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644); err != nil {
+			b.log.Warn("healthbeat write", "err", err, "path", path)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+		}
+	}
+}
+
 // goSafe запускает fn в горутине с recover: паника логируется, процесс живёт.
 // Трейд-офф: упавший фоновый луп тихо умирает до рестарта (виден только
 // log.Error) — это лучше, чем ронять бота во всех чатах разом.
@@ -345,6 +406,13 @@ func (b *Bot) attemptsSweepLoop(ctx context.Context) {
 		case <-t.C:
 			if err := b.db.SweepAttempts(ctx, attemptsTTL); err != nil {
 				b.log.Warn("sweep attempts", "err", err)
+			}
+			// Тот же полусуточный тик подрезает историю событий порциями:
+			// вечный рост events на единственном соединении был бомбой
+			// замедленного действия для digest-запросов.
+			if _, err := b.db.PruneEvents(ctx,
+				time.Now().AddDate(0, 0, -eventRetentionDays), eventPruneBatch); err != nil {
+				b.log.Warn("prune events", "err", err)
 			}
 		}
 	}

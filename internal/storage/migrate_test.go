@@ -40,6 +40,7 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	rpls := 90
 	_ = db.SetReplyCheckEnabled(ctx, old, true)
 	_ = db.SetReplyCheckSeconds(ctx, old, &rpls)
+	_ = db.SetEphemeralEnabled(ctx, old, true)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
 	_ = db.AddTrusted(ctx, old, 1, now)
 
@@ -129,6 +130,9 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.ReplyCheckSeconds.Valid || ms.ReplyCheckSeconds.Int64 != 90 {
 		t.Errorf("reply_check_seconds did not migrate: %+v", ms.ReplyCheckSeconds)
+	}
+	if !ms.EphemeralEnabled {
+		t.Error("ephemeral_enabled did not migrate")
 	}
 	// greetings старого чата чистятся: message id мертвы вместе с чатом.
 	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {

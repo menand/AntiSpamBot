@@ -30,6 +30,9 @@ func TestReportLine(t *testing.T) {
 		{"left counted", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Joined: 5, Passed: 3, Kicked: 1, Left: 1},
 			"«Бег» — вступило 5, прошло 3, вышли сами 1, кик 1, бан 0"},
+		{"messages only is not empty", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{MsgOldtimer: 12},
+			"«Бег» — сообщений: 12, событий воронки нет"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

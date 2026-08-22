@@ -58,9 +58,10 @@ type Client struct {
 	chatEndpoint  string
 	http          *http.Client
 
-	// Кэш OAuth-токена (живёт ~30 минут). Мьютекс держится и на время
-	// самого OAuth-запроса — заодно защищает от стада рефрешей.
-	mu        sync.Mutex
+	// Кэш OAuth-токена (живёт ~30 минут). Чтение кэша — под RLock и без
+	// похода в сеть; сам OAuth-запрос делается под Lock — заодно защита от
+	// стада рефрешей (второй 401 увидит свежий токен по double-check).
+	mu        sync.RWMutex
 	token     string
 	expiresAt time.Time
 }
@@ -154,8 +155,19 @@ func (c *Client) Classify(ctx context.Context, system, facts string) (bool, erro
 // getToken возвращает валидный access_token: из кэша, если не протух, иначе
 // новым OAuth-запросом. force игнорирует кэш (после 401 от chat).
 func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
+	if !force {
+		c.mu.RLock()
+		tok, exp := c.token, c.expiresAt
+		c.mu.RUnlock()
+		if tok != "" && time.Now().Before(exp) {
+			return tok, nil
+		}
+	}
+	// OAuth под Lock: параллельные вызывающие ждут готовый токен, а не
+	// дублируют запрос (раньше мьютекс блокировал и cache-hit — до 90 c).
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	// Double-check: пока мы ждали Lock, кто-то мог уже обновить токен.
 	if !force && c.token != "" && time.Now().Before(c.expiresAt) {
 		return c.token, nil
 	}

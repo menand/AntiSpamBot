@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -76,5 +77,37 @@ func TestRenderWhatsNewBudget(t *testing.T) {
 	}
 	if strings.Contains(text, "v9.9.8") {
 		t.Fatal("versions past the budget must be dropped")
+	}
+}
+
+func TestBuildAnnounceTextBudget(t *testing.T) {
+	// Короткий релиз: без усечения, с хвостом.
+	short := []release{{Version: "v1.0.0", Items: []string{"фикс"}}}
+	got := buildAnnounceText("v1.0.0", short, "\n\nхвост")
+	if strings.Contains(got, "…") || !strings.HasSuffix(got, "хвост") || !strings.Contains(got, "фикс") {
+		t.Fatalf("short release must fit intact: %q", got)
+	}
+
+	// Огромный релиз: усечение до бюджета, хвост на месте, итог < 4096.
+	var items []string
+	for i := 0; i < 200; i++ {
+		items = append(items, strings.Repeat("пункт ", 30)+strconv.Itoa(i))
+	}
+	big := []release{{Version: "v2.0.0", Items: items}}
+	got = buildAnnounceText("v2.0.0", big, "\n\nхвост")
+	if n := utf8.RuneCountInString(got); n >= 4096 {
+		t.Fatalf("announcement exceeds Telegram limit: %d runes", n)
+	}
+	if !strings.Contains(got, "…") {
+		t.Fatal("overflow must fold into ellipsis")
+	}
+	if !strings.HasSuffix(got, "хвост") {
+		t.Fatal("tail hint must survive truncation")
+	}
+
+	// Версии нет в чейнджлоге — заголовок и хвост без пунктов.
+	got = buildAnnounceText("v9.9.9", big, "\n\nхвост")
+	if strings.Contains(got, "пункт") || strings.Contains(got, "…") {
+		t.Fatalf("unknown version must produce header+tail only: %q", got)
 	}
 }

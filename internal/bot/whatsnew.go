@@ -21,6 +21,9 @@ const (
 	// whatsNewRuneBudget — потолок длины сообщения (лимит Telegram 4096,
 	// запас на заголовок и «…»).
 	whatsNewRuneBudget = 3500
+	// announceRuneBudget — то же для ЛС-анонса версии: на хвост-подсказку
+	// (она короче 200 рун) оставлен запас.
+	announceRuneBudget = 3700
 
 	// metaAnnouncedVersion — ключ bot_meta: последняя версия, о которой
 	// разосланы ЛС-оповещения.
@@ -96,6 +99,34 @@ func renderWhatsNew(rels []release, limit int) string {
 		shown++
 	}
 	return sb.String()
+}
+
+// buildAnnounceText собирает ЛС-текст анонса версии в рунном бюджете.
+// Бюджет обязателен: маркер уже записан, и переполнивший лимит Telegram
+// текст значил бы потерянный навсегда анонс (все отправки упали бы с
+// MESSAGE_TOO_LONG). Не влезшие пункты сворачиваются в «…»; tail —
+// стоящая подсказка (короткая, за бюджетом).
+func buildAnnounceText(base string, rels []release, tail string) string {
+	text := "🆕 <b>Бот обновлён: " + html.EscapeString(base) + "</b>"
+	used := utf8.RuneCountInString(text)
+announce:
+	for _, r := range rels {
+		if r.Version != base {
+			continue
+		}
+		for _, it := range r.Items {
+			line := "\n• " + html.EscapeString(it)
+			n := utf8.RuneCountInString(line)
+			if used+n > announceRuneBudget {
+				text += "\n…"
+				break announce
+			}
+			text += line
+			used += n
+		}
+		break
+	}
+	return text + tail
 }
 
 // handleWhatsNewCommand — /whatsnew и /whatnew: краткий чейнджлог последних
@@ -187,17 +218,9 @@ func (b *Bot) announceVersion(ctx context.Context) {
 		}
 	}
 
-	text := "🆕 <b>Бот обновлён: " + html.EscapeString(base) + "</b>"
-	for _, r := range parseChangelog(antispam.ChangelogMD) {
-		if r.Version == base {
-			for _, it := range r.Items {
-				text += "\n• " + html.EscapeString(it)
-			}
-			break
-		}
-	}
-	text += "\n\nℹ️ Полный список команд — по команде /help." +
-		"\n🔕 Отключить эти оповещения: /start → «🆕 Оповещения о версиях»."
+	text := buildAnnounceText(base, parseChangelog(antispam.ChangelogMD),
+		"\n\nℹ️ Полный список команд — по команде /help."+
+			"\n🔕 Отключить эти оповещения: /start → «🆕 Оповещения о версиях».")
 	sent := 0
 	for id := range targets {
 		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(id), text).

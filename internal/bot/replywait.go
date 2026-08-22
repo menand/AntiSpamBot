@@ -124,12 +124,19 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 		return
 	}
 	p.Cancel()
-	_ = b.db.DeletePendingReply(b.runCtx, chatID, userID)
+	// Строку гасим ДО записи пасса: окно между ними микросекундное, но
+	// рестарт в нём воскресил бы ожидание для уже ответившего — с киком за
+	// «молчание», которого не было.
+	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.ExpiresAt); err != nil {
+		b.log.Warn("delete pending reply on satisfy", "err", err, "chat", chatID, "user", userID)
+	}
 	// Единственный победитель гонки фиксирует «прошёл»: капча уже позади,
 	// ответ на приветствие — финальная проверка. При однофакторной проверке
 	// (reply_check выключен) пасс записан ещё в onSuccess, и здесь Take
 	// просто промахивается — лишний пасс не пишется.
-	_ = b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), "")
+	if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+		b.log.Warn("record pass event (reply)", "err", err)
+	}
 	b.log.Info("reply check passed", "chat", chatID, "user", userID)
 }
 
@@ -141,7 +148,9 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
 	if p, ok := b.replies.Take(chatID, userID); ok {
 		p.Cancel()
-		_ = b.db.DeletePendingReply(b.runCtx, chatID, userID)
+		if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.ExpiresAt); err != nil {
+			b.log.Warn("delete pending reply on cancel", "err", err, "chat", chatID, "user", userID)
+		}
 		return true
 	}
 	return false
@@ -169,7 +178,6 @@ func (b *Bot) waitReplyTimeout(p *replyPending) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = b.db.DeletePendingReply(ctx, p.ChatID, p.UserID)
 
 	// Приветствие-якорь сносим: «Добро пожаловать, X!» без X — мусор.
 	if msgID, ok, err := b.db.TakeGreetingMsg(ctx, p.ChatID, p.UserID); err == nil && ok {
@@ -183,20 +191,35 @@ func (b *Bot) waitReplyTimeout(p *replyPending) {
 		b.log.Warn("increment attempt (reply)", "err", err)
 		count = 1 // считаем первой попыткой и едем дальше
 	}
+	// Событие и уведомление — ПОСЛЕ успешного действия (бан, которого не
+	// было, не должен попадать в статистику), а pending_replies удаляем
+	// только после успеха: при провале рестарт восстановит ожидание и
+	// повторит наказание, иначе мьют остался бы навсегда.
 	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
-		_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now(), storage.ReasonNoReply)
-		b.notifyModAction(p.ChatID, p.UserID, storage.EventBan, storage.ReasonNoReply)
-		if err := b.ban(ctx, p.ChatID, p.UserID); err != nil {
+		if err := b.banShort(ctx, p.ChatID, p.UserID); err != nil {
 			b.log.Error("ban silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
+			return
 		}
-		return
+		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now(), storage.ReasonNoReply); err != nil {
+			b.log.Warn("record ban event (noreply)", "err", err)
+		}
+		b.notifyModAction(p.ChatID, p.UserID, storage.EventBan, storage.ReasonNoReply)
+	} else {
+		b.log.Info("kicking silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
+		if err := b.kick(ctx, p.ChatID, p.UserID); err != nil {
+			b.log.Error("kick silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
+			return
+		}
+		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now(), storage.ReasonNoReply); err != nil {
+			b.log.Warn("record kick event (noreply)", "err", err)
+		}
+		b.notifyModAction(p.ChatID, p.UserID, storage.EventKick, storage.ReasonNoReply)
 	}
-	b.log.Info("kicking silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
-	_ = b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now(), storage.ReasonNoReply)
-	b.notifyModAction(p.ChatID, p.UserID, storage.EventKick, storage.ReasonNoReply)
-	if err := b.kick(ctx, p.ChatID, p.UserID); err != nil {
-		b.log.Error("kick silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
+	if err := b.db.DeletePendingReplyIf(ctx, p.ChatID, p.UserID, p.ExpiresAt); err != nil {
+		// Строка — механизм повтора наказания при рестарте; потерять её
+		// молча = повторный кик/бан уже наказанного.
+		b.log.Warn("delete pending reply after punish", "err", err, "chat", p.ChatID, "user", p.UserID)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -186,6 +187,12 @@ func parseDuration(name string, def time.Duration, unit time.Duration) (time.Dur
 	n, err := strconv.Atoi(v)
 	if err != nil {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	// Переполнение int64 в наносекундах обернулось бы в ПОЛОЖИТЕЛЬную
+	// длительность мимо всех проверок <= 0 — гигантский таймаут капчи
+	// выглядел бы валидным.
+	if int64(n) > math.MaxInt64/int64(unit) {
+		return 0, fmt.Errorf("%s: %d is too large", name, n)
 	}
 	return time.Duration(n) * unit, nil
 }

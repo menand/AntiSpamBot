@@ -138,3 +138,51 @@ func TestStoreConcurrentTake(t *testing.T) {
 		t.Fatalf("expected exactly 1 Take to succeed, got %d", gotCount)
 	}
 }
+
+func TestStoreGet(t *testing.T) {
+	s := NewStore()
+	if _, ok := s.Get(1, 2); ok {
+		t.Fatal("Get on empty store must miss")
+	}
+	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute), 0, 0)
+	got, ok := s.Get(1, 2)
+	if !ok || got != p {
+		t.Fatal("Get did not return the stored pending")
+	}
+	// Get не изымает: Take после Get возвращает ту же капчу.
+	taken, ok := s.Take(1, 2)
+	if !ok || taken != p {
+		t.Fatal("Take after Get did not return the stored pending")
+	}
+	if _, ok := s.Get(1, 2); ok {
+		t.Fatal("Get after Take must miss")
+	}
+}
+
+// TestTakeMatchAtomicGuard — условный Take проверяет идентичность под тем же
+// мьютом: устаревший клик не изымает капчу и не оставляет окна Get→Take,
+// в которое улеглась бы новая капча того же юзера.
+func TestTakeMatchAtomicGuard(t *testing.T) {
+	s := NewStore()
+	live := s.Put(1, 2, 100, 2, time.Now().Add(time.Minute), 0, 0)
+
+	// Чужая клавиатура — не изымается, store не тронут.
+	if _, ok := s.TakeMatch(1, 2, func(p *Pending) bool { return p.MessageID == 999 }); ok {
+		t.Fatal("stale click must not take the live captcha")
+	}
+	if got, ok := s.Get(1, 2); !ok || got != live {
+		t.Fatal("live captcha must stay in place after a stale match")
+	}
+	// Та же клавиатура — изымается.
+	got, ok := s.TakeMatch(1, 2, func(p *Pending) bool { return p.MessageID == 100 })
+	if !ok || got != live {
+		t.Fatal("matching click must take the live captcha")
+	}
+	if _, ok := s.Get(1, 2); ok {
+		t.Fatal("store must be empty after a matching take")
+	}
+	// Пустой store — чистый промах.
+	if _, ok := s.TakeMatch(1, 2, func(*Pending) bool { return true }); ok {
+		t.Fatal("empty store must miss")
+	}
+}

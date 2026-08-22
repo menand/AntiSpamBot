@@ -144,6 +144,20 @@ func TestParseDuration(t *testing.T) {
 	if _, err := parseDuration("TEST_DUR", 0, time.Second); err == nil {
 		t.Fatal("garbage must error")
 	}
+	// Переполнение int64 в наносекундах раньше обёртывалось в положительную
+	// длительность мимо всех проверок <= 0.
+	t.Setenv("TEST_DUR", "99999999999999999999")
+	if _, err := parseDuration("TEST_DUR", 0, time.Second); err == nil {
+		t.Fatal("overflow must error")
+	}
+	t.Setenv("TEST_DUR", "99999999999") // влезает в Atoi, но не в наносекунды
+	if _, err := parseDuration("TEST_DUR", 0, time.Millisecond); err != nil {
+		t.Fatalf("large ms must pass: %v", err)
+	}
+	t.Setenv("TEST_DUR", "99999999999")
+	if _, err := parseDuration("TEST_DUR", 0, time.Second); err == nil {
+		t.Fatal("large seconds must error (int64 ns overflow)")
+	}
 }
 
 func TestLoadDefaults(t *testing.T) {

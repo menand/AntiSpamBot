@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban'
+    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban' | 'left' | 'mute'
     at      INTEGER NOT NULL,
     -- Причина кика/бана: 'captcha' | 'noreply' | 'mod:<adminID>' |
     -- 'vote:<id,id,...>' | 'global'. NULL/'' — нет (join/pass и старые строки).
@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS idx_events_chat_at ON events(chat_id, at);
 CREATE INDEX IF NOT EXISTS idx_events_chat_kind_at ON events(chat_id, kind, at);
+-- Под коррелированные подзапросы PassedUsers/TopFailers/EventUsers
+-- (поиск последнего join/pass конкретного юзера без скана всех событий чата).
+CREATE INDEX IF NOT EXISTS idx_events_chat_user_kind_at ON events(chat_id, user_id, kind, at);
 
 CREATE TABLE IF NOT EXISTS members (
     chat_id   INTEGER NOT NULL,
@@ -77,6 +80,8 @@ CREATE TABLE IF NOT EXISTS user_info (
     username   TEXT,
     updated_at INTEGER NOT NULL
 );
+-- Резолв @username в модкомандах без полного скана вечной таблицы.
+CREATE INDEX IF NOT EXISTS idx_user_info_username ON user_info(username COLLATE NOCASE);
 
 -- Известные чаты: пополняются попутно из каждого видимого нами chat_member-
 -- и message-апдейта. Используются меню /chats для списка чатов (владелец бота

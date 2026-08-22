@@ -271,7 +271,7 @@ git pull && docker compose up -d --build
 |---|---|---|
 | `BOT_TOKEN` | **обязат.** | Токен от @BotFather |
 | `OWNER_IDS` | — | Telegram user_id владельцев бота через запятую. Получают 🟢/🔴, видят все чаты в меню. |
-| `ALLOWED_CHATS` | — (= все) | Chat ID через запятую. Если задан — бот игнорирует другие чаты. При апгрейде группы в супергруппу chat_id меняется — обнови список. |
+| `ALLOWED_CHATS` | — (= все) | Chat ID через запятую. Если задан — бот игнорирует другие чаты. При апгрейде группы в супергруппу chat_id меняется, и до добавления нового ID в список бот в migrated-чате молчит — обнови список. |
 | `CAPTCHA_TIMEOUT_SECONDS` | `30` | Дефолт секунд на капчу (перекрывается per-chat) |
 | `MAX_ATTEMPTS` | `3` | Дефолт порога бана (перекрывается per-chat) |
 | `CAPTCHA_DELAY_MS` | `3000` | Задержка между мутом (мгновенным) и отправкой капчи, чтобы клиент новичка успел отрисовать чат (эфемерной капче меньше 3 с не хватает). Сообщения от новичка в окне удаляются. |
@@ -552,10 +552,12 @@ CI (GitHub Actions): `vet` + `test -race` + `build` на каждый push/PR. D
 
 **Бэкапы.**
 ```bash
-docker compose exec bot sh -c 'cat /data/bot.db' > bot-$(date +%F).db
-# или через sqlite3 backup (онлайн, без паузы):
+# БД живёт в WAL — голый cat главного файла даёт рваный снимок без -wal.
+# Только через sqlite3 backup (онлайн, консистентно):
 docker run --rm -v antispambot_bot-data:/data alpine:3.24 sh -c \
   'apk add -q sqlite && sqlite3 /data/bot.db ".backup /data/bot.db.bak"'
+docker compose cp bot:/data/bot.db.bak ./bot-$(date +%F).db 2>/dev/null || \
+  docker run --rm -v antispambot_bot-data:/data -v "$PWD:/out" alpine:3.24 cp /data/bot.db.bak /out/
 ```
 
 **Миграции схемы.** Автоматически при старте — в `internal/storage/db.go` список `ALTER TABLE ADD COLUMN`, ошибки «duplicate column» свапаются. Для новых таблиц — дописать в `schema.sql` с `CREATE TABLE IF NOT EXISTS`.
