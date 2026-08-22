@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban' | 'left' | 'mute'
+    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban' | 'left' | 'abort' | 'mute'
     at      INTEGER NOT NULL,
     -- Причина кика/бана: 'captcha' | 'noreply' | 'mod:<adminID>' |
     -- 'vote:<id,id,...>' | 'global'. NULL/'' — нет (join/pass и старые строки).
@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS spam_votes (
     bot_msg_id    INTEGER NOT NULL, -- сообщение-плашка с кнопками
     target_msg_id INTEGER NOT NULL, -- подозрительное сообщение
     author_id     INTEGER NOT NULL,
-    prob          INTEGER NOT NULL, -- вердикт Groq (%)
+    prob          INTEGER NOT NULL, -- legacy NOT NULL: всегда 100, никогда не показывается
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (chat_id, bot_msg_id)
 );

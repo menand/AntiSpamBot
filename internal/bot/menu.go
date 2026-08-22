@@ -493,17 +493,21 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, chatID int64,
 	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string) error {
 	// Чтение+запись под общим мьютексом: параллельный даблклик иначе дважды
-	// прочёл бы одно значение и записал одну инверсию вместо двух.
+	// прочёл бы одно значение и записал одну инверсию вместо двух. Замок
+	// держим ТОЛЬКО на паре DB-вызовов — рендер экрана (сетевой round-trip)
+	// после разблокировки, иначе все тогглы всех админов выстроились бы в
+	// очередь за чужой отрисовкой.
 	b.toggleMu.Lock()
-	defer b.toggleMu.Unlock()
 	s, err := b.db.GetChatSettings(ctx, chatID)
 	if err != nil {
+		b.toggleMu.Unlock()
 		b.log.Warn("get chat settings", "err", err, "chat", chatID)
 		return nil
 	}
 	if err := set(b.runCtx, chatID, !get(s)); err != nil {
 		b.log.Warn("set "+what, "err", err, "chat", chatID)
 	}
+	b.toggleMu.Unlock()
 	return b.renderChatSettings(ctx, query, chatID)
 }
 
@@ -514,18 +518,21 @@ func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, cha
 func (b *Bot) toggleOwnerSetting(ctx *th.Context, query telego.CallbackQuery,
 	enabled func(context.Context, int64) (bool, error), set func(context.Context, int64, bool) error, what string) error {
 	// Тот же мьютекс, что у toggleChatSetting: параллельные клики по
-	// глобальным тогглам главного меню.
+	// глобальным тогглам главного меню. Критическая секция — только пара
+	// DB-вызовов; edit меню после разблокировки.
 	b.toggleMu.Lock()
-	defer b.toggleMu.Unlock()
 	on, err := enabled(ctx, query.From.ID)
 	if err != nil {
+		b.toggleMu.Unlock()
 		b.log.Warn("get "+what, "err", err, "user", query.From.ID)
 		return nil
 	}
 	if err := set(b.runCtx, query.From.ID, !on); err != nil {
+		b.toggleMu.Unlock()
 		b.log.Warn("set "+what, "err", err, "user", query.From.ID)
 		return nil
 	}
+	b.toggleMu.Unlock()
 	return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
 }
 
@@ -730,13 +737,28 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		b.log.Warn("query stats (menu)", "err", err)
 		return nil
 	}
-	topWriters, _ := b.db.TopWriters(ctx, chatID, from, until, 5)
+	topWriters, err := b.db.TopWriters(ctx, chatID, from, until, 5)
+	if err != nil {
+		b.log.Warn("top writers (menu)", "err", err)
+	}
 	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
-	topFailers, _ := b.db.TopFailers(ctx, chatID, from, until, -1)
-	newMembers, _ := b.db.PassedUsers(ctx, chatID, from, until)
-	banned, _ := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
-	infos, _ := b.db.GetUserInfos(ctx,
+	topFailers, err := b.db.TopFailers(ctx, chatID, from, until, -1)
+	if err != nil {
+		b.log.Warn("top failers (menu)", "err", err)
+	}
+	newMembers, err := b.db.PassedUsers(ctx, chatID, from, until)
+	if err != nil {
+		b.log.Warn("passed users (menu)", "err", err)
+	}
+	banned, err := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
+	if err != nil {
+		b.log.Warn("banned users (menu)", "err", err)
+	}
+	infos, err := b.db.GetUserInfos(ctx,
 		collectUserIDs(topWriters, topFailers, newMembers, banned))
+	if err != nil {
+		b.log.Warn("user infos (menu)", "err", err)
+	}
 	if infos == nil {
 		infos = map[int64]storage.UserInfo{}
 	}

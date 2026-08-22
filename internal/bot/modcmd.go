@@ -196,9 +196,18 @@ func (b *Bot) modPrologue(ctx *th.Context, message telego.Message) (int64, bool)
 		return 0, false
 	}
 	// Анонимный админ пишет от имени самого чата (sender_chat == чат) —
-	// getChatMember его не различает, но право модерации у него есть.
+	// getChatMember его не различает, но право модерации у него есть. Ветвь
+	// ДО бот-фильтров: его From — как раз бот (GroupAnonymousBot).
 	if sc := message.SenderChat; sc != nil && sc.ID == chatID {
 		return chatID, true
+	}
+	// Боты, сервисный «Telegram» и автофорварды привязанного канала команд
+	// не исполняют и наказанием не punished: их From серверно подлинный, но
+	// это не рука участника (иначе текст поста канала «/mute …» замьютил бы
+	// самого канал-бота с публичным «не балуйся»).
+	if message.From.IsBot || message.From.ID == telegramServiceUserID ||
+		message.IsAutomaticForward {
+		return 0, false
 	}
 	if b.isOwner(message.From.ID) {
 		return chatID, true
@@ -405,7 +414,11 @@ func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMs
 	}
 	// 2. @username из аргумента команды.
 	if uname := firstUsernameArg(message.Text); uname != "" {
-		if id, ok, err := b.db.UserIDByUsername(b.runCtx, uname); err == nil && ok {
+		id, ok, err := b.db.UserIDByUsername(b.runCtx, uname)
+		if err != nil {
+			b.log.Warn("resolve target by username", "err", err, "username", uname)
+		}
+		if ok {
 			return id, 0, true
 		}
 	}
@@ -416,7 +429,12 @@ func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMs
 	if r := message.ReplyToMessage; r != nil && r.ForumTopicCreated == nil {
 		if b.me != nil && r.From != nil && r.From.ID == b.me.ID {
 			// Реплай на наше приветствие — цель по таблице greetings.
-			if id, ok, err := b.db.GreetingUserByMsg(b.runCtx, message.Chat.ID, r.MessageID); err == nil && ok {
+			id, ok, err := b.db.GreetingUserByMsg(b.runCtx, message.Chat.ID, r.MessageID)
+			if err != nil {
+				b.log.Warn("resolve target by greeting", "err", err,
+					"chat", message.Chat.ID, "msg", r.MessageID)
+			}
+			if ok {
 				return id, 0, true
 			}
 		}
@@ -484,7 +502,9 @@ func (b *Bot) replyTo(ctx *th.Context, message telego.Message, text string) {
 	if recv := b.modReceiver(message.Chat.ID, message); recv != 0 {
 		params = params.WithReceiverUserID(recv)
 	}
-	_, _ = b.api.SendMessage(ctx, params)
+	if _, err := b.api.SendMessage(ctx, params); err != nil {
+		b.log.Debug("reply send", "err", err, "chat", message.Chat.ID)
+	}
 }
 
 // sendPlain/sendHTML: receiverID ≠ 0 — эфемерно этому юзеру, 0 — публично.
@@ -507,7 +527,9 @@ func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string
 	if receiverID != 0 {
 		params = params.WithReceiverUserID(receiverID)
 	}
-	_, _ = b.api.SendMessage(b.runCtx, params)
+	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
+		b.log.Debug("html send", "err", err, "chat", chatID)
+	}
 }
 
 // notifyModAction определён в notify.go (часть mod-уведомлений).

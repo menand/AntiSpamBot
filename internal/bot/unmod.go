@@ -178,6 +178,13 @@ func unmodListView(title, action string, recent []storage.RecentUser, infos map[
 // Все ветки идемпотентны — повторный клик или гонка двух админов безвредны.
 func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 	mention := b.mentionFor(targetID)
+
+	// Та же дисциплина, что у /kick|/ban (cleanupTargetTraces): восстанавли-
+	// вающая команда гасит активные проверки цели — иначе таймаут капчи
+	// кикнул бы только что размученного/доверенного юзера, а reply-wait дал
+	// бы фантомный noreply поверх решения админа. Событий не пишет.
+	b.cancelCaptchaSilent(chatID, targetID)
+	b.cancelReplyWait(chatID, targetID)
 	switch action {
 	case "u":
 		if err := b.unban(b.runCtx, chatID, targetID); err != nil {

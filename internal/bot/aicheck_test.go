@@ -9,12 +9,12 @@ import (
 
 func TestFormatProviderCheck(t *testing.T) {
 	ok := formatProviderCheck("groq", "llama-3.1-8b-instant", false, 700*time.Millisecond, nil)
-	for _, want := range []string{"✅ groq", "llama-3.1-8b-instant", "0.7 с", "вердикт OK", "коннект есть"} {
+	for _, want := range []string{"✅ groq", "llama-3.1-8b-instant", "0.7 с", "вердикт: не спам", "коннект есть"} {
 		if !strings.Contains(ok, want) {
 			t.Errorf("success line missing %q: %s", want, ok)
 		}
 	}
-	if spam := formatProviderCheck("groq", "m", true, time.Second, nil); !strings.Contains(spam, "вердикт SPAM") {
+	if spam := formatProviderCheck("groq", "m", true, time.Second, nil); !strings.Contains(spam, "вердикт: спам") {
 		t.Errorf("spam verdict line missing: %s", spam)
 	}
 
