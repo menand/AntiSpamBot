@@ -74,6 +74,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"chats", "username", `ALTER TABLE chats ADD COLUMN username TEXT`},
 		{"chats", "approval_status", `ALTER TABLE chats ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'`},
 		{"owner_settings", "last_stats_period", `ALTER TABLE owner_settings ADD COLUMN last_stats_period TEXT`},
+		{"chats", "bot_added_at", `ALTER TABLE chats ADD COLUMN bot_added_at INTEGER`},
+		{"spam_votes", "initiator_id", `ALTER TABLE spam_votes ADD COLUMN initiator_id INTEGER NOT NULL DEFAULT 0`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}

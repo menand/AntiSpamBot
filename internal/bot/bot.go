@@ -281,6 +281,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("del"))
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("delete"))
 	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))
+	bh.HandleMessage(b.handleSpamCommand, th.CommandEqual("spam"))
 	bh.HandleMessage(b.handleUnbanCommand, th.CommandEqual("unban"))
 	bh.HandleMessage(b.handleUnmuteCommand, th.CommandEqual("unmute"))
 	bh.HandleMessage(b.handleWhitelistCommand, th.CommandEqual("whitelist"))

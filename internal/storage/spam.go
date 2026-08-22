@@ -17,36 +17,74 @@ type SpamVote struct {
 	// (голосование о бане по профилю, целевого сообщения не существует).
 	TargetMsgID int
 	AuthorID    int64
+	// InitiatorID — кто запустил голосование командой /spam; 0 = плашка ИИ.
+	// Инициатор (как и автор) не голосует в своём репорте.
+	InitiatorID int64
 	Prob        int
 	CreatedAt   time.Time
 }
 
+const spamVoteColumns = `chat_id, bot_msg_id, target_msg_id, author_id, initiator_id, prob, created_at`
+
+// PutSpamVoteOnce создаёт голосование ТОЛЬКО если у автора ещё нет живой
+// плашки — атомарно, одним INSERT…WHERE NOT EXISTS (check-then-act гонка
+// двух создателей исключена: проигравший получает ok=false и сносит свою
+// только что отправленную плашку). Инвариант «одна активная плашка на
+// автора» общий для всех трёх путей создания: ИИ-спам-чек, профиль-чек и
+// ручной репорт /spam.
+func (d *DB) PutSpamVoteOnce(ctx context.Context, v SpamVote) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, `
+		INSERT INTO spam_votes (chat_id, bot_msg_id, target_msg_id, author_id, initiator_id, prob, created_at)
+		SELECT ?, ?, ?, ?, ?, ?, ?
+		WHERE NOT EXISTS (
+			SELECT 1 FROM spam_votes WHERE chat_id = ? AND author_id = ?
+		)
+	`, v.ChatID, v.BotMsgID, v.TargetMsgID, v.AuthorID, v.InitiatorID,
+		v.Prob, v.CreatedAt.Unix(), v.ChatID, v.AuthorID)
+	if err != nil {
+		return false, fmt.Errorf("put spam vote once: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("put spam vote once rows: %w", err)
+	}
+	return n == 1, nil
+}
+
 func (d *DB) PutSpamVote(ctx context.Context, v SpamVote) error {
 	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO spam_votes (chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO spam_votes (chat_id, bot_msg_id, target_msg_id, author_id, initiator_id, prob, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(chat_id, bot_msg_id) DO NOTHING
-	`, v.ChatID, v.BotMsgID, v.TargetMsgID, v.AuthorID, v.Prob, v.CreatedAt.Unix())
+	`, v.ChatID, v.BotMsgID, v.TargetMsgID, v.AuthorID, v.InitiatorID, v.Prob, v.CreatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("put spam vote: %w", err)
 	}
 	return nil
 }
 
-func (d *DB) GetSpamVote(ctx context.Context, chatID int64, botMsgID int) (SpamVote, bool, error) {
+func scanSpamVote(scanner interface{ Scan(dest ...any) error }) (SpamVote, error) {
 	var v SpamVote
 	var at int64
-	err := d.sql.QueryRowContext(ctx, `
-		SELECT chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at
-		FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?
-	`, chatID, botMsgID).Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID, &v.Prob, &at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return v, false, nil
-	}
-	if err != nil {
-		return v, false, fmt.Errorf("get spam vote: %w", err)
+	if err := scanner.Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID,
+		&v.InitiatorID, &v.Prob, &at); err != nil {
+		return v, err
 	}
 	v.CreatedAt = time.Unix(at, 0)
+	return v, nil
+}
+
+func (d *DB) GetSpamVote(ctx context.Context, chatID int64, botMsgID int) (SpamVote, bool, error) {
+	row := d.sql.QueryRowContext(ctx, `
+		SELECT `+spamVoteColumns+` FROM spam_votes WHERE chat_id = ? AND bot_msg_id = ?
+	`, chatID, botMsgID)
+	v, err := scanSpamVote(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SpamVote{}, false, nil
+	}
+	if err != nil {
+		return SpamVote{}, false, fmt.Errorf("get spam vote: %w", err)
+	}
 	return v, true, nil
 }
 
@@ -145,8 +183,7 @@ func (d *DB) CountBallots(ctx context.Context, chatID int64, botMsgID int) (yes,
 // реконсиляции кворума, набранного прямо перед крахом процесса.
 func (d *DB) YoungSpamVotes(ctx context.Context, cutoff time.Time) ([]SpamVote, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at
-		FROM spam_votes WHERE created_at >= ?
+		SELECT `+spamVoteColumns+` FROM spam_votes WHERE created_at >= ?
 	`, cutoff.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("young spam votes: %w", err)
@@ -154,12 +191,10 @@ func (d *DB) YoungSpamVotes(ctx context.Context, cutoff time.Time) ([]SpamVote, 
 	defer rows.Close()
 	var out []SpamVote
 	for rows.Next() {
-		var v SpamVote
-		var at int64
-		if err := rows.Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID, &v.Prob, &at); err != nil {
+		v, err := scanSpamVote(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan young vote: %w", err)
 		}
-		v.CreatedAt = time.Unix(at, 0)
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -169,8 +204,7 @@ func (d *DB) YoungSpamVotes(ctx context.Context, cutoff time.Time) ([]SpamVote, 
 // после 48 ч Telegram не даст удалить плашку, тянуть нельзя).
 func (d *DB) ExpiredSpamVotes(ctx context.Context, olderThan time.Time) ([]SpamVote, error) {
 	rows, err := d.sql.QueryContext(ctx, `
-		SELECT chat_id, bot_msg_id, target_msg_id, author_id, prob, created_at
-		FROM spam_votes WHERE created_at < ?
+		SELECT `+spamVoteColumns+` FROM spam_votes WHERE created_at < ?
 	`, olderThan.Unix())
 	if err != nil {
 		return nil, fmt.Errorf("expired spam votes: %w", err)
@@ -178,12 +212,10 @@ func (d *DB) ExpiredSpamVotes(ctx context.Context, olderThan time.Time) ([]SpamV
 	defer rows.Close()
 	var out []SpamVote
 	for rows.Next() {
-		var v SpamVote
-		var at int64
-		if err := rows.Scan(&v.ChatID, &v.BotMsgID, &v.TargetMsgID, &v.AuthorID, &v.Prob, &at); err != nil {
+		v, err := scanSpamVote(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan expired vote: %w", err)
 		}
-		v.CreatedAt = time.Unix(at, 0)
 		out = append(out, v)
 	}
 	return out, rows.Err()

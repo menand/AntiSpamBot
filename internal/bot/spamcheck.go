@@ -276,21 +276,33 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 		b.log.Warn("send spam vote message", "err", err, "chat", chatID)
 		return
 	}
-	if err := b.db.PutSpamVote(b.runCtx, storage.SpamVote{
+	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, storage.SpamVote{
 		ChatID:      chatID,
 		BotMsgID:    sent.MessageID,
 		TargetMsgID: message.MessageID,
 		AuthorID:    user.ID,
 		Prob:        100, // ponytail: легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
 		CreatedAt:   time.Now(),
-	}); err != nil {
+	})
+	if err != nil {
 		// Без строки в БД кнопки мертвы — снимаем плашку, не мусорим.
 		b.log.Error("persist spam vote", "err", err, "chat", chatID)
 		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
 		return
 	}
+	if !inserted {
+		// У автора уже висит плашка (например, пришёл /spam во время LLM-чека):
+		// сносим дубль, событий и уведомлений не пишем.
+		b.log.Info("AI spam plashka lost race — vote already pending", "chat", chatID, "user", user.ID)
+		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
+		return
+	}
+	// История подозрений для /info: только при живой плашке.
+	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventSuspect, time.Now(), ""); err != nil {
+		b.log.Warn("record suspect event (AI)", "err", err, "chat", chatID, "user", user.ID)
+	}
 	// Уже в своей горутине (maybeSpamCheck) — уведомляем синхронно.
-	b.notifySpamSuspicion(message)
+	b.notifySpamSuspicion(message, "🤖 ИИ-антиспам")
 }
 
 // spamNotifyTargets — владельцы, включившие ЛС-уведомления о спаме. Один
@@ -311,14 +323,17 @@ func (b *Bot) spamNotifyTargets(ctx context.Context) []int64 {
 }
 
 // notifySpamSuspicion шлёт подписанным владельцам форвард подозрительного
-// сообщения + карточку. Best effort: ошибки только в Warn.
-func (b *Bot) notifySpamSuspicion(message telego.Message) {
+// сообщения + карточку. source — кто поднял подозрение («🤖 ИИ-антиспам» или
+// «🚩 Репорт от …», содержит пользовательские имена — потому экранируется).
+// Best effort: ошибки только в Warn.
+func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 	targets := b.spamNotifyTargets(b.runCtx)
 	if len(targets) == 0 {
 		return
 	}
 	chatID := message.Chat.ID
-	info := fmt.Sprintf("🚨 Подозрение на спам в %s\nАвтор: %s",
+	info := fmt.Sprintf("🚨 %s — подозрение на спам в %s\nАвтор: %s",
+		html.EscapeString(source),
 		chatLinkHTML(storage.ChatInfo{
 			ChatID:   chatID,
 			Title:    message.Chat.Title,
@@ -597,10 +612,8 @@ func humanDurationRU(d time.Duration) string {
 
 func spamVoteText(yes, no, margin int) string {
 	return fmt.Sprintf(
-		"🤖 Мне кажется, это спам.\n\n"+
-			"Голосуйте кнопками — перевес в %d %s решает. Голос админа решает сразу.\n\n"+
-			"🚫 Спам: <b>%d</b> · ✅ Не спам: <b>%d</b>",
-		margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)
+		"🤖 Мне кажется, это спам.\n\n%s\n\n%s",
+		voteRuleLine(margin), voteTallyLine(yes, no))
 }
 
 func spamVoteKeyboard() *telego.InlineKeyboardMarkup {
@@ -653,6 +666,16 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	if voter == v.AuthorID {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Нельзя голосовать за своё сообщение.").WithShowAlert())
+		return nil
+	}
+	// Инициатор народного репорта (initiator_id ≠ 0) тоже лишён голоса в
+	// своём же голосовании — как и его цель. Проверка ДО золотого голоса:
+	// даже админ-инициатор закрывает репорт чужими руками.
+	if v.InitiatorID != 0 && voter == v.InitiatorID {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ты начал это голосование — твой голос в нём не считается.").
+				WithShowAlert())
 		return nil
 	}
 	// В кэш имён: уведомление владельцу о вердикте рендерит голосовавших по id.
@@ -768,7 +791,8 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 }
 
 // voteView — текст и клавиатура плашки по её типу: TargetMsgID == 0 —
-// профильная («забанить по профилю?»), иначе — обычная спам-плашка.
+// профильная («забанить по профилю?»), InitiatorID != 0 — народный репорт
+// /spam (заголовок с инициатором), иначе — обычная ИИ-плашка.
 func (b *Bot) voteView(v storage.SpamVote, yes, no, margin int) (string, *telego.InlineKeyboardMarkup) {
 	if v.TargetMsgID == 0 {
 		infos, err := b.db.GetUserInfos(b.runCtx, []int64{v.AuthorID})
@@ -777,6 +801,15 @@ func (b *Bot) voteView(v storage.SpamVote, yes, no, margin int) (string, *telego
 		}
 		return profileVoteText(mentionOrID(infos, v.AuthorID), yes, no, margin),
 			profileVoteKeyboard()
+	}
+	if v.InitiatorID != 0 {
+		ids := []int64{v.InitiatorID, v.AuthorID}
+		infos, err := b.db.GetUserInfos(b.runCtx, ids)
+		if err != nil {
+			infos = map[int64]storage.UserInfo{}
+		}
+		return manualVoteText(mentionOrID(infos, v.InitiatorID),
+			mentionOrID(infos, v.AuthorID), yes, no, margin), spamVoteKeyboard()
 	}
 	return spamVoteText(yes, no, margin), spamVoteKeyboard()
 }

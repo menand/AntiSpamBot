@@ -7,168 +7,221 @@ import (
 	"time"
 
 	"github.com/mymmrac/telego"
-	"github.com/mymmrac/telego/telegoapi"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// Тесты-регрессии по итогам полного ревью: гейт владельца на переспрос
-// аппрувов через /start, чужой ручной кик посреди reply-wait и гейт
-// глобальной базы спамеров на успех локального бана.
+// reportCommand — /spam-команда реплаем на сообщение цели.
+func reportCommand(fromID int64, target *telego.User) telego.Message {
+	return telego.Message{
+		MessageID: 10,
+		Chat:      telego.Chat{ID: testChatID, Type: "supergroup"},
+		From:      &telego.User{ID: fromID, FirstName: "Репортёр"},
+		Text:      "/spam",
+		ReplyToMessage: &telego.Message{
+			MessageID: 5,
+			From:      target,
+		},
+	}
+}
 
-func TestStartReAskGate(t *testing.T) {
-	seedPending := func(t *testing.T, b *Bot, db *storage.DB) {
-		t.Helper()
-		b.rememberChat(context.Background(), storage.ChatInfo{
-			ChatID: -100555, Title: "Секретный чат", Type: "supergroup",
+// seedTrusted накручивает порог истории сообщений (дефолт whitelist = 5).
+func seedTrusted(t *testing.T, db *storage.DB, userID int64) {
+	t.Helper()
+	for i := 0; i < 6; i++ {
+		if _, err := db.RecordMessage(context.Background(), testChatID, userID,
+			time.Now().Add(-time.Duration(6-i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestSpamReportTrustGateFailClosed — ошибка чтения счётчика НЕ пропускает
+// репорт: fail-closed, как у гейта бюллетеней.
+func TestSpamReportTrustGateFailClosed(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	cmd := reportCommand(9, &telego.User{ID: 42, FirstName: "Цель"})
+
+	_ = db.Close() // sql.ErrConnDone на UserMessageTotal
+	if err := b.handleSpamCommand(nil, cmd); err != nil {
+		t.Fatal(err)
+	}
+	if n := fc.callCount("sendMessage"); n != 0 {
+		t.Fatalf("trust-gate DB error must fail CLOSED — плашка не создаётся (sendMessage=%d)", n)
+	}
+}
+
+// TestSpamReportBelowTrustRefused — новичок без истории репортить не может.
+func TestSpamReportBelowTrustRefused(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 42})); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(fc.callBodies("sendMessage"), "\n")
+	if !strings.Contains(got, "историей сообщений") {
+		t.Fatalf("want trust refusal, got:\n%s", got)
+	}
+}
+
+// TestSpamVoteInitiatorExcludedBeforeGolden — инициатор не голосует в своём
+// репорте даже золотым голосом админа.
+func TestSpamVoteInitiatorExcludedBeforeGolden(t *testing.T) {
+	ctx := context.Background()
+	voteQuery := func(voter int64) telego.CallbackQuery {
+		return telego.CallbackQuery{
+			ID:   "q",
+			From: telego.User{ID: voter, FirstName: "Инициатор"},
+			Data: "sv:1",
+			Message: &telego.Message{MessageID: 7,
+				Chat: telego.Chat{ID: testChatID, Type: "supergroup"}},
+		}
+	}
+
+	for _, tc := range []struct {
+		name       string
+		adminVoter bool
+	}{
+		{"простой инициатор", false},
+		{"админ-инициатор без золотого голоса", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, db, fc := newFlowBot(t)
+			serviceableChat(t, b, db, testChatID)
+			if tc.adminVoter {
+				fc.resp["getChatMember"] =
+					`{"status":"administrator","user":{"id":7,"is_bot":false,"first_name":"И"}}`
+			}
+			if err := db.PutSpamVote(ctx, storage.SpamVote{
+				ChatID: testChatID, BotMsgID: 7, TargetMsgID: 555,
+				AuthorID: 42, InitiatorID: 7, Prob: 100, CreatedAt: time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.handleSpamVoteCallback(nil, voteQuery(7)); err != nil {
+				t.Fatal(err)
+			}
+			if n := fc.callCount("banChatMember"); n != 0 {
+				t.Fatalf("инициатор не должен резолвить вердикт (banChatMember=%d)", n)
+			}
+			if _, found, _ := db.GetSpamVote(ctx, testChatID, 7); !found {
+				t.Fatal("голосование должно пережить клик инициатора")
+			}
 		})
-		if err := db.SetChatApproval(context.Background(), -100555, storage.ChatPending); err != nil {
+	}
+}
+
+// TestMigrateChatStateCarriesBotAddedAt — дата появления бота переживает
+// апгрейд basic group → supergroup; легаси-чат дату не изобретает.
+func TestMigrateChatStateCarriesBotAddedAt(t *testing.T) {
+	ctx := context.Background()
+	oldID, newID := int64(-5000), int64(-100001)
+	at := time.Now().Add(-72 * time.Hour).Truncate(time.Second)
+
+	t.Run("дата переносится write-once", func(t *testing.T) {
+		b, db, _ := newFlowBot(t)
+		if err := db.RememberChat(ctx, storage.ChatInfo{ChatID: oldID, Title: "Old", Type: "group"}); err != nil {
 			t.Fatal(err)
 		}
-	}
-	startMsg := func(fromID int64) telego.Message {
-		return telego.Message{
-			Chat: telego.Chat{ID: fromID, Type: "private"},
-			From: &telego.User{ID: fromID, FirstName: "Юзер"},
-		}
-	}
-	sentPrompt := func(fc *fakeCaller) bool {
-		for _, body := range fc.callBodies("sendMessage") {
-			if strings.Contains(body, "appr:") || strings.Contains(body, "Секретный чат") {
-				return true
-			}
-		}
-		return false
-	}
-
-	t.Run("чужой /start не переспрашивает и не видит титулы", func(t *testing.T) {
-		b, db, fc := newFlowBot(t)
-		b.cfg.OwnerIDs = map[int64]struct{}{999: {}}
-		seedPending(t, b, db)
-
-		if err := b.handlePrivateStart(nil, startMsg(777)); err != nil {
+		if err := db.SetChatBotAddedAtIfEmpty(ctx, oldID, at); err != nil {
 			t.Fatal(err)
 		}
-		if sentPrompt(fc) {
-			t.Fatal("foreign /start must not re-send approval prompts nor leak pending titles")
+		b.migrateChatState(oldID, newID)
+		got, ok, err := db.GetChatBotAddedAt(ctx, newID)
+		if err != nil || !ok || !got.Equal(at) {
+			t.Fatalf("bot_added_at not carried: got %v ok=%v err=%v", got, ok, err)
+		}
+		if _, ok, _ := db.GetChatBotAddedAt(ctx, oldID); ok {
+			t.Error("old chat row must be gone")
 		}
 	})
 
-	t.Run("владелец получает переспрос", func(t *testing.T) {
-		b, db, fc := newFlowBot(t)
-		b.cfg.OwnerIDs = map[int64]struct{}{999: {}}
-		seedPending(t, b, db)
-
-		if err := b.handlePrivateStart(nil, startMsg(999)); err != nil {
+	t.Run("легаси-чат остаётся NULL", func(t *testing.T) {
+		b, db, _ := newFlowBot(t)
+		if err := db.RememberChat(ctx, storage.ChatInfo{ChatID: oldID, Title: "Old", Type: "group"}); err != nil {
 			t.Fatal(err)
 		}
-		if !sentPrompt(fc) {
-			t.Fatal("owner /start must re-ask all pending chats")
+		b.migrateChatState(oldID, newID)
+		if _, ok, _ := db.GetChatBotAddedAt(ctx, newID); ok {
+			t.Error("legacy chat must not invent an added-at date")
 		}
 	})
 }
 
-func TestForeignKickDuringReplyWait(t *testing.T) {
-	armWait := func(t *testing.T, b *Bot, db *storage.DB) {
-		t.Helper()
-		exp := time.Now().Add(time.Minute)
-		b.replies.Put(testChatID, testUserID, exp)
-		if err := db.PutPendingReply(context.Background(), storage.PendingReply{
-			ChatID: testChatID, UserID: testUserID, ExpiresAt: exp,
-		}); err != nil {
-			t.Fatal(err)
-		}
+// TestResolveReportTarget — только реплай: приветствие/сообщение ок,
+// боты и чужие сообщения бота — нет.
+func TestResolveReportTarget(t *testing.T) {
+	ctx := context.Background()
+	b, db, _ := newFlowBot(t)
+
+	cases := []struct {
+		name   string
+		r      *telego.Message
+		putGrt bool
+		wantID int64
+		wantOK bool
+	}{
+		{"реплай на обычное сообщение", &telego.Message{MessageID: 1, From: &telego.User{ID: 8}}, false, 8, true},
+		{"реплай на приветствие бота", &telego.Message{MessageID: 77, From: &telego.User{ID: 42, IsBot: true}}, true, 8, true},
+		{"реплай на чужую плашку бота", &telego.Message{MessageID: 78, From: &telego.User{ID: 42, IsBot: true}}, false, 0, false},
+		{"бот-цель отклонён", &telego.Message{MessageID: 2, From: &telego.User{ID: 99, IsBot: true}}, false, 0, false},
+		{"сервисный Telegram отклонён", &telego.Message{MessageID: 3, From: &telego.User{ID: 777000}}, false, 0, false},
+		{"канал-цель (отрицательный id) отклонён", &telego.Message{MessageID: 4, From: &telego.User{ID: -100500}}, false, 0, false},
+		{"без From", &telego.Message{MessageID: 6}, false, 0, false},
 	}
-	waitCleared := func(t *testing.T, b *Bot, db *storage.DB) {
-		t.Helper()
-		if _, ok := b.replies.Take(testChatID, testUserID); ok {
-			t.Fatal("reply wait must be cancelled")
-		}
-		rows, err := db.LoadAllPendingReplies(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(rows) != 0 {
-			t.Fatalf("pending_replies rows = %d, want 0", len(rows))
-		}
-	}
-
-	t.Run("ручной кик админа закрывает воронку left", func(t *testing.T) {
-		b, db, _ := newFlowBot(t)
-		serviceableChat(t, b, db, testChatID)
-		armWait(t, b, db)
-
-		upd := memberUpdate(testChatID, leftActor,
-			telego.User{ID: testUserID}, "member", "kicked")
-		if err := b.handleChatMember(nil, upd); err != nil {
-			t.Fatal(err)
-		}
-
-		kinds := statsKinds(t, db, testChatID, testUserID)
-		if kinds[storage.EventLeft] != 1 {
-			t.Fatalf("kinds = %v, want exactly one left (user must not hang in «В процессе»)", kinds)
-		}
-		waitCleared(t, b, db)
-	})
-
-	t.Run("свой бот-кик событий не дублирует", func(t *testing.T) {
-		b, db, _ := newFlowBot(t)
-		serviceableChat(t, b, db, testChatID)
-		armWait(t, b, db)
-
-		upd := memberUpdate(testChatID, telego.User{ID: 42},
-			telego.User{ID: testUserID}, "member", "kicked")
-		if err := b.handleChatMember(nil, upd); err != nil {
-			t.Fatal(err)
-		}
-
-		kinds := statsKinds(t, db, testChatID, testUserID)
-		for _, k := range []storage.EventKind{storage.EventLeft, storage.EventKick, storage.EventBan} {
-			if kinds[k] != 0 {
-				t.Fatalf("bot-origin kick recorded %v (all: %v) — initiator writes its own event", k, kinds)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.putGrt {
+				if err := db.PutGreeting(ctx, testChatID, 8, 77, time.Now()); err != nil {
+					t.Fatal(err)
+				}
 			}
-		}
-		waitCleared(t, b, db)
-	})
+			gotID, ok := b.resolveReportTarget(testChatID, tc.r)
+			if ok != tc.wantOK || gotID != tc.wantID {
+				t.Fatalf("got (%d,%v), want (%d,%v)", gotID, ok, tc.wantID, tc.wantOK)
+			}
+		})
+	}
 }
 
-func TestResolveSpamVoteGatesGlobalBaseOnBanSuccess(t *testing.T) {
-	vote := storage.SpamVote{
-		ChatID:      testChatID,
-		BotMsgID:    321,
-		TargetMsgID: 322,
-		AuthorID:    testUserID,
-		CreatedAt:   time.Now(),
-	}
-	run := func(t *testing.T, breakBan bool) bool {
-		t.Helper()
-		ctx := context.Background()
-		b, db, fc := newFlowBot(t)
-		serviceableChat(t, b, db, testChatID)
-		if err := db.PutSpamVote(ctx, vote); err != nil {
-			t.Fatal(err)
-		}
-		if breakBan {
-			fc.err["banChatMember"] = &telegoapi.Error{ErrorCode: 403, Description: "not enough rights"}
-		}
-		if !b.resolveSpamVote(vote, true, "тест") {
-			t.Fatal("resolver must win the take")
-		}
-		spamBanned, err := db.IsSpamBanned(ctx, testUserID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return spamBanned
-	}
+// TestJoinedLinePrecedence — цепочка фолбэков строки входа в карточке.
+func TestJoinedLinePrecedence(t *testing.T) {
+	ctx := context.Background()
+	const chat = int64(-300)
+	const user = int64(42)
+	old := time.Now().Add(-30 * 24 * time.Hour)
 
-	t.Run("несостоявшийся бан глобальную базу не пишет", func(t *testing.T) {
-		if run(t, true) {
-			t.Fatal("unenforceable verdict must not feed the global spammer base")
-		}
-	})
-	t.Run("удавшийся бан пишет базу", func(t *testing.T) {
-		if !run(t, false) {
-			t.Fatal("successful ban must add the user to the global spammer base")
-		}
-	})
+	cases := []struct {
+		name    string
+		setup   func(db *storage.DB)
+		wantHas string
+		wantNot string
+	}{
+		{"строка members главнее всего", func(db *storage.DB) {
+			db.UpsertMember(ctx, chat, user, old)
+		}, "Последний вход", "видимо"},
+		{"bot_added_at второй", func(db *storage.DB) {
+			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"})
+			db.SetChatBotAddedAtIfEmpty(ctx, chat, old)
+		}, "дата моего добавления", ""},
+		{"раннее событие третий", func(db *storage.DB) {
+			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"})
+			db.RecordEvent(ctx, chat, user, storage.EventJoin, old, "")
+		}, "самое раннее событие", ""},
+		{"ничего не известно — последний", func(*storage.DB) {}, "Вход: неизвестно", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b, db, _ := newFlowBot(t)
+			tc.setup(db)
+			got := b.joinedLine(chat, user)
+			if !strings.Contains(got, tc.wantHas) {
+				t.Errorf("line %q must contain %q", got, tc.wantHas)
+			}
+			if tc.wantNot != "" && strings.Contains(got, tc.wantNot) {
+				t.Errorf("line %q must NOT contain %q", got, tc.wantNot)
+			}
+		})
+	}
 }

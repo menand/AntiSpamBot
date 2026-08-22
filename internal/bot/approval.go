@@ -316,6 +316,8 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 		Username: upd.Chat.Username,
 	}
 	b.rememberChat(b.runCtx, info)
+	// Строка реестра создана — можно штамповать дату появления бота (/info).
+	b.markBotAddedAt(chatID)
 	b.log.Info("chat awaiting owner approval",
 		"chat", chatID, "title", upd.Chat.Title, "added_by", upd.From.ID)
 

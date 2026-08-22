@@ -116,19 +116,31 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 		b.log.Warn("send profile vote message", "err", err, "chat", chatID)
 		return
 	}
-	if err := b.db.PutSpamVote(b.runCtx, storage.SpamVote{
+	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, storage.SpamVote{
 		ChatID:      chatID,
 		BotMsgID:    sent.MessageID,
 		TargetMsgID: 0, // маркер профильной плашки: целевого сообщения нет
 		AuthorID:    userID,
 		Prob:        100, // ponytail: легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
 		CreatedAt:   time.Now(),
-	}); err != nil {
+	})
+	if err != nil {
 		// Без строки в БД кнопки мертвы, а свипер плашку не увидит (он читает
 		// только БД) — сообщение висело бы вечно. Снимаем сразу.
 		b.log.Error("persist profile vote", "err", err, "chat", chatID)
 		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
 		return
+	}
+	if !inserted {
+		// Плашка на этого юзера уже висит (например, успел прийти /spam) —
+		// сносим дубль, событий и уведомлений не пишем.
+		b.log.Info("profile plashka lost race — vote already pending", "chat", chatID, "user", userID)
+		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
+		return
+	}
+	// История подозрений для /info: только при живой плашке.
+	if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventSuspect, time.Now(), ""); err != nil {
+		b.log.Warn("record suspect event (profile)", "err", err, "chat", chatID, "user", userID)
 	}
 	b.notifyProfileSuspicion(chatID, userID, facts)
 }
