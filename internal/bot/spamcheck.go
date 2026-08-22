@@ -346,7 +346,10 @@ func (b *Bot) notifySpamSuspicion(message telego.Message) {
 // notifySpamVerdict шлёт подписанным владельцам итог голосования: кто решил,
 // раскладку голосов по именам и список чатов, где спамер добанен. targets
 // вычислил resolveSpamVote — там же, где решалось, читать ли бюллетени.
-func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, why string,
+// banned — удался ли локальный бан: вердикт без исполнения честно помечается,
+// иначе владельцы получают «забанен» ровно в том случае, где нужно бежать
+// проверять права.
+func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam, banned bool, why string,
 	ballots []storage.Ballot, alsoBanned []string) {
 	if len(targets) == 0 {
 		return
@@ -364,13 +367,24 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam bool, 
 	var sb strings.Builder
 	switch {
 	case v.TargetMsgID == 0 && spam:
-		sb.WriteString("⚖️ Вердикт: <b>спам-профиль</b>, юзер забанен")
+		sb.WriteString("⚖️ Вердикт: <b>спам-профиль</b>")
 	case v.TargetMsgID == 0:
 		sb.WriteString("⚖️ Вердикт: <b>профиль оставлен</b>")
 	case spam:
-		sb.WriteString("⚖️ Вердикт: <b>спам</b>, автор забанен")
+		sb.WriteString("⚖️ Вердикт: <b>спам</b>")
 	default:
 		sb.WriteString("⚖️ Вердикт: <b>не спам</b>")
+	}
+	switch {
+	case !spam:
+	case banned:
+		if v.TargetMsgID == 0 {
+			sb.WriteString(", юзер забанен")
+		} else {
+			sb.WriteString(", автор забанен")
+		}
+	default:
+		sb.WriteString(", но забанить не удалось — проверьте права бота в чате")
 	}
 	fmt.Fprintf(&sb, "\nЧат: %s\nАвтор: %s\nРешение: %s",
 		b.chatLink(b.runCtx, v.ChatID),
@@ -463,15 +477,19 @@ func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID,
 		return false, "none", errors.New("no spam providers enabled")
 	}
 	for i, p := range enabled {
-		pctx := ctx
-		if i == 0 && len(enabled) > 1 {
-			// Суб-бюджет только первичному: чтобы зависший запрос оставил
-			// время остальным фолбекам.
-			var cancel context.CancelFunc
-			pctx, cancel = context.WithTimeout(ctx, 12*time.Second)
-			defer cancel()
-		}
-		spam, err = p.c.Classify(pctx, system, facts)
+		// Попытка — в замыкании: cancel скоупится на одну итерацию, а не до
+		// выхода из classifyVerdict (defer-in-loop).
+		spam, err = func() (bool, error) {
+			pctx := ctx
+			if i == 0 && len(enabled) > 1 {
+				// Суб-бюджет только первичному: чтобы зависший запрос
+				// оставил время остальным фолбекам.
+				var cancel context.CancelFunc
+				pctx, cancel = context.WithTimeout(ctx, 12*time.Second)
+				defer cancel()
+			}
+			return p.c.Classify(pctx, system, facts)
+		}()
 		if err == nil {
 			return spam, p.name, nil
 		}
@@ -816,6 +834,9 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	if !taken {
 		return false
 	}
+	// banned — удался ли локальный бан: гейтит и глобальную базу, и
+	// кросс-бан (см. ниже).
+	banned := false
 	if spam {
 		if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
 			// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
@@ -825,6 +846,7 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 			// на восстановление (pending-строки уже не спасти).
 			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
 		} else {
+			banned = true
 			// Гасим активные проверки ПОСЛЕ успешного бана (до записи
 			// события): таймауты не должны добавить свой kick/noreply поверх
 			// spamban. Ответить по старой капче/якорю забаненный больше не
@@ -856,12 +878,17 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 				b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
 			}
 		}
-		// Общая база — по вердикту, независимо от того, хватило ли прав в
-		// исходном чате: вердикт вынесен людьми.
-		if err := b.db.AddSpamBanned(b.runCtx, v.AuthorID, v.ChatID, time.Now()); err != nil {
-			b.log.Warn("add spam banned", "err", err, "user", v.AuthorID)
+		// Общая база и кросс-бан — только при УДАВШЕМСЯ бане: неисполнимый
+		// вердикт (нет прав в исходном чате) не должен инстант-банить юзера
+		// во всех остальных чатах без единого бюллетеня там. Снимается это
+		// по-прежнему ручным unban в любом чате.
+		if banned {
+			if err := b.db.AddSpamBanned(b.runCtx, v.AuthorID, v.ChatID, time.Now()); err != nil {
+				b.log.Warn("add spam banned", "err", err, "user", v.AuthorID)
+			}
 		}
-		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID, "why", why)
+		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
+			"banned", banned, "why", why)
 	} else {
 		b.log.Info("spam verdict: not spam", "chat", v.ChatID, "user", v.AuthorID, "why", why)
 	}
@@ -873,10 +900,10 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	if spam || len(targets) > 0 {
 		b.goSafe("spamVerdictFanout", func() {
 			var alsoBanned []string
-			if spam {
+			if banned {
 				alsoBanned = b.banEverywhere(v.ChatID, v.AuthorID)
 			}
-			b.notifySpamVerdict(targets, v, spam, why, ballots, alsoBanned)
+			b.notifySpamVerdict(targets, v, spam, banned, why, ballots, alsoBanned)
 		})
 	}
 	return true

@@ -42,12 +42,19 @@ func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, 
 
 // canManageChat отвечает, может ли юзер смотреть статистику и крутить
 // настройки конкретного чата: либо владелец бота, либо админ/создатель чата.
-// Статус админа берётся из кэша (инвалидируется на каждом chat_member; в
-// чатах, где бот сам не админ, Telegram таких событий не шлёт — поэтому у
-// негативных ответов короткий TTL) — тот же класс устаревания, что уже
-// принят для золотого голоса в спам-голосовании.
+// Админство перепроверяется ЖИВО (getChatMember мимо кэша): в чатах, где бот
+// сам не админ, Telegram не доставляет chat_member-события, и пониженный
+// админ иначе сидел бы в 6-часовом кэше со всеми кнопками. Ошибка API —
+// откат на кэш (тот же компромисс «ошибка не отбирает права», что и у
+// punishNonAdmin), так что один 429 не выкидывает настоящего админа.
 func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
-	return b.isOwner(userID) || b.isChatAdminCached(ctx, chatID, userID)
+	if b.isOwner(userID) {
+		return true
+	}
+	if isAdmin, sure := b.isChatAdminFresh(ctx, chatID, userID); sure {
+		return isAdmin
+	}
+	return b.isChatAdminCached(ctx, chatID, userID)
 }
 
 // chatSettings загружает пер-чатовые настройки для РЕЗОЛВИНГА (параметры

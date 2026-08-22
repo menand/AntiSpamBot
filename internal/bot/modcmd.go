@@ -38,7 +38,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 
 	targetID, targetMsgID, ok := b.resolveModTarget(message)
 	if !ok {
-		b.replyTo(ctx, message,
+		b.refuseAndDelete(ctx, message,
 			"Не понял, кого "+action+"ать. Ответь командой на сообщение юзера "+
 				"или на моё приветствие о нём, либо укажи @username (я должен был его видеть).")
 		return nil
@@ -129,19 +129,19 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	// RestrictChatMember работает только в супергруппах — честный отказ
 	// вместо «проверь права» после бесполезной лестницы ретраев.
 	if message.Chat.Type != "supergroup" {
-		b.replyTo(ctx, message, "Мьют работает только в супергруппах.")
+		b.refuseAndDelete(ctx, message, "Мьют работает только в супергруппах.")
 		return nil
 	}
 	d, ok := parseMuteDuration(message.Text)
 	if !ok {
-		b.replyTo(ctx, message,
+		b.refuseAndDelete(ctx, message,
 			"Не понял срок. Примеры: /mute 45, /mute 45m, /mute 3h, /mute 5d — "+
 				"реплаем на сообщение юзера или с @username.")
 		return nil
 	}
 	targetID, _, ok := b.resolveModTarget(message)
 	if !ok {
-		b.replyTo(ctx, message,
+		b.refuseAndDelete(ctx, message,
 			"Не понял, кого мьютить. Ответь командой на сообщение юзера "+
 				"или укажи @username (я должен был его видеть).")
 		return nil
@@ -246,6 +246,16 @@ func (b *Bot) commandForUs(text string) bool {
 		return strings.EqualFold(f[0][i+1:], b.me.Username)
 	}
 	return true
+}
+
+// refuseAndDelete — отказ по неразрешённой мод-команде: ответ якорится на
+// команду, ПОТОМ команда удаляется (порядок punishNonAdmin) — служебной
+// команде нечего висеть в чате, как и на успешных ветках.
+func (b *Bot) refuseAndDelete(ctx *th.Context, message telego.Message, text string) {
+	b.replyTo(ctx, message, text)
+	if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
+		b.log.Debug("delete refused mod command", "err", err, "chat", message.Chat.ID)
+	}
 }
 
 // punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ +
@@ -516,7 +526,9 @@ func (b *Bot) sendPlain(chatID int64, threadID int, receiverID int64, text strin
 	if receiverID != 0 {
 		params = params.WithReceiverUserID(receiverID)
 	}
-	_, _ = b.api.SendMessage(b.runCtx, params)
+	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
+		b.log.Debug("plain send", "err", err, "chat", chatID)
+	}
 }
 
 func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string) {

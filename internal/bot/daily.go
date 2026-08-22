@@ -156,8 +156,9 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	c.Title = truncateLabel(titleOrID(c), 60) // рун-безопасно; простыня в названии чата не съест бюджет отчёта
 	link := chatLinkHTML(c)
 	banned := s.Banned + s.SpamBanned
+	modActs := s.ModKicked + s.ModBanned
 	msgs := s.MsgNewcomer + s.MsgOldtimer
-	funnel := s.Joined + s.Passed + s.Kicked + s.Left + banned + s.Aborted
+	funnel := s.Joined + s.Passed + s.Kicked + s.Left + banned + modActs + s.Aborted
 	switch {
 	case funnel+msgs == 0:
 		return fmt.Sprintf("%s — без событий", link)
@@ -166,6 +167,9 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	}
 	line := fmt.Sprintf("%s — вступило %d, прошло %d, вышли сами %d, кик %d, бан %d",
 		link, s.Joined, s.Passed, s.Left, s.Kicked, banned)
+	if modActs > 0 {
+		line += fmt.Sprintf(", админ-команды %d", modActs)
+	}
 	if s.Aborted > 0 {
 		line += fmt.Sprintf(", не проверено %d", s.Aborted)
 	}
@@ -190,31 +194,14 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 		return
 	}
 
-	s, err := b.db.QueryStats(ctx, chatID, from, until)
+	v, err := b.loadStatsView(ctx, chatID, from, until)
 	if err != nil {
 		b.log.Warn("daily digest: query stats", "err", err, "chat", chatID)
 		return
 	}
-	topWriters, err := b.db.TopWriters(ctx, chatID, from, until, 5)
-	if err != nil {
-		b.log.Warn("daily digest: top writers", "err", err, "chat", chatID)
-	}
-	// -1 = без лимита (SQLite: LIMIT -1); длину сообщения режет renderStats.
-	topFailers, err := b.db.TopFailers(ctx, chatID, from, until, -1)
-	if err != nil {
-		b.log.Warn("daily digest: top failers", "err", err, "chat", chatID)
-	}
-	newMembers, err := b.db.PassedUsers(ctx, chatID, from, until)
-	if err != nil {
-		b.log.Warn("daily digest: new members", "err", err, "chat", chatID)
-	}
-	banned, err := b.db.EventUsers(ctx, chatID, from, until, storage.EventBan, storage.EventSpamBan)
-	if err != nil {
-		b.log.Warn("daily digest: banned users", "err", err, "chat", chatID)
-	}
 
 	// Нечего рассказывать — чат затих, не спамим пустой сводкой.
-	if !digestHasContent(s, topWriters, topFailers, newMembers, banned) {
+	if !digestHasContent(v.s, v.topWriters, v.topFailers, v.newMembers, v.banned) {
 		// Но помечаем отправленной, чтобы не перепроверять десятки раз за день.
 		if err := b.db.MarkDailyStatsSent(ctx, chatID, today); err != nil {
 			b.log.Warn("daily digest: mark sent (empty)", "err", err, "chat", chatID)
@@ -225,16 +212,9 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 		return
 	}
 
-	infos, err := b.db.GetUserInfos(ctx,
-		collectUserIDs(topWriters, topFailers, newMembers, banned))
-	if err != nil {
-		b.log.Warn("daily digest: user infos", "err", err, "chat", chatID)
-		infos = map[int64]storage.UserInfo{}
-	}
-
 	header := "🌅 <b>Сводка за сутки</b>\n\n"
-	body := renderStats(periodYesterday, "вчерашний день", s, b.cfg.NewcomerDays,
-		newMembers, topWriters, topFailers, banned, infos)
+	body := renderStats(periodYesterday, "вчерашний день", v.s, b.cfg.NewcomerDays,
+		v.newMembers, v.topWriters, v.topFailers, v.banned, v.infos)
 
 	_, err = b.api.SendMessage(ctx,
 		tu.Message(tu.ID(chatID), header+body).
@@ -256,8 +236,8 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 	b.digestMu.Unlock()
 	b.log.Info("daily digest sent",
 		"chat", chatID,
-		"messages", s.MsgNewcomer+s.MsgOldtimer,
-		"joined", s.Joined)
+		"messages", v.s.MsgNewcomer+v.s.MsgOldtimer,
+		"joined", v.s.Joined)
 }
 
 // digestHasContent отвечает, покажет ли сводка хоть что-нибудь. Обязан
@@ -266,7 +246,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 // заслуживает сводки (join мог остаться за окном: вошёл в 23:59, прошёл
 // капчу в 00:01).
 func digestHasContent(s storage.Stats, topWriters, topFailers, newMembers, banned []storage.UserCount) bool {
-	return s.Joined+s.Passed+s.Kicked+s.Banned+s.SpamBanned+s.Left+s.Aborted+
+	return s.Joined+s.Passed+s.Kicked+s.Banned+s.ModKicked+s.ModBanned+s.SpamBanned+s.Left+s.Aborted+
 		s.MsgNewcomer+s.MsgOldtimer+
 		len(topWriters)+len(topFailers)+len(newMembers)+len(banned) > 0
 }

@@ -125,11 +125,13 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		}
 		// Ожидание «ответь на приветствие» тоже снимается тихо: ушедшему
 		// (или забаненному вердиктом/командой) кик за молчание не грозит.
-		// Но только собственный уход (left) закрывает воронку событием: при
-		// reply-check «прошёл» ещё не записан, и без left юзер навсегда
-		// висел бы в «В процессе». kicked не дублируем — kick/ban уже пишут
-		// инициаторы (waitReplyTimeout, /kick, /ban, вердикт антиспама).
-		if b.cancelReplyWait(upd.Chat.ID, user.ID) && newStatus == "left" && !botOrigin {
+		// Любой ЧУЖОЙ уход (left или kicked) закрывает воронку событием:
+		// при reply-check «прошёл» ещё не записан, и без left юзер навсегда
+		// висел бы в «В процессе» — ручной кик админа из клиента не пишет
+		// ничего сам. Свои события не дублируем: бот-инициаторы (бот-кик,
+		// waitReplyTimeout, /kick, /ban, вердикт антиспама) уже записали
+		// своё (botOrigin), а их Take снимает ожидание до нашей ветки.
+		if b.cancelReplyWait(upd.Chat.ID, user.ID) && !botOrigin {
 			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
 				b.log.Warn("record left event (reply wait)", "err", err)
 			}
@@ -460,7 +462,14 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			// new_chat_members может прийти следующим poll'ом и задвоить
 			// событие spamban в статистике.
 			handedOff = true
-			time.AfterFunc(time.Minute, func() { b.store.FinishKickoff(chatID, user.ID) })
+			// Голый AfterFunc сознательно вне runCtx: замок должен сняться
+			// и после шатдауна/рестарта. Тело завёрнуто в goSafe — паника
+			// не должна убивать процесс (recover не пересекает горутины).
+			time.AfterFunc(time.Minute, func() {
+				b.goSafe("finishKickoffLinger", func() {
+					b.store.FinishKickoff(chatID, user.ID)
+				})
+			})
 		})
 		return
 	}
@@ -646,15 +655,21 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 		b.log.Debug("start menu send", "err", err, "user", userID)
 	}
 	// Владелец мог не получить ЛС-вопрос о pending-чате (закрытая личка на
-	// момент добавления): /start — единственная дверь, которая открывается
-	// со стороны владельца. Переспрашиваем все ждущие чаты.
-	b.reAskOwnerApprovals(message.Chat.ID)
+	// момент добавления): его /start — единственная дверь, которая
+	// открывается со стороны владельца. Переспрашиваем все ждущие чаты.
+	// Гейт обязателен: /start в ЛС может послать кто угодно, а переспрос
+	// рассылает кнопки appr: всем владельцам и раскрывает титулы
+	// pending-чатов — чужакам туда хода нет.
+	if b.isOwner(userID) {
+		b.reAskOwnerApprovals(message.Chat.ID)
+	}
 	return nil
 }
 
 // reAskOwnerApprovals повторно рассылает вопросы по всем pending-чатам —
 // выполняет обещание подсказки «напиши мне /start». Вызывается из
-// handlePrivateStart (только владелец доходит до этой точки в ЛС).
+// handlePrivateStart ПОД гейтом isOwner: чужой /start не должен ни
+// генерировать владельцам кнопки, ни видеть титулы ожидающих чатов.
 func (b *Bot) reAskOwnerApprovals(dmChatID int64) {
 	pending, err := b.db.PendingChats(b.runCtx)
 	if err != nil {
@@ -680,6 +695,20 @@ func (b *Bot) reAskOwnerApprovals(dmChatID int64) {
 	}
 }
 
+// migrateChatState переносит всё состояние чата при апгрейде basic-группы в
+// супергруппу (оба сервис-сообщения ведут сюда — двойное срабатывание
+// безвредно, MigrateChat идемпотентен). Статус подтверждения читается ДО
+// MigrateChat — она удаляет старую строку реестра; иначе мигрировавший
+// approved-чат молча ушёл бы в ожидание подтверждения как «новый».
+func (b *Bot) migrateChatState(oldID, newID int64) {
+	b.log.Info("chat migrating to supergroup", "old", oldID, "new", newID)
+	b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
+	if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
+		b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
+	}
+	b.releaseMigratedCaptchas(oldID, newID)
+}
+
 func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error {
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {
 		return nil
@@ -690,28 +719,11 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 	// обрабатываем оба для подстраховки. MigrateChat идемпотентен — двойное
 	// срабатывание безвредно.
 	if message.MigrateToChatID != 0 {
-		oldID := message.Chat.ID
-		newID := message.MigrateToChatID
-		b.log.Info("chat migrating to supergroup", "old", oldID, "new", newID)
-		// Статус подтверждения читается ДО MigrateChat — она удаляет старую
-		// строку реестра; иначе мигрировавший approved-чат молча ушёл бы в
-		// ожидание подтверждения как «новый».
-		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
-		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
-			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
-		}
-		b.releaseMigratedCaptchas(oldID, newID)
+		b.migrateChatState(message.Chat.ID, message.MigrateToChatID)
 		return nil
 	}
 	if message.MigrateFromChatID != 0 {
-		oldID := message.MigrateFromChatID
-		newID := message.Chat.ID
-		b.log.Info("chat migrated from basic group", "old", oldID, "new", newID)
-		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
-		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
-			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
-		}
-		b.releaseMigratedCaptchas(oldID, newID)
+		b.migrateChatState(message.MigrateFromChatID, message.Chat.ID)
 		return nil
 	}
 
