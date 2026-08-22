@@ -40,9 +40,14 @@ const (
 	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
 	// EventLeft — юзер вышел (или был убран админом), не дождавшись конца
 	// капчи: ни пасс, ни провал. Воронка становится честной: входило =
-	// прошло + кикнуто + забанено + вышло само + в процессе. Без него такие
-	// юзеры навсегда висели бы в «В процессе» в статистике.
+	// прошло + кикнуто + забанено + вышло само + сорвалось + в процессе. Без
+	// него такие юзеры навсегда висели бы в «В процессе» в статистике.
 	EventLeft EventKind = "left"
+	// EventAbort — капча сорвалась по вине инфраструктуры (restrict/send не
+	// прошли после ретраев): юзер остался в чате и размьючен, «вышли сами»
+	// было бы ложью. Закрывает воронку так же, как left, но рендерится
+	// отдельной строкой «не удалось проверить».
+	EventAbort EventKind = "abort"
 	// EventMute — мьют командой /mute. Питает список «10 последних» /unmute;
 	// QueryStats его сознательно игнорирует — мьют не относится к воронке капчи.
 	EventMute EventKind = "mute"
@@ -129,6 +134,7 @@ type Stats struct {
 	Banned      int
 	SpamBanned  int // баны ИИ-антиспама; отдельно от воронки капчи
 	Left        int // вышли сами посреди капчи (ни пасс, ни кик)
+	Aborted     int // капча сорвалась по вине инфраструктуры (не «вышли сами»)
 	MsgNewcomer int
 	MsgOldtimer int
 	PeriodFrom  time.Time
@@ -166,6 +172,8 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 			s.SpamBanned = n
 		case EventLeft:
 			s.Left = n
+		case EventAbort:
+			s.Aborted = n
 		}
 	}
 	rows.Close()

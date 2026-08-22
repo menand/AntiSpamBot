@@ -187,15 +187,17 @@ func (b *Bot) waitReplyTimeout(p *replyPending) {
 	}
 
 	count, err := b.db.IncrementAttempt(ctx, p.ChatID, p.UserID, attemptsTTL)
+	incFailed := false
 	if err != nil {
 		b.log.Warn("increment attempt (reply)", "err", err)
-		count = 1 // считаем первой попыткой и едем дальше
+		count = 1        // считаем первой попыткой и едем дальше
+		incFailed = true // счётчик ненадёжен — бан за «повторное молчание» не вешаем
 	}
 	// Событие и уведомление — ПОСЛЕ успешного действия (бан, которого не
 	// было, не должен попадать в статистику), а pending_replies удаляем
 	// только после успеха: при провале рестарт восстановит ожидание и
 	// повторит наказание, иначе мьют остался бы навсегда.
-	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
+	if !incFailed && count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
 		if err := b.banShort(ctx, p.ChatID, p.UserID); err != nil {
 			b.log.Error("ban silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
@@ -234,7 +236,17 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 	for _, row := range rows {
 		expires := row.ExpiresAt
 		if expires.Before(now) {
+			// Истекла, пока бот лежал — считаем таймаутом немедленно. Грейс
+			// синхронизируем и в БД: строка после наказания удаляется guard'ом
+			// по expires_at, и со старым дедлайном удаление промахнулось бы —
+			// кик повторялся бы на каждом рестарте.
 			expires = now.Add(1 * time.Second)
+			if err := b.db.PutPendingReply(ctx, storage.PendingReply{
+				ChatID: row.ChatID, UserID: row.UserID, ExpiresAt: expires,
+			}); err != nil {
+				b.log.Warn("sync restored reply deadline", "err", err,
+					"chat", row.ChatID, "user", row.UserID)
+			}
 		}
 		p := b.replies.Put(row.ChatID, row.UserID, expires)
 		b.goSafe("waitReplyTimeout", func() { b.waitReplyTimeout(p) })

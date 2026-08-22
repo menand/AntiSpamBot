@@ -25,18 +25,24 @@ import (
 // ok:true/result:true. calls копятся под мьютом — telego дергает API из
 // горутин (goSafe).
 type fakeCaller struct {
-	mu    sync.Mutex
-	calls []string
-	resp  map[string]string           // method → raw JSON result
-	err   map[string]*telegoapi.Error // method → ошибка
+	mu     sync.Mutex
+	calls  []string
+	bodies []string                    // тела запросов, параллельно с calls (индексы совпадают)
+	resp   map[string]string           // method → raw JSON result
+	err    map[string]*telegoapi.Error // method → ошибка
 	// errWhen — точечный сбой: метод проходит, если fn(data)==false.
 	errWhen func(method string, data *telegoapi.RequestData) bool
 }
 
 func (f *fakeCaller) Call(_ context.Context, url string, data *telegoapi.RequestData) (*telegoapi.Response, error) {
 	method := url[strings.LastIndexByte(url, '/')+1:]
+	body := ""
+	if data != nil && data.BodyRaw != nil {
+		body = string(data.BodyRaw)
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, method)
+	f.bodies = append(f.bodies, body)
 	apiErr := f.err[method]
 	failWhen := f.errWhen != nil && f.errWhen(method, data)
 	want := f.resp[method]
@@ -70,6 +76,19 @@ func (f *fakeCaller) callCount(method string) int {
 		}
 	}
 	return n
+}
+
+// callBodies возвращает тела всех вызовов данного метода (в порядке отправки).
+func (f *fakeCaller) callBodies(method string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for i, m := range f.calls {
+		if m == method && i < len(f.bodies) {
+			out = append(out, f.bodies[i])
+		}
+	}
+	return out
 }
 
 // newFlowBot — бот с fake-API для сквозных тестов карательного пути.
@@ -143,6 +162,7 @@ func statsKinds(t *testing.T, db *storage.DB, chatID, userID int64) map[storage.
 		storage.EventJoin: s.Joined, storage.EventPass: s.Passed,
 		storage.EventKick: s.Kicked, storage.EventBan: s.Banned,
 		storage.EventLeft: s.Left, storage.EventSpamBan: s.SpamBanned,
+		storage.EventAbort: s.Aborted,
 	}
 }
 
@@ -202,7 +222,7 @@ func TestOnFailLadder(t *testing.T) {
 	}{
 		{"первый провал — тихий кик", 0, 3, "", storage.EventKick},
 		{"последний провал — бан", 2, 3, "", storage.EventBan},
-		{"per-chat override max=1", 0, 1, "", storage.EventBan},
+		{"пер-чатовый override max=1", 0, 0, "", storage.EventBan},
 		{"упавший бан события не пишет", 2, 3, "banChatMember", ""},
 		{"упавший unban кика события не пишет", 0, 3, "unbanChatMember", ""},
 	}
@@ -210,7 +230,15 @@ func TestOnFailLadder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			b, db, fc := newFlowBot(t)
-			b.cfg.MaxAttempts = tc.maxAttempts
+			if tc.maxAttempts > 0 {
+				b.cfg.MaxAttempts = tc.maxAttempts
+			} else {
+				// Настоящий пер-чатовый override: max_attempts = 1 в настройках.
+				one := 1
+				if err := db.SetMaxAttempts(ctx, testChatID, &one); err != nil {
+					t.Fatal(err)
+				}
+			}
 			for i := 0; i < tc.preAttempts; i++ {
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)
@@ -310,20 +338,29 @@ func TestUserLeftMidCaptcha(t *testing.T) {
 		}
 	})
 
-	t.Run("апдейт от бота при живой капче — скип целиком", func(t *testing.T) {
+	t.Run("апдейт от бота — чистка без событий", func(t *testing.T) {
 		b, db, _ := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
-		p := putCaptcha(b, db, testChatID, testUserID, 50)
+		putCaptcha(b, db, testChatID, testUserID, 50)
 
+		// Инициатор в ДРУГОМ чате (например, banEverywhere) событие уже
+		// записал у себя; лево-ветка обязана погасить сиротскую капчу этого
+		// чата (иначе таймаут снял бы кросс-бан через unban), но не писать
+		// поверх инициатора ни left, ни kick.
 		upd := memberUpdate(testChatID, *b.me, telego.User{ID: testUserID}, "member", "kicked")
 		if err := b.handleChatMember(nil, upd); err != nil {
 			t.Fatal(err)
 		}
-		if live, ok := b.store.Get(testChatID, testUserID); !ok || live != p {
-			t.Fatal("bot-origin update must not touch the live captcha")
+		if _, ok := b.store.Get(testChatID, testUserID); ok {
+			t.Fatal("bot-origin update must cancel the orphaned captcha")
 		}
-		if rows := pendingRows(t, db); len(rows) != 1 {
-			t.Fatalf("pending rows = %d, want 1", len(rows))
+		if rows := pendingRows(t, db); len(rows) != 0 {
+			t.Fatalf("pending rows = %d, want 0", len(rows))
+		}
+		kinds := statsKinds(t, db, testChatID, testUserID)
+		total := kinds[storage.EventLeft] + kinds[storage.EventKick] + kinds[storage.EventBan]
+		if total != 0 {
+			t.Fatalf("bot-origin cleanup recorded events: %v", kinds)
 		}
 	})
 }

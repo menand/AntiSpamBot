@@ -96,12 +96,13 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	// (вызывающие onFail всегда забирают pending через Take ДО кика, так что
 	// для них этот lookup промахнётся).
 	if newStatus == "left" || newStatus == "kicked" {
-		// Наши собственные действия (fail-кик капчи, вердикт антиспама,
-		// waitTimeout) уже записали своё событие и погасили pending/reply —
-		// лево-ветке тут делать нечего. Зеркало forgiveness-хука ниже.
-		if b.me != nil && upd.From.ID == b.me.ID {
-			return nil
-		}
+		// Свои события (fail-кик капчи, вердикт антиспама, waitTimeout,
+		// кросс-бан banEverywhere в ДРУГОМ чате) уже записали своё — лево-ветка
+		// не пишет поверх них НИЧЕГО. Но чистку состояния (pending/reply/таймер)
+		// она выполняет и для своих: инициатор мог погасить капчу только в
+		// своём чате (cancelCaptchaSilent), а сиротский таймаут в чужом чате
+		// поднял бы кросс-бан через unban-половину kick'а.
+		botOrigin := b.me != nil && upd.From.ID == b.me.ID
 		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
 			p.Cancel()
 			if err := b.db.DeletePending(b.runCtx, upd.Chat.ID, user.ID); err != nil {
@@ -109,16 +110,18 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 					"chat", upd.Chat.ID, "user", user.ID)
 			}
 			if err := b.deleteBotMessage(b.runCtx, upd.Chat.ID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
-				b.log.Warn("delete captcha after user left",
+				b.log.Debug("delete captcha after user left (already gone?)",
 					"err", err, "chat", upd.Chat.ID, "msg", p.MessageID)
 			}
 			// Не пасс и не провал — отдельный счётчик, чтобы воронка в
 			// статистике сходилась (иначе такие юзеры навсегда в «В процессе»).
-			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
-				b.log.Warn("record left event", "err", err)
+			if !botOrigin {
+				if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
+					b.log.Warn("record left event", "err", err)
+				}
 			}
 			b.log.Info("captcha cancelled — user left mid-captcha",
-				"chat", upd.Chat.ID, "user", user.ID)
+				"chat", upd.Chat.ID, "user", user.ID, "bot_origin", botOrigin)
 		}
 		// Ожидание «ответь на приветствие» тоже снимается тихо: ушедшему
 		// (или забаненному вердиктом/командой) кик за молчание не грозит.
@@ -126,7 +129,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		// reply-check «прошёл» ещё не записан, и без left юзер навсегда
 		// висел бы в «В процессе». kicked не дублируем — kick/ban уже пишут
 		// инициаторы (waitReplyTimeout, /kick, /ban, вердикт антиспама).
-		if b.cancelReplyWait(upd.Chat.ID, user.ID) && newStatus == "left" {
+		if b.cancelReplyWait(upd.Chat.ID, user.ID) && newStatus == "left" && !botOrigin {
 			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
 				b.log.Warn("record left event (reply wait)", "err", err)
 			}
@@ -637,10 +640,44 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 		text += fmt.Sprintf("\n\n<i>Твой Telegram ID: <code>%d</code></i>", message.From.ID)
 	}
 
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
+	if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
 		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(b.mainMenuKeyboard(userID)))
+		WithReplyMarkup(b.mainMenuKeyboard(userID))); err != nil {
+		b.log.Debug("start menu send", "err", err, "user", userID)
+	}
+	// Владелец мог не получить ЛС-вопрос о pending-чате (закрытая личка на
+	// момент добавления): /start — единственная дверь, которая открывается
+	// со стороны владельца. Переспрашиваем все ждущие чаты.
+	b.reAskOwnerApprovals(message.Chat.ID)
 	return nil
+}
+
+// reAskOwnerApprovals повторно рассылает вопросы по всем pending-чатам —
+// выполняет обещание подсказки «напиши мне /start». Вызывается из
+// handlePrivateStart (только владелец доходит до этой точки в ЛС).
+func (b *Bot) reAskOwnerApprovals(dmChatID int64) {
+	pending, err := b.db.PendingChats(b.runCtx)
+	if err != nil {
+		b.log.Warn("re-ask approvals: list pending", "err", err)
+		return
+	}
+	for _, c := range pending {
+		info := storage.ChatInfo{
+			ChatID: c.ChatID, Title: c.Title, Type: c.Type, Username: c.Username,
+		}
+		adderLabel := "Кто добавил: неизвестно (переспрос по команде /start)"
+		configured, delivered := b.sendOwnerApprovalPrompt(b.runCtx, c.ChatID, info, adderLabel)
+		if configured && !delivered {
+			// Личка по-прежнему закрыта — честно скажем об этом в ЛС-меню.
+			if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(dmChatID),
+				fmt.Sprintf("🤖 Чат «%s» всё ещё ждёт подтверждения, но я не могу доставить тебе вопрос в этот диалог.",
+					html.EscapeString(titleOrID(c))))); err != nil {
+				b.log.Debug("re-ask delivery notice", "err", err)
+			}
+			continue
+		}
+		b.log.Info("approval prompt re-sent on start", "chat", c.ChatID)
+	}
 }
 
 func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error {
@@ -660,10 +697,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		// строку реестра; иначе мигрировавший approved-чат молча ушёл бы в
 		// ожидание подтверждения как «новый».
 		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
-		b.releaseMigratedCaptchas(oldID, newID)
 		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
 			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
 		}
+		b.releaseMigratedCaptchas(oldID, newID)
 		return nil
 	}
 	if message.MigrateFromChatID != 0 {
@@ -671,10 +708,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		newID := message.Chat.ID
 		b.log.Info("chat migrated from basic group", "old", oldID, "new", newID)
 		b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
-		b.releaseMigratedCaptchas(oldID, newID)
 		if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
 			b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
 		}
+		b.releaseMigratedCaptchas(oldID, newID)
 		return nil
 	}
 
@@ -958,9 +995,11 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
 		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
 		// Воронку закрываем: join уже записан, а капчи не будет — иначе юзер
-		// навсегда зависнет в «В процессе». releaseOnAbort — страховка от
-		// частично применённого restriction (таймаут после применения).
-		b.recordLeftEvent(ctx, chatID, user.ID, "restrict failed")
+		// навсегда зависнет в «В процессе». Это abort (вина инфраструктуры),
+		// не «вышли сами»: юзер никуда не уходил и будет размучен ниже.
+		// releaseOnAbort — страховка от частично применённого restriction
+		// (таймаут после применения).
+		b.recordAbortEvent(ctx, chatID, user.ID, "restrict failed")
 		b.releaseOnAbort(ctx, chatID, user.ID)
 		return
 	}
@@ -1087,8 +1126,8 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 			b.log.Error("send captcha", "err", err, "chat", chatID, "user", user.ID)
 			// Не USER_NOT_PARTICIPANT — про юзера неизвестно ничего, но капча
 			// сорвалась после ретраев. releaseOnAbort ниже впустит его; здесь
-			// закрываем воронку, чтобы не копить вечное «В процессе».
-			b.recordLeftEvent(ctx, chatID, user.ID, "captcha send failed")
+			// закрываем воронку как abort (инфраструктура), не «вышли сами».
+			b.recordAbortEvent(ctx, chatID, user.ID, "captcha send failed")
 		}
 		// releaseOnAbort: при живом ctx (сетевой фейл) — полный бюджет ретраев,
 		// при отменённом (shutdown) — detached, иначе мут не снялся бы.
@@ -1193,23 +1232,38 @@ func (b *Bot) waitTimeout(p *captcha.Pending) {
 // колбэков (клики теперь приходят с новым chat_id, Take промахивается), а их
 // таймауты стреляли бы наказаниями в мёртвый id. Telegram переносит
 // участника вместе с restriction, поэтому гасим всё и снимаем капча-мьют в
-// НОВОМ чате (семантика releaseOnAbort). Fail-open сознательно: человек
-// входит без повторной капчи — миграция редкое админское действие, а
-// перевзвести капчу под новым id всё равно нечем (таймеры захвати старый).
+// НОВОМ чате (семантика releaseOnAbort). Воронка каждого выпущенного юзера
+// закрывается пассом: пройти проверку по старой капче/якорю он больше не
+// может — невозможность ответить не его вина (прецедент /mute). Вызывается
+// ПОСЛЕ MigrateChat, чтобы события легли сразу под новый id. Fail-open
+// сознательно: человек входит без повторной капчи — миграция редкое админское
+// действие, а перевзвести капчу под новым id нечем (таймеры захвати старый).
 func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 	for _, p := range b.store.TakeChat(oldID) {
 		p.Cancel()
 		// MigrateChat уже снёс строки старого чата; удаление здесь —
-		// страховка на вызов ДО MigrateChat (порядок веток равнозначен).
-		_ = b.db.DeletePending(b.runCtx, oldID, p.UserID)
+		// страховка от гонки с параллельным рестартом.
+		if err := b.db.DeletePending(b.runCtx, oldID, p.UserID); err != nil {
+			b.log.Debug("delete migrated pending (already gone?)",
+				"err", err, "old", oldID, "user", p.UserID)
+		}
+		if err := b.db.RecordEvent(b.runCtx, newID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (migrated captcha)", "err", err)
+		}
 		b.releaseOnAbort(b.runCtx, newID, p.UserID)
 		b.log.Info("captcha released across chat migration",
 			"old", oldID, "new", newID, "user", p.UserID)
 	}
 	for _, p := range b.replies.TakeChat(oldID) {
 		p.Cancel()
+		if err := b.db.RecordEvent(b.runCtx, newID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (migrated reply wait)", "err", err)
+		}
 	}
-	_ = b.db.DeletePendingRepliesChat(b.runCtx, oldID)
+	if err := b.db.DeletePendingRepliesChat(b.runCtx, oldID); err != nil {
+		b.log.Debug("delete migrated pending replies (already gone?)",
+			"err", err, "old", oldID)
+	}
 }
 
 // cancelCaptchaSilent тихо гасит активную капчу юзера после успешного
@@ -1230,15 +1284,26 @@ func (b *Bot) cancelCaptchaSilent(chatID, userID int64) {
 	}
 }
 
-// recordLeftEvent — терминальное событие для сорванной капчи (restrict/send
-// упали после ретраев, юзер вышел до доставки): join уже записан, и без
-// закрывающего события юзер навсегда остался бы в «В процессе».
+// recordLeftEvent — терминальное «вышли сами»: юзер действительно ушёл до
+// доставки капчи (USER_NOT_PARTICIPANT, liveness-проверка). Join уже записан,
+// и без закрывающего события юзер навсегда остался бы в «В процессе».
 func (b *Bot) recordLeftEvent(ctx context.Context, chatID, userID int64, why string) {
 	if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventLeft, time.Now(), ""); err != nil {
 		b.log.Warn("record left event", "err", err)
 		return
 	}
 	b.log.Info("captcha funnel closed with left event", "chat", chatID, "user", userID, "why", why)
+}
+
+// recordAbortEvent — терминальный abort для сорванной по нашей вине капчи
+// (restrict/send упали после ретраев): юзер остался в чате, и «вышли сами»
+// было бы ложью в статистике. Воронка закрывается тем же счётом.
+func (b *Bot) recordAbortEvent(ctx context.Context, chatID, userID int64, why string) {
+	if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventAbort, time.Now(), ""); err != nil {
+		b.log.Warn("record abort event", "err", err)
+		return
+	}
+	b.log.Info("captcha funnel closed with abort event", "chat", chatID, "user", userID, "why", why)
 }
 
 // onSuccess завершает капчу победой. answer — «выбрал N-й (эмодзи)» с кнопки,
@@ -1312,9 +1377,11 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 
 func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) error {
 	count, err := b.db.IncrementAttempt(ctx, p.ChatID, p.UserID, attemptsTTL)
+	incFailed := false
 	if err != nil {
 		b.log.Warn("increment attempt", "err", err)
-		count = 1 // считаем первой попыткой и едем дальше
+		count = 1        // считаем первой попыткой и едем дальше
+		incFailed = true // счётчику верить нельзя — эскалация до бана запрещена
 	}
 	if err := b.deleteBotMessage(ctx, p.ChatID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
 		b.log.Warn("delete captcha on fail/timeout",
@@ -1325,7 +1392,7 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 	// оставлять в статистике бан, которого не было. Провал действия при уже
 	// удалённом pending невосстановим, поэтому вызывающие удаляют pending-строку
 	// только после успеха — тогда рестарт поднимает капчу и повторяет наказание.
-	if count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
+	if !incFailed && count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
 		b.log.Info("banning user", "chat", p.ChatID, "user", p.UserID, "reason", reason, "attempts", count)
 		if err := b.banShort(ctx, p.ChatID, p.UserID); err != nil {
 			return err

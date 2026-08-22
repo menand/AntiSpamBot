@@ -101,18 +101,11 @@ func (b *Bot) isChatAdminVerified(ctx context.Context, chatID, userID int64) (is
 	if ok && time.Now().Before(e.until) {
 		return e.isAdmin, true
 	}
-	isAdmin, err := b.isChatAdmin(ctx, chatID, userID)
-	if err != nil {
+	isAdmin, sure = b.isChatAdminFresh(ctx, chatID, userID)
+	if !sure {
 		// Ошибку не кэшируем: следующий вызов попробует снова.
 		return false, false
 	}
-	ttl := adminCacheTTL
-	if !isAdmin {
-		ttl = adminCacheNegTTL
-	}
-	b.adminMu.Lock()
-	b.adminCache[k] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(ttl)}
-	b.adminMu.Unlock()
 	return isAdmin, true
 }
 
@@ -124,14 +117,21 @@ func (b *Bot) invalidateAdminCache(chatID, userID int64) {
 
 // isChatAdminFresh — живая проверка админства мимо кэша, с обновлением кэша
 // её результатом. Нужна там, где устаревший позитвный ответ кэша опасен
-// (золотой голос): в чатах, где бот сам не админ, chat_member не доставляется
-// и разжалованный админ сидел бы в кэше все 6 часов TTL. Ошибка API —
-// (false, false), вызывающий решает, на что откатываться.
+// (золотой голос, punishNonAdmin): в чатах, где бот сам не админ,
+// chat_member не доставляется и статус сидел бы в кэше весь TTL. Ошибка
+// API — (false, false), вызывающий решает, на что откатываться.
 func (b *Bot) isChatAdminFresh(ctx context.Context, chatID, userID int64) (isAdmin, sure bool) {
 	isAdmin, err := b.isChatAdmin(ctx, chatID, userID)
 	if err != nil {
 		return false, false
 	}
+	b.cacheAdmin(chatID, userID, isAdmin)
+	return isAdmin, true
+}
+
+// cacheAdmin пишет результат проверки в админ-кэш: позитив на полный TTL,
+// негатив — на короткий (adminCacheNegTTL).
+func (b *Bot) cacheAdmin(chatID, userID int64, isAdmin bool) {
 	ttl := adminCacheTTL
 	if !isAdmin {
 		ttl = adminCacheNegTTL
@@ -139,7 +139,6 @@ func (b *Bot) isChatAdminFresh(ctx context.Context, chatID, userID int64) (isAdm
 	b.adminMu.Lock()
 	b.adminCache[chatUser{chatID, userID}] = adminCacheEntry{isAdmin: isAdmin, until: time.Now().Add(ttl)}
 	b.adminMu.Unlock()
-	return isAdmin, true
 }
 
 // spamAIEnabled — доступен ли хоть один LLM-провайдер для спам-анализа.
@@ -550,6 +549,14 @@ func attachmentKindRU(m telego.Message) string {
 		return "файл"
 	case m.Poll != nil:
 		return "опрос"
+	case m.Contact != nil:
+		return "контакт"
+	case m.Location != nil, m.Venue != nil:
+		return "геолокация"
+	case m.Dice != nil:
+		return "дайс"
+	case m.Story != nil:
+		return "история"
 	}
 	return ""
 }
@@ -647,12 +654,15 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	// проверяем ЖИВО, мимо позитивного кэша: разжалованный админ в чате без
 	// наших прав не выпадает из 6-часового кэша (chat_member не приходит),
 	// а здесь его голос банит глобально. Ошибка живой проверки — откат на
-	// кэш, чтобы сетевой шторм не обезоруживал настоящих админов.
+	// кэш ТОЛЬКО когда бот сам админ в этом чате: там Telegram доставляет
+	// chat_member и кэш самоинвалидируется; в чатах без наших прав кэш
+	// ненадёжен по построению — сетевой сбой там не дарит золотой голос.
 	golden := b.isOwner(voter)
 	if !golden {
 		isAdmin, sure := b.isChatAdminFresh(b.runCtx, chatID, voter)
 		if !sure {
-			isAdmin = b.isChatAdminCached(b.runCtx, chatID, voter)
+			isAdmin = b.isChatAdminCached(b.runCtx, chatID, voter) &&
+				b.isChatAdminCached(b.runCtx, chatID, b.me.ID)
 		}
 		golden = isAdmin
 	}
@@ -807,16 +817,26 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 		return false
 	}
 	if spam {
-		// Цель могла быть в середине капчи или reply-wait: гасим ДО записи
-		// события, чтобы таймауты не добавили свой kick/noreply поверх
-		// spamban (двойной счёт в воронке).
-		b.cancelCaptchaSilent(v.ChatID, v.AuthorID)
-		b.cancelReplyWait(v.ChatID, v.AuthorID)
 		if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
 			// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
-			// событие spamban не пишем и его приветствие не трогаем.
+			// событие spamban не пишем, его приветствие и активные проверки
+			// НЕ трогаем — капча/ожидание ответа продолжают жить, иначе
+			// провал бана оставил бы его в капча-мьюте навсегда без шанса
+			// на восстановление (pending-строки уже не спасти).
 			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
 		} else {
+			// Гасим активные проверки ПОСЛЕ успешного бана (до записи
+			// события): таймауты не должны добавить свой kick/noreply поверх
+			// spamban. Ответить по старой капче/якорю забаненный больше не
+			// может — невозможность пройти проверку не его вина, закрываем
+			// воронку пассом (прецедент /mute), иначе при reply-check он
+			// навсегда зависнет в «В процессе».
+			b.cancelCaptchaSilent(v.ChatID, v.AuthorID)
+			if b.cancelReplyWait(v.ChatID, v.AuthorID) {
+				if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventPass, time.Now(), ""); err != nil {
+					b.log.Warn("record pass event (banned with armed wait)", "err", err)
+				}
+			}
 			if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
 				time.Now(), voteReason(ballots)); err != nil {
 				b.log.Warn("record spamban event", "err", err, "chat", v.ChatID, "user", v.AuthorID)
@@ -899,6 +919,14 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 			b.log.Warn("cross-chat spam ban", "err", err, "chat", c.ChatID, "user", userID)
 			continue
 		}
+		// Разоружаем активные проверки этого чата СРАЗУ: сиротский таймаут
+		// капчи при сработке вызвал бы onFail → kick (ban+unban) и СНЯЛ бы
+		// только что поставленный кросс-бан, а reply-wait дал бы фантомный
+		// «noreply»-бан. События не пишем — здесь их никто не ждёт, воронка
+		// чужого чата закрывается left-веткой handleChatMember (кросс-бан
+		// приходит её ботом-инициатором и гасится без записи).
+		b.cancelCaptchaSilent(c.ChatID, userID)
+		b.cancelReplyWait(c.ChatID, userID)
 		b.log.Info("cross-chat spam ban", "chat", c.ChatID, "user", userID)
 		banned = append(banned, chatLinkHTML(c))
 	}

@@ -122,7 +122,8 @@ func periodLabel(p statsPeriod) string {
 		// требует винительного: «за вчерашний день».
 		return "вчерашний день"
 	case periodDayBefore:
-		return "позавчера"
+		// Тот же грамматический случай, что и «за вчера» выше.
+		return "позавчерашний день"
 	case periodMonth:
 		return "месяц"
 	case periodAll:
@@ -183,7 +184,12 @@ func renderStats(
 		if s.Left > 0 {
 			fmt.Fprintf(&sb, "• Вышли сами: %d (%s)\n", s.Left, pct(s.Left, s.Joined))
 		}
-		pending := s.Joined - s.Passed - s.Kicked - s.Banned - s.Left
+		if s.Aborted > 0 {
+			// Сорванные по вине бота проверки — не «вышли сами»: юзер остался
+			// в чате и был выпущен без капчи.
+			fmt.Fprintf(&sb, "• Не удалось проверить: %d\n", s.Aborted)
+		}
+		pending := s.Joined - s.Passed - s.Kicked - s.Banned - s.Left - s.Aborted
 		if pending > 0 {
 			fmt.Fprintf(&sb, "• В процессе: %d\n", pending)
 		}

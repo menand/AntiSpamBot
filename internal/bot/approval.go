@@ -338,8 +338,8 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 		// иначе добавивший видит мёртвого бота без объяснений.
 		b.log.Warn("owner approval prompt undelivered — notifying chat", "chat", chatID)
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID),
-			"🤖 Бот ждёт подтверждения владельцем. Напишите ему в личку команду /start — "+
-				"он пришлёт туда вопрос об этом чате, и после подтверждения я начну работать.").
+			"🤖 Жду подтверждения владельца: напиши мне в личку команду /start — "+
+				"пришлю туда вопрос об этом чате. После подтверждения начну работать.").
 			WithParseMode(telego.ModeHTML)); err != nil {
 			b.log.Warn("send pending hint to chat", "err", err, "chat", chatID)
 		}
@@ -421,13 +421,26 @@ func (b *Bot) carryApprovalOnMigrate(ctx context.Context, oldID, newID int64) {
 	b.delApprovalCache(oldID)
 	if status == storage.ChatPending {
 		// Кнопки старого вопроса указывают на мёртвый oldID — переспрашиваем
-		// с новым. Без владельцев — авто-апрув, как при обычном добавлении.
-		if configured, _ := b.sendOwnerApprovalPrompt(ctx, newID, info, "чат перенесён в новую супергруппу"); !configured {
+		// с новым. Без владельцев — авто-апрув, как при обычном добавлении;
+		// с владельцами, но без доставки — та же подсказка в чате, что и при
+		// добавлении (иначе мигрировавший pending-чат молча висит инертным).
+		configured, delivered := b.sendOwnerApprovalPrompt(ctx, newID, info,
+			"чат перенесён в новую супергруппу")
+		switch {
+		case !configured:
 			if err := b.db.SetChatApproval(ctx, newID, storage.ChatApproved); err != nil {
 				b.log.Warn("auto-approve migrated chat", "err", err, "chat", newID)
 				return
 			}
 			b.setApprovalCache(newID, true)
+		case !delivered:
+			b.log.Warn("migrated approval prompt undelivered — notifying chat", "chat", newID)
+			if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(newID),
+				"🤖 Жду подтверждения владельца: напиши мне в личку команду /start — "+
+					"пришлю туда вопрос об этом чате. После подтверждения начну работать.").
+				WithParseMode(telego.ModeHTML)); err != nil {
+				b.log.Warn("send pending hint to chat", "err", err, "chat", newID)
+			}
 		}
 	}
 }

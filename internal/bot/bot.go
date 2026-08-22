@@ -212,7 +212,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 
 	b.notifyOwners(ctx, fmt.Sprintf(
-		"🟢 <b>Бот запущен</b>\nUsername: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
+		"🟢 <b>Бот запущен</b>\nЮзернейм: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
 		b.Username(), b.version, restored))
 
 	defer func() {

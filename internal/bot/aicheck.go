@@ -83,10 +83,10 @@ func formatProviderCheck(name, model string, spam bool, elapsed time.Duration, e
 			name, model, elapsed.Seconds(),
 			html.EscapeString(truncateLabel(err.Error(), 200)))
 	}
-	verdict := "OK"
+	verdict := "не спам"
 	if spam {
-		verdict = "SPAM"
+		verdict = "спам"
 	}
-	return fmt.Sprintf("✅ %s (%s) — коннект есть: %.1f с, вердикт %s",
+	return fmt.Sprintf("✅ %s (%s) — коннект есть: %.1f с, вердикт: %s",
 		name, model, elapsed.Seconds(), verdict)
 }

@@ -401,3 +401,30 @@ func (d *DB) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	}
 	return out, rows.Err()
 }
+
+// PendingChats возвращает чаты, ждущие решения владельца (approval_status =
+// 'pending'). Питает переспрос при /start владельца: ЛС-вопрос о новом чате
+// мог не доставиться (закрытые лички), а другого триггера, кроме
+// my_chat_member, у pending-чата нет.
+func (d *DB) PendingChats(ctx context.Context) ([]ChatInfo, error) {
+	rows, err := d.sql.QueryContext(ctx,
+		`SELECT chat_id, title, type, username FROM chats
+		 WHERE approval_status = 'pending' ORDER BY COALESCE(title, ''), chat_id`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending chats: %w", err)
+	}
+	defer rows.Close()
+	var out []ChatInfo
+	for rows.Next() {
+		var c ChatInfo
+		var title, ctype, uname sql.NullString
+		if err := rows.Scan(&c.ChatID, &title, &ctype, &uname); err != nil {
+			return nil, fmt.Errorf("scan pending chat: %w", err)
+		}
+		c.Title = title.String
+		c.Type = ctype.String
+		c.Username = uname.String
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

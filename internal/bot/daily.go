@@ -157,14 +157,18 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	link := chatLinkHTML(c)
 	banned := s.Banned + s.SpamBanned
 	msgs := s.MsgNewcomer + s.MsgOldtimer
+	funnel := s.Joined + s.Passed + s.Kicked + s.Left + banned + s.Aborted
 	switch {
-	case s.Joined+s.Passed+s.Kicked+s.Left+banned+msgs == 0:
+	case funnel+msgs == 0:
 		return fmt.Sprintf("%s — без событий", link)
-	case s.Joined+s.Passed+s.Kicked+s.Left+banned == 0:
+	case funnel == 0:
 		return fmt.Sprintf("%s — сообщений: %d, событий воронки нет", link, msgs)
 	}
 	line := fmt.Sprintf("%s — вступило %d, прошло %d, вышли сами %d, кик %d, бан %d",
 		link, s.Joined, s.Passed, s.Left, s.Kicked, banned)
+	if s.Aborted > 0 {
+		line += fmt.Sprintf(", не проверено %d", s.Aborted)
+	}
 	if s.SpamBanned > 0 {
 		line += fmt.Sprintf(" (из них спам %d)", s.SpamBanned)
 	}
@@ -262,7 +266,7 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 // заслуживает сводки (join мог остаться за окном: вошёл в 23:59, прошёл
 // капчу в 00:01).
 func digestHasContent(s storage.Stats, topWriters, topFailers, newMembers, banned []storage.UserCount) bool {
-	return s.Joined+s.Passed+s.Kicked+s.Banned+s.SpamBanned+s.Left+
+	return s.Joined+s.Passed+s.Kicked+s.Banned+s.SpamBanned+s.Left+s.Aborted+
 		s.MsgNewcomer+s.MsgOldtimer+
 		len(topWriters)+len(topFailers)+len(newMembers)+len(banned) > 0
 }

@@ -193,7 +193,7 @@ func buildProfileFacts(first, last, username, bio string, bioKnown bool, photos 
 
 func profileVoteText(mention string, yes, no, margin int) string {
 	return fmt.Sprintf(
-		"👤 %s вошёл(ла) в чат, но профиль выглядит подозрительно. Забанить?\n\n"+
+		"👤 %s вошёл(а) в чат, но профиль выглядит подозрительно. Забанить?\n\n"+
 			"Голосуйте кнопками — перевес в %d %s решает. Голос админа решает сразу.\n\n"+
 			"🚫 Забанить: <b>%d</b> · ✅ Оставить: <b>%d</b>",
 		mention, margin, pluralRU(margin, "голос", "голоса", "голосов"), yes, no)
