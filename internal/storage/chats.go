@@ -65,6 +65,38 @@ func (d *DB) GetChat(ctx context.Context, chatID int64) (ChatInfo, bool, error) 
 	return c, true, nil
 }
 
+// SetChatBotAddedAtIfEmpty записывает время первого появления бота в чате,
+// но только если колонка ещё пуста (write-once): повторные my_chat_member
+// (повышение, рестарт) не должны сдвигать дату. NULL остаётся для чатов,
+// живших до введения колонки — /info тогда показывает фолбэк по событиям.
+// Вызывать ПОСЛЕ создания строки реестра (rememberChat): UPDATE по
+// несуществующей строке молча не пишет ничего.
+func (d *DB) SetChatBotAddedAtIfEmpty(ctx context.Context, chatID int64, at time.Time) error {
+	_, err := d.sql.ExecContext(ctx, `
+		UPDATE chats SET bot_added_at = ?
+		WHERE chat_id = ? AND bot_added_at IS NULL
+	`, at.Unix(), chatID)
+	if err != nil {
+		return fmt.Errorf("set chat bot_added_at: %w", err)
+	}
+	return nil
+}
+
+// GetChatBotAddedAt возвращает время добавления бота в чат. ok=false — колонка
+// пуста (старый чат) или чата нет в реестре.
+func (d *DB) GetChatBotAddedAt(ctx context.Context, chatID int64) (time.Time, bool, error) {
+	var unix sql.NullInt64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT bot_added_at FROM chats WHERE chat_id = ?`, chatID).Scan(&unix)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !unix.Valid) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("get chat bot_added_at: %w", err)
+	}
+	return time.Unix(unix.Int64, 0), true, nil
+}
+
 // GetChatApproval возвращает статус подтверждения чата. exists=false — чат
 // не в реестре (никогда не регистрировался).
 func (d *DB) GetChatApproval(ctx context.Context, chatID int64) (status string, exists bool, err error) {

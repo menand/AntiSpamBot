@@ -12,10 +12,21 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
+// handleInfoCommand — /info с двумя лицами: в личке это аптайм бота для
+// владельцев (историческая команда), в группе — карточка участника
+// (см. userinfo.go). Обе ветки под одной регистрацией th.CommandEqual("info").
 func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
-	if message.Chat.Type != "private" {
-		return nil
+	switch message.Chat.Type {
+	case "private":
+		return b.handlePrivateInfoCommand(ctx, message)
+	case "group", "supergroup":
+		return b.handleGroupInfoCommand(ctx, message)
 	}
+	return nil
+}
+
+// handlePrivateInfoCommand — аптайм-ветка /info в ЛС, только для владельцев.
+func (b *Bot) handlePrivateInfoCommand(ctx *th.Context, message telego.Message) error {
 	if message.From == nil || !b.isOwner(message.From.ID) {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
 			"Команда доступна только владельцам бота (OWNER_IDS)."))

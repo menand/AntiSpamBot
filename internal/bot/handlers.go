@@ -199,6 +199,7 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 			}
 			b.setApprovalCache(upd.Chat.ID, true)
 			b.rememberChat(b.runCtx, info)
+			b.markBotAddedAt(upd.Chat.ID)
 			b.checkAdminRights(upd)
 			return nil
 		}
@@ -208,6 +209,7 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		// Существующий/повторно подтверждённый чат: как раньше.
 		b.setApprovalCache(upd.Chat.ID, true)
 		b.rememberChat(b.runCtx, info)
+		b.markBotAddedAt(upd.Chat.ID)
 		b.checkAdminRights(upd)
 		return nil
 	case status == storage.ChatPending:
@@ -215,12 +217,26 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		// подсказки по правам (любая активность в pending запрещена).
 		b.setApprovalCache(upd.Chat.ID, false)
 		b.rememberChat(b.runCtx, info)
+		b.markBotAddedAt(upd.Chat.ID)
 		return nil
 	default:
 		// rejected: leave не прошёл или событие догнало выход — чат инертен.
 		b.setApprovalCache(upd.Chat.ID, false)
 		b.rememberChat(b.runCtx, info)
+		b.markBotAddedAt(upd.Chat.ID)
 		return nil
+	}
+}
+
+// markBotAddedAt штампует дату первого появления бота в чате (для /info).
+// Вызывается строго ПОСЛЕ rememberChat: строка реестра уже должна существовать,
+// иначе write-once UPDATE промахнётся мимо несуществующей строки. Write-once:
+// повторные события (повышение, рестарт) дату не сдвигают; для чатов, живших
+// до введения колонки, остаётся NULL и /info показывает фолбэк по самому
+// раннему событию чата.
+func (b *Bot) markBotAddedAt(chatID int64) {
+	if err := b.db.SetChatBotAddedAtIfEmpty(b.runCtx, chatID, time.Now()); err != nil {
+		b.log.Warn("mark bot added at", "err", err, "chat", chatID)
 	}
 }
 
@@ -703,8 +719,23 @@ func (b *Bot) reAskOwnerApprovals(dmChatID int64) {
 func (b *Bot) migrateChatState(oldID, newID int64) {
 	b.log.Info("chat migrating to supergroup", "old", oldID, "new", newID)
 	b.carryApprovalOnMigrate(b.runCtx, oldID, newID)
+	// Дату появления бота читаем ДО MigrateChat (удаляет старую строку
+	// реестра) и пишем ПОСЛЕ: carryApprovalOnMigrate уже апсертил новую
+	// строку, так что write-once UPDATE найдёт куда писать. Не перенесли —
+	// /info покажет «примерно» по раннему событию, не драма.
+	addedAt, hasAdded, err := b.db.GetChatBotAddedAt(b.runCtx, oldID)
+	if err != nil {
+		b.log.Warn("carry bot_added_at: read", "err", err, "old", oldID)
+	}
 	if err := b.db.MigrateChat(b.runCtx, oldID, newID); err != nil {
 		b.log.Error("migrate chat data", "err", err, "old", oldID, "new", newID)
+		// releaseMigratedCaptchas всё равно: таймеры капч целятся в мёртвый
+		// старый chat_id, и после неудавшейся миграции они обязаны разрядиться
+		// тихо, а не стрелять kick/noreply в несуществующий чат.
+	} else if hasAdded {
+		if err := b.db.SetChatBotAddedAtIfEmpty(b.runCtx, newID, addedAt); err != nil {
+			b.log.Warn("carry bot_added_at: write", "err", err, "new", newID)
+		}
 	}
 	b.releaseMigratedCaptchas(oldID, newID)
 }

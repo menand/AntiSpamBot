@@ -51,6 +51,12 @@ const (
 	// EventMute — мьют командой /mute. Питает список «10 последних» /unmute;
 	// QueryStats его сознательно игнорирует — мьют не относится к воронке капчи.
 	EventMute EventKind = "mute"
+	// EventSuspect — появилась плашка «похоже на спам» (ИИ-спам-чек,
+	// профиль-чек или ручной репорт /spam). В воронку НЕ входит и в
+	// QueryStats сознательно не добавляется: подозрение ещё не вердикт.
+	// Питает историю «подозрения на спам» в карточке /info; чистится общим
+	// ретеншном events (180 дней).
+	EventSuspect EventKind = "suspect"
 )
 
 // Причины киков/банов (events.reason). Префиксные форматы несут ID для
@@ -141,6 +147,23 @@ type Stats struct {
 	MsgOldtimer int
 	PeriodFrom  time.Time
 	PeriodUntil time.Time
+}
+
+// ChatEarliestEventAt — время самого раннего события чата. Фолбэк для
+// /info, когда chats.bot_added_at пуст (чат жил до введения колонки):
+// события начинаются там, где бот начал работать, так что дата честная
+// нижняя граница «бот в чате примерно с …». ok=false — событий нет вовсе.
+func (d *DB) ChatEarliestEventAt(ctx context.Context, chatID int64) (time.Time, bool, error) {
+	var unix sql.NullInt64
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT MIN(at) FROM events WHERE chat_id = ?`, chatID).Scan(&unix)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("chat earliest event: %w", err)
+	}
+	if !unix.Valid {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(unix.Int64, 0), true, nil
 }
 
 func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time) (Stats, error) {

@@ -91,6 +91,11 @@ CREATE TABLE IF NOT EXISTS chats (
     title           TEXT,
     type            TEXT,
     username        TEXT,
+    -- Когда бота впервые увидели в чате (my_chat_member «бот присутствует»).
+    -- NULL = чат жил до введения колонки; /info тогда показывает фолбэк по
+    -- самому раннему событию. Пишется один раз, переносится при апгрейде
+    -- basic group → supergroup (MigrateChat строку реестра удаляет).
+    bot_added_at    INTEGER,
     updated_at      INTEGER NOT NULL,
     -- Статус подтверждения чата владельцем бота: 'approved' | 'pending' |
     -- 'rejected'. 'approved' (в т.ч. строки, созданные до фичи) — бот
@@ -147,6 +152,9 @@ CREATE TABLE IF NOT EXISTS spam_votes (
     bot_msg_id    INTEGER NOT NULL, -- сообщение-плашка с кнопками
     target_msg_id INTEGER NOT NULL, -- подозрительное сообщение
     author_id     INTEGER NOT NULL,
+    -- Кто запустил голосование командой /spam; 0 = плашка ИИ (спам-чек или
+    -- профиль). Инициатор исключён из голосования в своём репорте.
+    initiator_id  INTEGER NOT NULL DEFAULT 0,
     prob          INTEGER NOT NULL, -- legacy NOT NULL: всегда 100, никогда не показывается
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (chat_id, bot_msg_id)
