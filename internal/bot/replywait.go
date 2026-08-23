@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mymmrac/telego"
+	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -186,37 +187,26 @@ func (b *Bot) waitReplyTimeout(p *replyPending) {
 		}
 	}
 
-	count, err := b.db.IncrementAttempt(ctx, p.ChatID, p.UserID, attemptsTTL)
-	incFailed := false
-	if err != nil {
-		b.log.Warn("increment attempt (reply)", "err", err)
-		count = 1        // считаем первой попыткой и едем дальше
-		incFailed = true // счётчик ненадёжен — бан за «повторное молчание» не вешаем
+	// Приветствие-якорь сносим: «Добро пожаловать, X!» без X — мусор.
+	if msgID, ok, err := b.db.TakeGreetingMsg(ctx, p.ChatID, p.UserID); err == nil && ok {
+		if err := b.deleteMessage(ctx, p.ChatID, msgID); err != nil {
+			b.log.Debug("delete greeting of silent user", "err", err, "chat", p.ChatID)
+		}
 	}
-	// Событие и уведомление — ПОСЛЕ успешного действия (бан, которого не
-	// было, не должен попадать в статистику), а pending_replies удаляем
-	// только после успеха: при провале рестарт восстановит ожидание и
-	// повторит наказание, иначе мьют остался бы навсегда.
-	if !incFailed && count >= b.effectiveMaxAttempts(b.chatSettings(ctx, p.ChatID)) {
-		b.log.Info("banning silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
-		if err := b.banShort(ctx, p.ChatID, p.UserID); err != nil {
-			b.log.Error("ban silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
-			return
-		}
-		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventBan, time.Now(), storage.ReasonNoReply); err != nil {
-			b.log.Warn("record ban event (noreply)", "err", err)
-		}
-		b.notifyModAction(p.ChatID, p.UserID, storage.EventBan, storage.ReasonNoReply)
-	} else {
-		b.log.Info("kicking silent user", "chat", p.ChatID, "user", p.UserID, "attempts", count)
-		if err := b.kick(ctx, p.ChatID, p.UserID); err != nil {
-			b.log.Error("kick silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
-			return
-		}
-		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventKick, time.Now(), storage.ReasonNoReply); err != nil {
-			b.log.Warn("record kick event (noreply)", "err", err)
-		}
-		b.notifyModAction(p.ChatID, p.UserID, storage.EventKick, storage.ReasonNoReply)
+
+	// Та же лестница наказаний, что у капчи (общий punishAttempt): счётчик
+	// attempts с гвардией «ошибка счётчика запрещает бан», порог
+	// effectiveMaxAttempts, дальше бан. Событие и уведомление — ПОСЛЕ
+	// успешного действия (бан, которого не было, не должен попадать в
+	// статистику), а pending_replies удаляем только после успеха: при провале
+	// рестарт восстановит ожидание и повторит наказание, иначе мьют остался
+	// бы навсегда.
+	if err := b.punishAttempt(ctx, p.ChatID, p.UserID, storage.ReasonNoReply, "молчание",
+		func(event storage.EventKind, _ int) {
+			b.notifyModAction(p.ChatID, p.UserID, event, storage.ReasonNoReply)
+		}); err != nil {
+		b.log.Error("punish silent user", "err", err, "chat", p.ChatID, "user", p.UserID)
+		return
 	}
 	if err := b.db.DeletePendingReplyIf(ctx, p.ChatID, p.UserID, p.ExpiresAt); err != nil {
 		// Строка — механизм повтора наказания при рестарте; потерять её
@@ -233,13 +223,29 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	now := time.Now()
+	staleChats := map[int64]struct{}{}
+	restored := 0
 	for _, row := range rows {
+		// Чат мог стать необслуживаемым за время простоя (ALLOWED_CHATS,
+		// отклонение владельцем, кик бота): таймеры наказаний туда стрелять
+		// не должны — стартуют раньше reconcileChats, который вычистил бы
+		// строки только позже.
+		if !b.chatServiceable(row.ChatID) {
+			staleChats[row.ChatID] = struct{}{}
+			continue
+		}
 		expires := row.ExpiresAt
 		if expires.Before(now) {
-			// Истекла, пока бот лежал — считаем таймаутом немедленно. Грейс
-			// синхронизируем и в БД: строка после наказания удаляется guard'ом
-			// по expires_at, и со старым дедлайном удаление промахнулось бы —
-			// кик повторялся бы на каждом рестарте.
+			// Истекла, пока бот лежал: юзер мог уйти офлайн (left-апдейт
+			// потерян), и слепой grace-кик записал бы фантомный kick в
+			// воронку. Живая проверка: ушедшему — left без наказания,
+			// присутствующему — штатный грейс; ошибка API — старое поведение.
+			if b.restoredReplyUserDeparted(ctx, row) {
+				continue
+			}
+			// Грейс синхронизируем и в БД: строка после наказания удаляется
+			// guard'ом по expires_at, и со старым дедлайном удаление
+			// промахнулось бы — кик повторялся бы на каждом рестарте.
 			expires = now.Add(1 * time.Second)
 			if err := b.db.PutPendingReply(ctx, storage.PendingReply{
 				ChatID: row.ChatID, UserID: row.UserID, ExpiresAt: expires,
@@ -250,11 +256,48 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 		}
 		p := b.replies.Put(row.ChatID, row.UserID, expires)
 		b.goSafe("waitReplyTimeout", func() { b.waitReplyTimeout(p) })
+		restored++
 	}
-	if len(rows) > 0 {
-		b.log.Info("restored pending replies", "count", len(rows))
+	for chatID := range staleChats {
+		if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
+			b.log.Warn("delete pending replies of unserviceable chat",
+				"err", err, "chat", chatID)
+		}
 	}
-	return len(rows), nil
+	if restored > 0 || len(staleChats) > 0 {
+		b.log.Info("restored pending replies", "count", restored,
+			"total", len(rows), "skipped_chats", len(staleChats))
+	}
+	return restored, nil
+}
+
+// restoredReplyUserDeparted закрывает истёкшее за простой ожидание юзера,
+// который за это время вышел/был убран (лево-апдейт потерян): left вместо
+// фантомного кика за молчание. true — исход решён здесь. Ошибка API — false
+// (наказываем по грейсу, как раньше).
+func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.PendingReply) bool {
+	lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	m, err := b.api.GetChatMember(lctx, &telego.GetChatMemberParams{
+		ChatID: tu.ID(row.ChatID),
+		UserID: row.UserID,
+	})
+	if err != nil {
+		b.log.Debug("restored reply liveness", "err", err,
+			"chat", row.ChatID, "user", row.UserID)
+		return false
+	}
+	if s := m.MemberStatus(); s != "left" && s != "kicked" {
+		return false
+	}
+	// Удаляем по исходному дедлайну — строка ещё с ним лежит.
+	if err := b.db.DeletePendingReplyIf(lctx, row.ChatID, row.UserID, row.ExpiresAt); err != nil {
+		b.log.Warn("delete expired pending reply of departed user", "err", err)
+	}
+	b.recordLeftEvent(lctx, row.ChatID, row.UserID, "left while offline")
+	b.log.Info("expired reply wait closed — user left while offline",
+		"chat", row.ChatID, "user", row.UserID)
+	return true
 }
 
 // replyRequirementLine — строка-требование, дописываемая к приветствию при

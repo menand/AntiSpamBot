@@ -146,6 +146,40 @@ func (b *Bot) spamAIEnabled() bool {
 	return b.groqc.Enabled() || b.gemic.Enabled() || b.gigac.Enabled()
 }
 
+// spamCheckEnabledCached — кэшированное чтение тумблера ИИ-антиспама чата:
+// гейт стоит на хвосте каждого группового сообщения, и полная выгрузка
+// chat_settings ради одного бита при SetMaxOpenConns(1) слишком дорога.
+// Инвалидация — в единственном месте записи флага (тоггл menu:spam). Ошибка
+// БД не кэшируется: отвечаем «выключено» (дефолт), в следующий раз перечитаем.
+func (b *Bot) spamCheckEnabledCached(chatID int64) bool {
+	b.spamGateMu.Lock()
+	v, ok := b.spamGateCache[chatID]
+	b.spamGateMu.Unlock()
+	if ok {
+		return v
+	}
+	s, err := b.db.GetChatSettings(b.runCtx, chatID)
+	if err != nil {
+		b.log.Warn("get chat settings (spam gate)", "err", err, "chat", chatID)
+		return false
+	}
+	b.setSpamGateCache(chatID, s.SpamCheckEnabled)
+	return s.SpamCheckEnabled
+}
+
+func (b *Bot) setSpamGateCache(chatID int64, enabled bool) {
+	b.spamGateMu.Lock()
+	b.spamGateCache[chatID] = enabled
+	b.spamGateMu.Unlock()
+}
+
+// delSpamGateCache сбрасывает кэш тумблера после его записи (menu:spam).
+func (b *Bot) delSpamGateCache(chatID int64) {
+	b.spamGateMu.Lock()
+	delete(b.spamGateCache, chatID)
+	b.spamGateMu.Unlock()
+}
+
 // spamGatesPass — общие гейты «стоит ли гнать этого юзера в LLM», от дешёвого
 // к дорогому: пер-чатовый белый список → кросс-чатовое доверие → owner/admin →
 // нет висящей плашки на автора. Общие для спам-чека сообщений и профиль-чека
@@ -204,10 +238,12 @@ func (b *Bot) maybeSpamCheck(message telego.Message) {
 	chatID := message.Chat.ID
 	user := *message.From
 
-	s := b.chatSettings(b.runCtx, chatID)
-	if !s.SpamCheckEnabled {
+	// Дешёвый кэш-гейт ДО чтения полных настроек: большинство чатов флаг не
+	// включало, и читать chat_settings на каждом сообщении ради «нет» незачем.
+	if !b.spamCheckEnabledCached(chatID) {
 		return
 	}
+	s := b.chatSettings(b.runCtx, chatID)
 	total, skip := b.spamGatesPass(chatID, user.ID, s)
 	if skip {
 		return

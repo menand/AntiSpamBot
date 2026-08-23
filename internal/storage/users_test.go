@@ -286,3 +286,30 @@ func TestTrusted(t *testing.T) {
 		t.Fatal("trust must not leak to another chat")
 	}
 }
+
+func TestUserIDByUsernameLatestWins(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	// updated_at живёт с точностью до секунды — между записями дожидаемся
+	// её границы, иначе ORDER BY updated_at DESC на равных значениях
+	// недетерминирован.
+	first := time.Now().Unix()
+	_ = db.RememberUser(ctx, UserInfo{UserID: 1, Username: "foo"})
+	for time.Now().Unix() == first {
+		time.Sleep(5 * time.Millisecond)
+	}
+	_ = db.RememberUser(ctx, UserInfo{UserID: 2, Username: "FOO"})
+
+	id, ok, err := db.UserIDByUsername(ctx, "foo")
+	if err != nil || !ok {
+		t.Fatalf("lookup failed: %v %v", ok, err)
+	}
+	// Ник перешёл новому аккаунту — цель модкоманды тоже новая.
+	if id != 2 {
+		t.Fatalf("username must resolve to the latest owner, got id=%d", id)
+	}
+	if _, ok, _ := db.UserIDByUsername(ctx, "nobody"); ok {
+		t.Fatal("unknown username must miss")
+	}
+}

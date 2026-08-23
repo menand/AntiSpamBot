@@ -68,11 +68,19 @@ type Bot struct {
 	// GigaChat (запасной); порядок цепочки — cfg.AIProviderOrder. Дедуп
 	// запущенных проверок (chat:user) и кэш «этот юзер — админ чата» (для
 	// белого списка и золотого голоса).
-	groqc        *groq.Client
-	gemic        *gemini.Client
-	gigac        *gigachat.Client
+	groqc        llmClassifier
+	gemic        llmClassifier
+	gigac        llmClassifier
 	spamMu       sync.Mutex
 	spamInflight map[chatUser]struct{}
+	// Кэш тумблера ИИ-антиспама per-chat: гейт стоит на самом горячем пути
+	// (хвост каждого группового сообщения при настроенных LLM-ключах), а
+	// читать полные chat_settings ради одного бита при SetMaxOpenConns(1)
+	// дорого. Единственный писатель флага — тоггл menu:spam, он же и
+	// сбрасывает запись; ошибка чтения не кэшируется. Неограниченный размер
+	// по тому же соглашению, что approvalCache (~1 байт на известный чат).
+	spamGateMu    sync.Mutex
+	spamGateCache map[int64]bool
 	// editChecked — время последней спам-проверки ПРАВКИ по (chat, user):
 	// правки не инкрементят счётчик сообщений, и без кулдауна новичок мог бы
 	// бесконечными правками одного сообщения жечь LLM-квоту. Unbounded по
@@ -144,6 +152,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		digestSent:     make(map[int64]string),
 		adminCache:     make(map[chatUser]adminCacheEntry),
 		approvalCache:  make(map[int64]bool),
+		spamGateCache:  make(map[int64]bool),
 		leaveInflight:  make(map[int64]bool),
 	}, nil
 }
@@ -255,10 +264,17 @@ func (b *Bot) Run(ctx context.Context) error {
 	// Только НАСТОЯЩИЙ контент (текст/медиа): сервисное сообщение (новичок
 	// добавил участника — тоже с From) не должно засчитываться за ответ.
 	bh.Use(func(ctx *th.Context, update telego.Update) error {
-		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot &&
-			(m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
-			messageHasUserContent(m) {
-			b.replyWaitSatisfied(m.Chat.ID, m.From.ID)
+		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot {
+			if (m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
+				messageHasUserContent(m) {
+				b.replyWaitSatisfied(m.Chat.ID, m.From.ID)
+			}
+			// ЛС-команда перехватывается своим хендлером мимо handlePrivateText
+			// — разряжаем взведённый ввод приветствия здесь, до маршрутизации,
+			// иначе он молча пережил бы команду и поймал следующее сообщение.
+			if m.Chat.Type == "private" {
+				b.cancelGreetingInputOnCommand(ctx, *m)
+			}
 		}
 		return ctx.Next(update)
 	})
@@ -335,17 +351,81 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	now := time.Now()
+	staleChats := map[int64]struct{}{}
+	restored := 0
 	for _, row := range rows {
+		// Чат мог стать необслуживаемым за время простоя (вышли из
+		// ALLOWED_CHATS, владелец отклонил, бота кикнули): таймеры наказаний
+		// в него стрелять не должны. Стартуем раньше reconcileChats, который
+		// вычистил бы строки только позже, а грейс-таймер истёкших успевает
+		// до него — сносим сразу.
+		if !b.chatServiceable(row.ChatID) {
+			staleChats[row.ChatID] = struct{}{}
+			continue
+		}
 		expires := row.ExpiresAt
-		if expires.Before(now) {
-			// Истекла, пока бот лежал — считаем таймаутом немедленно.
+		expired := expires.Before(now)
+		if expired {
 			expires = now.Add(1 * time.Second)
+			// Истекла, пока бот лежал: юзер мог выйти офлайн (лево-апдейт
+			// потерян), и слепой grace-кик породил бы фантомный kick в
+			// воронке плюс бесполезный ban/unban-раунд. Та же liveness-
+			// проверка, что у живого пути перед Put: ушедшему — left и
+			// снятие мьюта, присутствующему — штатный грейс-таймаут. Ошибка
+			// API — старое поведение (наказание, fail-open).
+			if b.restoredCaptchaUserDeparted(ctx, row) {
+				continue
+			}
 		}
 		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID, row.EphemeralID)
 		b.goSafe("waitTimeout", func() { b.waitTimeout(p) })
+		restored++
 	}
-	b.log.Info("restored pending captchas", "count", len(rows))
-	return len(rows), nil
+	for chatID := range staleChats {
+		if err := b.db.DeletePendingChat(ctx, chatID); err != nil {
+			b.log.Warn("delete pendings of unserviceable chat",
+				"err", err, "chat", chatID)
+		}
+	}
+	b.log.Info("restored pending captchas", "count", restored,
+		"total", len(rows), "skipped_chats", len(staleChats))
+	return restored, nil
+}
+
+// restoredCaptchaUserDeparted закрывает истёкшую за простой капчу юзера,
+// который за это время вышел/был убран: left вместо фантомного кика. Капча-
+// мьют пережил рестарт (Telegram хранит restriction) — снимаем его. true —
+// исход решён здесь; ошибка API — false (наказываем по грейсу, как раньше).
+func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.PendingRow) bool {
+	lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	m, err := b.api.GetChatMember(lctx, &telego.GetChatMemberParams{
+		ChatID: tu.ID(row.ChatID),
+		UserID: row.UserID,
+	})
+	if err != nil {
+		b.log.Debug("restored captcha liveness", "err", err,
+			"chat", row.ChatID, "user", row.UserID)
+		return false
+	}
+	if s := m.MemberStatus(); s != "left" && s != "kicked" {
+		return false
+	}
+	if err := b.db.DeletePending(lctx, row.ChatID, row.UserID); err != nil {
+		b.log.Warn("delete expired pending of departed user", "err", err)
+	}
+	b.recordLeftEvent(lctx, row.ChatID, row.UserID, "left while offline")
+	// releaseOnAbort на живом ctx съел бы бюджет рестарта лестницей ретраев —
+	// гоняем асинхронно на своём bounded-бюджете.
+	rowChatID, rowUserID := row.ChatID, row.UserID
+	b.goSafe("releaseDepartedRestore", func() {
+		rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer rcancel()
+		b.releaseOnAbort(rctx, rowChatID, rowUserID)
+	})
+	b.log.Info("expired captcha closed — user left while offline",
+		"chat", row.ChatID, "user", row.UserID)
+	return true
 }
 
 // healthbeat раз в минуту освежает файл-сердцебиение рядом с БД. HEALTHCHECK
