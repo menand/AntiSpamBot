@@ -12,26 +12,28 @@ import (
 )
 
 type Config struct {
-	Token              string
-	CaptchaTimeout     time.Duration
-	MaxAttempts        int
-	LogLevel           slog.Level
-	AllowedChats       map[int64]struct{} // nil = разрешены все
-	DBPath             string
-	NewcomerDays       int
-	SilentAnnounceDays int                // 0 = выключено
-	OwnerIDs           map[int64]struct{} // ID пользователей Telegram с правами суперадмина
-	LogFile            string             // пусто = только stdout; задано = дублировать в файл (для команды /logs)
-	CaptchaDelay       time.Duration      // пауза между вступлением и отправкой капчи
-	DailyStatsUTCHour  int                // час суток (UTC), в который/после которого постятся ежедневные дайджесты
-	GroqAPIKey         string             // пусто = Groq выключен
-	GroqModel          string             // пусто = groq.DefaultModel
-	GeminiAPIKey       string             // пусто = Gemini выключен
-	GeminiModel        string             // пусто = gemini.DefaultModel
-	GigaChatAuthKey    string             // пусто = GigaChat выключен
-	GigaChatScope      string             // пусто = gigachat.DefaultScope
-	GigaChatModel      string             // пусто = gigachat.DefaultModel
-	AIProviderOrder    []string           // порядок цепочки ИИ-провайдеров; пусто = по умолчанию
+	Token string
+	// CaptchaStageInterval — пауза между сообщениями серии капчи (и серии
+	// напоминаний «ответь на приветствие»). Вся серия = одна попытка.
+	CaptchaStageInterval time.Duration
+	MaxAttempts          int
+	LogLevel             slog.Level
+	AllowedChats         map[int64]struct{} // nil = разрешены все
+	DBPath               string
+	NewcomerDays         int
+	SilentAnnounceDays   int                // 0 = выключено
+	OwnerIDs             map[int64]struct{} // ID пользователей Telegram с правами суперадмина
+	LogFile              string             // пусто = только stdout; задано = дублировать в файл (для команды /logs)
+	CaptchaDelay         time.Duration      // пауза между вступлением и отправкой капчи
+	DailyStatsUTCHour    int                // час суток (UTC), в который/после которого постятся ежедневные дайджесты
+	GroqAPIKey           string             // пусто = Groq выключен
+	GroqModel            string             // пусто = groq.DefaultModel
+	GeminiAPIKey         string             // пусто = Gemini выключен
+	GeminiModel          string             // пусто = gemini.DefaultModel
+	GigaChatAuthKey      string             // пусто = GigaChat выключен
+	GigaChatScope        string             // пусто = gigachat.DefaultScope
+	GigaChatModel        string             // пусто = gigachat.DefaultModel
+	AIProviderOrder      []string           // порядок цепочки ИИ-провайдеров; пусто = по умолчанию
 }
 
 func Load() (*Config, error) {
@@ -40,12 +42,17 @@ func Load() (*Config, error) {
 		return nil, errors.New("BOT_TOKEN is not set")
 	}
 
-	timeout, err := parseDuration("CAPTCHA_TIMEOUT_SECONDS", 30*time.Second, time.Second)
+	// 2 мин на сообщение серии: у молчуна три шанса (итог до ~6 мин),
+	// а не один 30-секундный, как до серий.
+	stageMinutes, err := parseInt("CAPTCHA_STAGE_MINUTES", 2)
 	if err != nil {
 		return nil, err
 	}
-	if timeout <= 0 {
-		return nil, errors.New("CAPTCHA_TIMEOUT_SECONDS must be > 0")
+	if stageMinutes <= 0 {
+		return nil, errors.New("CAPTCHA_STAGE_MINUTES must be >= 1")
+	}
+	if int64(stageMinutes) > math.MaxInt64/int64(time.Minute) {
+		return nil, fmt.Errorf("CAPTCHA_STAGE_MINUTES: %d is too large", stageMinutes)
 	}
 
 	maxAttempts, err := parseInt("MAX_ATTEMPTS", 3)
@@ -117,26 +124,26 @@ func Load() (*Config, error) {
 	}
 
 	return &Config{
-		Token:              token,
-		CaptchaTimeout:     timeout,
-		MaxAttempts:        maxAttempts,
-		LogLevel:           logLevel,
-		AllowedChats:       allowedChats,
-		DBPath:             dbPath,
-		NewcomerDays:       newcomerDays,
-		SilentAnnounceDays: silentDays,
-		OwnerIDs:           ownerIDs,
-		LogFile:            os.Getenv("LOG_FILE"),
-		CaptchaDelay:       captchaDelay,
-		DailyStatsUTCHour:  digestHour,
-		GroqAPIKey:         os.Getenv("GROQ_API_KEY"),
-		GroqModel:          os.Getenv("GROQ_MODEL"),
-		GeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
-		GeminiModel:        os.Getenv("GEMINI_MODEL"),
-		GigaChatAuthKey:    os.Getenv("GIGACHAT_AUTH_KEY"),
-		GigaChatScope:      os.Getenv("GIGACHAT_SCOPE"),
-		GigaChatModel:      os.Getenv("GIGACHAT_MODEL"),
-		AIProviderOrder:    aiOrder,
+		Token:                token,
+		CaptchaStageInterval: time.Duration(stageMinutes) * time.Minute,
+		MaxAttempts:          maxAttempts,
+		LogLevel:             logLevel,
+		AllowedChats:         allowedChats,
+		DBPath:               dbPath,
+		NewcomerDays:         newcomerDays,
+		SilentAnnounceDays:   silentDays,
+		OwnerIDs:             ownerIDs,
+		LogFile:              os.Getenv("LOG_FILE"),
+		CaptchaDelay:         captchaDelay,
+		DailyStatsUTCHour:    digestHour,
+		GroqAPIKey:           os.Getenv("GROQ_API_KEY"),
+		GroqModel:            os.Getenv("GROQ_MODEL"),
+		GeminiAPIKey:         os.Getenv("GEMINI_API_KEY"),
+		GeminiModel:          os.Getenv("GEMINI_MODEL"),
+		GigaChatAuthKey:      os.Getenv("GIGACHAT_AUTH_KEY"),
+		GigaChatScope:        os.Getenv("GIGACHAT_SCOPE"),
+		GigaChatModel:        os.Getenv("GIGACHAT_MODEL"),
+		AIProviderOrder:      aiOrder,
 	}, nil
 }
 

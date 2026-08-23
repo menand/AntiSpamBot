@@ -57,7 +57,7 @@ func (b *Bot) captchaNotifyTargets(ctx context.Context) []int64 {
 // detail — необязательное уточнение к причине (для pass — «выбрал 2-й (🟢)»);
 // в events не пишется, живёт только здесь.
 // Уведомление уходит в горутине (как spamVerdictFanout): вызывающие стоят на
-// карательном пути (onFail/waitReplyTimeout с 10-секундным cleanup-ctx), и
+// карательном пути (onFail/replyWaitLoop и captchaStageLoop с 10-секундным cleanup-ctx), и
 // зависший SendMessage не должен съедать бюджет kick/ban.
 func (b *Bot) notifyModAction(chatID, targetID int64, kind storage.EventKind, reason string, detail ...string) {
 	b.goSafe("notifyModAction", func() {

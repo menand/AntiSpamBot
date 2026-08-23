@@ -181,24 +181,23 @@ func (d *DB) ClaimChatApproval(ctx context.Context, chatID int64, status string)
 // «использовать глобальный дефолт» — вызывающий должен откатываться к
 // b.cfg.*, когда поле не задано.
 type ChatSettings struct {
-	ChatID                int64
-	GreetingEnabled       bool          // по умолчанию true, когда строки нет
-	MaxAttempts           sql.NullInt64 // NULL = глобальный дефолт
-	CaptchaTimeoutSeconds sql.NullInt64 // NULL = глобальный дефолт
-	DailyStatsEnabled     bool          // по умолчанию false, когда строки нет
-	DailyStatsUTCHour     sql.NullInt64 // NULL = глобальный DAILY_STATS_UTC_HOUR
-	LastDailyStatsDay     sql.NullString
-	CaptchaMode           sql.NullString // NULL = дефолт (circles)
-	GreetingText          sql.NullString // NULL = встроенное приветствие по умолчанию
-	GreetingEntities      sql.NullString // JSON entities шаблона; NULL = плоский текст
-	SilentAnnounceEnabled bool           // по умолчанию true, когда строки нет
-	SpamCheckEnabled      bool           // по умолчанию false, когда строки нет
-	SpamThreshold         sql.NullInt64  // NULL = 90 (%)
-	SpamWhitelistMsgs     sql.NullInt64  // NULL = 5 сообщений до белого списка
-	SpamVoteMargin        sql.NullInt64  // NULL = 3 голоса перевеса
-	ReplyCheckEnabled     bool           // режим «требовать ответа»; по умолчанию false
-	ReplyCheckSeconds     sql.NullInt64  // NULL = 60 секунд на ответ
-	EphemeralEnabled      bool           // служебные сообщения эфемерно; по умолчанию false
+	ChatID                 int64
+	GreetingEnabled        bool          // по умолчанию true, когда строки нет
+	MaxAttempts            sql.NullInt64 // NULL = глобальный дефолт
+	CaptchaIntervalMinutes sql.NullInt64 // NULL = глобальный дефолт; интервал серии капчи/напоминаний
+	DailyStatsEnabled      bool          // по умолчанию false, когда строки нет
+	DailyStatsUTCHour      sql.NullInt64 // NULL = глобальный DAILY_STATS_UTC_HOUR
+	LastDailyStatsDay      sql.NullString
+	CaptchaMode            sql.NullString // NULL = дефолт (circles)
+	GreetingText           sql.NullString // NULL = встроенное приветствие по умолчанию
+	GreetingEntities       sql.NullString // JSON entities шаблона; NULL = плоский текст
+	SilentAnnounceEnabled  bool           // по умолчанию true, когда строки нет
+	SpamCheckEnabled       bool           // по умолчанию false, когда строки нет
+	SpamThreshold          sql.NullInt64  // легаси, не читается
+	SpamWhitelistMsgs      sql.NullInt64  // NULL = 5 сообщений до белого списка
+	SpamVoteMargin         sql.NullInt64  // NULL = 3 голоса перевеса
+	ReplyCheckEnabled      bool           // режим «требовать ответа»; по умолчанию false
+	EphemeralEnabled       bool           // служебные сообщения эфемерно; по умолчанию false
 }
 
 // defaultChatSettings — строка настроек для чата без сохранённой строки —
@@ -215,19 +214,19 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 
 	var greetingInt, dailyInt, silentInt, spamInt, replyInt, ephInt int
 	err := d.sql.QueryRowContext(ctx, `
-		SELECT greeting_enabled, max_attempts, captcha_timeout_seconds,
+		SELECT greeting_enabled, max_attempts, captcha_interval_minutes,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
 		       captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
-		       spam_vote_margin, reply_check_enabled, reply_check_seconds,
+		       spam_vote_margin, reply_check_enabled,
 		       ephemeral_enabled
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
-		&s.MaxAttempts, &s.CaptchaTimeoutSeconds,
+		&s.MaxAttempts, &s.CaptchaIntervalMinutes,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
 		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities, &silentInt,
 		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
-		&s.SpamVoteMargin, &replyInt, &s.ReplyCheckSeconds,
+		&s.SpamVoteMargin, &replyInt,
 		&ephInt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
@@ -279,11 +278,6 @@ func (d *DB) SetReplyCheckEnabled(ctx context.Context, chatID int64, enabled boo
 	return d.setChatSetting(ctx, chatID, "reply_check_enabled", boolToInt(enabled))
 }
 
-// SetReplyCheckSeconds переопределяет срок ожидания ответа. nil снимает.
-func (d *DB) SetReplyCheckSeconds(ctx context.Context, chatID int64, seconds *int) error {
-	return d.setChatSetting(ctx, chatID, "reply_check_seconds", nullableInt(seconds))
-}
-
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	return d.setChatSetting(ctx, chatID, "greeting_enabled", boolToInt(enabled))
 }
@@ -316,10 +310,10 @@ func (d *DB) SetMaxAttempts(ctx context.Context, chatID int64, value *int) error
 	return d.setChatSetting(ctx, chatID, "max_attempts", nullableInt(value))
 }
 
-// SetCaptchaTimeoutSec переопределяет глобальный таймаут капчи для этого
-// чата. nil снимает переопределение.
-func (d *DB) SetCaptchaTimeoutSec(ctx context.Context, chatID int64, seconds *int) error {
-	return d.setChatSetting(ctx, chatID, "captcha_timeout_seconds", nullableInt(seconds))
+// SetCaptchaIntervalMin переопределяет интервал между сообщениями серии
+// капчи/напоминаний (в минутах) для этого чата. nil снимает переопределение.
+func (d *DB) SetCaptchaIntervalMin(ctx context.Context, chatID int64, minutes *int) error {
+	return d.setChatSetting(ctx, chatID, "captcha_interval_minutes", nullableInt(minutes))
 }
 
 // SetCaptchaMode сохраняет стиль капчи для этого чата. nil снимает

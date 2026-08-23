@@ -32,12 +32,20 @@ type greetInputState struct {
 	armedAt time.Time
 }
 
-// maybeSendGreeting шлёт приветствие (s передан вызывающим, чтобы не читать
-// настройки дважды) и сообщает, ушло ли оно. Взвод reply-ожидания — НЕ здесь:
-// onSuccess делает это сразу после release, до этого сетевого round-trip'а,
-// иначе юзер успел бы написать в окне release→arm и был бы кикнут за
-// молчание, хотя ответил.
+// maybeSendGreeting шлёт приветствие (первая стадия серии) и сообщает, ушло
+// ли оно. Взвод reply-ожидания — НЕ здесь: onSuccess делает это сразу после
+// release, до этого сетевого round-trip'а, иначе юзер успел бы написать в окне
+// release→arm и был бы кикнут за молчание, хотя ответил.
 func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) bool {
+	return b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
+}
+
+// sendGreetingAnchor шлёт якорное сообщение стадии stage серии «ответь на
+// приветствие» (и просто приветствие, когда reply-check выключен): тело
+// приветствия + строка-требование стадии. Напоминания (стадии 2+) повторяют
+// то же тело приветствия с усиленной строкой — три сообщения, как в серии
+// капчи. Сообщает, ушло ли сообщение.
+func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID, stage int) bool {
 	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
 	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
 	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
@@ -50,7 +58,7 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, cha
 	mention := mentionOrID(infos, userID)
 	text := renderGreeting(s.GreetingText.String, s.GreetingEntities.String, mention)
 	if s.ReplyCheckEnabled {
-		text += replyRequirementLine(effectiveReplyCheckSeconds(s))
+		text += replyRequirementLine(stage, int(b.effectiveStageInterval(s).Minutes()))
 	}
 
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)

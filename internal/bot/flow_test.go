@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -123,12 +124,16 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 	if err != nil {
 		t.Fatalf("new telego bot: %v", err)
 	}
+	logOut := io.Writer(io.Discard)
+	if os.Getenv("BOT_TEST_LOG") != "" {
+		logOut = os.Stderr
+	}
 	b := &Bot{
 		api:     api,
-		cfg:     &config.Config{MaxAttempts: 3, CaptchaTimeout: 30 * time.Second},
+		cfg:     &config.Config{MaxAttempts: 3, CaptchaStageInterval: 30 * time.Second},
 		store:   captcha.NewStore(),
 		db:      db,
-		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		log:     slog.New(slog.NewTextHandler(logOut, nil)),
 		me:      &telego.User{ID: 42, IsBot: true, Username: "antispam_bot"},
 		runCtx:  context.Background(),
 		replies: newReplyStore(),
@@ -216,9 +221,9 @@ func putCaptcha(b *Bot, db *storage.DB, chatID, userID int64, msgID int) *captch
 	expires := time.Now().Add(time.Minute)
 	_ = db.PutPending(context.Background(), storage.PendingRow{
 		ChatID: chatID, UserID: userID, MessageID: msgID,
-		CorrectIdx: 2, ExpiresAt: expires,
+		CorrectIdx: 2, ExpiresAt: expires, Stage: 1,
 	})
-	return b.store.Put(chatID, userID, msgID, 2, expires, 0, 0)
+	return b.store.Put(chatID, userID, msgID, 2, expires, 0, 0, 1)
 }
 
 func TestOnFailLadder(t *testing.T) {
@@ -384,10 +389,19 @@ func TestCancelCaptchaSilentStopsTimeoutPunishment(t *testing.T) {
 	select {
 	case <-p.Done():
 	case <-time.After(time.Second):
-		t.Fatal("silent cancel must stop the waitTimeout timer via Cancel")
+		t.Fatal("silent cancel must stop the stage timer via Cancel")
 	}
 	// Повторный вызов безопасен (Take промахивается).
 	b.cancelCaptchaSilent(testChatID, testUserID)
+}
+
+// putReplyWait заводит ожидание ответа в store и БД (стадия 1).
+func putReplyWait(b *Bot, db *storage.DB, chatID, userID int64) *replyPending {
+	expires := time.Now().Add(time.Minute)
+	_ = db.PutPendingReply(context.Background(), storage.PendingReply{
+		ChatID: chatID, UserID: userID, ExpiresAt: expires, Stage: 1,
+	})
+	return b.replies.Put(chatID, userID, expires, 0, 1)
 }
 
 func TestWaitReplyTimeoutLadder(t *testing.T) {
@@ -419,12 +433,13 @@ func TestWaitReplyTimeoutLadder(t *testing.T) {
 			if err := db.PutPendingReply(ctx, storage.PendingReply{
 				ChatID: testChatID, UserID: testUserID,
 				ExpiresAt: time.Now().Add(-time.Millisecond),
+				Stage:     captchaStages,
 			}); err != nil {
 				t.Fatal(err)
 			}
-			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond))
+			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond), 0, captchaStages)
 
-			b.waitReplyTimeout(p)
+			b.replyWaitLoop(testChatID, testUserID, p)
 
 			kinds := statsKinds(t, db, testChatID, testUserID)
 			if tc.wantKind == "" {

@@ -82,13 +82,14 @@ func (b *Bot) effectiveMaxAttempts(s storage.ChatSettings) int {
 	return b.cfg.MaxAttempts
 }
 
-// effectiveCaptchaTimeout резолвит таймаут капчи: пер-чатовый override, если
+// effectiveStageInterval резолвит интервал между сообщениями серии капчи
+// (и серии напоминаний «ответь на приветствие»): пер-чатовый override, если
 // задан, иначе глобальный дефолт.
-func (b *Bot) effectiveCaptchaTimeout(s storage.ChatSettings) time.Duration {
-	if s.CaptchaTimeoutSeconds.Valid {
-		return time.Duration(s.CaptchaTimeoutSeconds.Int64) * time.Second
+func (b *Bot) effectiveStageInterval(s storage.ChatSettings) time.Duration {
+	if s.CaptchaIntervalMinutes.Valid && s.CaptchaIntervalMinutes.Int64 > 0 {
+		return time.Duration(s.CaptchaIntervalMinutes.Int64) * time.Minute
 	}
-	return b.cfg.CaptchaTimeout
+	return b.cfg.CaptchaStageInterval
 }
 
 // effectiveDailyHour резолвит UTC-час ежедневной сводки: пер-чатовый

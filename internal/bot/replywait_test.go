@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"database/sql"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -15,7 +14,7 @@ import (
 
 func TestReplyStoreTakeSingleWinner(t *testing.T) {
 	s := newReplyStore()
-	s.Put(1, 2, time.Now().Add(time.Minute))
+	s.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
 
 	// Гонка «сообщение vs таймаут vs выход»: Take выигрывает ровно один.
 	var wins int
@@ -40,8 +39,8 @@ func TestReplyStoreTakeSingleWinner(t *testing.T) {
 
 func TestReplyStorePutReplacesAndCancels(t *testing.T) {
 	s := newReplyStore()
-	old := s.Put(1, 2, time.Now().Add(time.Minute))
-	s.Put(1, 2, time.Now().Add(2*time.Minute)) // перезаход перевзводит
+	old := s.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
+	s.Put(1, 2, time.Now().Add(2*time.Minute), 0, 1) // перезаход перевзводит
 
 	select {
 	case <-old.Done():
@@ -56,9 +55,9 @@ func TestReplyStorePutReplacesAndCancels(t *testing.T) {
 
 func TestReplyStoreTakeChat(t *testing.T) {
 	s := newReplyStore()
-	s.Put(1, 10, time.Now().Add(time.Minute))
-	s.Put(1, 11, time.Now().Add(time.Minute))
-	s.Put(2, 12, time.Now().Add(time.Minute))
+	s.Put(1, 10, time.Now().Add(time.Minute), 0, 1)
+	s.Put(1, 11, time.Now().Add(time.Minute), 0, 1)
+	s.Put(2, 12, time.Now().Add(time.Minute), 0, 1)
 
 	got := s.TakeChat(1)
 	if len(got) != 2 {
@@ -66,17 +65,6 @@ func TestReplyStoreTakeChat(t *testing.T) {
 	}
 	if _, ok := s.Take(2, 12); !ok {
 		t.Fatal("chat 2 pending must survive TakeChat(1)")
-	}
-}
-
-func TestEffectiveReplyCheckSeconds(t *testing.T) {
-	var s storage.ChatSettings
-	if got := effectiveReplyCheckSeconds(s); got != defaultReplyCheckSeconds {
-		t.Errorf("default: got %d, want %d", got, defaultReplyCheckSeconds)
-	}
-	s.ReplyCheckSeconds = sql.NullInt64{Int64: 90, Valid: true}
-	if got := effectiveReplyCheckSeconds(s); got != 90 {
-		t.Errorf("override: got %d, want 90", got)
 	}
 }
 
@@ -99,7 +87,7 @@ func newTestBotWithDB(t *testing.T) (*Bot, *storage.DB) {
 func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 	ctx := context.Background()
 	b, db := newTestBotWithDB(t)
-	b.replies.Put(1, 2, time.Now().Add(time.Minute))
+	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
 	_ = db.PutPendingReply(ctx, storage.PendingReply{
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})
@@ -134,7 +122,7 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 func TestCancelReplyWaitSignalsCancelled(t *testing.T) {
 	ctx := context.Background()
 	b, db := newTestBotWithDB(t)
-	b.replies.Put(1, 2, time.Now().Add(time.Minute))
+	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
 	_ = db.PutPendingReply(ctx, storage.PendingReply{
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})

@@ -6,6 +6,9 @@ CREATE TABLE IF NOT EXISTS pending_captchas (
     expires_at  INTEGER NOT NULL,
     thread_id   INTEGER NOT NULL DEFAULT 0, -- топик форума, в котором вошёл юзер; 0 = без топика
     ephemeral_msg_id INTEGER NOT NULL DEFAULT 0, -- ≠0: капча эфемерная, удалять по этому id
+    -- Стадия серии капчи (1..3): какое сообщение серии сейчас живо. Рестарт
+    -- продолжает серию с этой стадии, а не с начала.
+    stage       INTEGER NOT NULL DEFAULT 1,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -105,16 +108,17 @@ CREATE TABLE IF NOT EXISTS chats (
 );
 
 -- Настраиваемое пер-чатовое поведение. Нет строки = дефолты (приветствие
--- включено, attempts/timeout берутся из глобального конфига, ежедневные
+-- включено, attempts/интервал серий берутся из глобального конфига, ежедневные
 -- дайджесты выключены).
 --
--- Nullable-колонки (max_attempts, captcha_timeout_seconds) означают
+-- Nullable-колонки (max_attempts, captcha_interval_minutes) означают
 -- «использовать глобальный env-дефолт»; non-null значение его переопределяет.
 CREATE TABLE IF NOT EXISTS chat_settings (
     chat_id                 INTEGER PRIMARY KEY,
     greeting_enabled        INTEGER NOT NULL DEFAULT 1,
     max_attempts            INTEGER,
-    captcha_timeout_seconds INTEGER,
+    captcha_timeout_seconds INTEGER, -- легаси (секунды одиночного таймаута); заменён на captcha_interval_minutes
+    captcha_interval_minutes INTEGER, -- NULL = дефолт; интервал между сообщениями серии капчи/напоминаний
     daily_stats_enabled     INTEGER NOT NULL DEFAULT 0,
     daily_stats_utc_hour    INTEGER,
     last_daily_stats_day    TEXT,
@@ -186,6 +190,10 @@ CREATE TABLE IF NOT EXISTS pending_replies (
     chat_id         INTEGER NOT NULL,
     user_id         INTEGER NOT NULL,
     expires_at      INTEGER NOT NULL,
+    -- Стадия серии напоминаний (1..3): какое приветствие-якорь сейчас живо.
+    stage           INTEGER NOT NULL DEFAULT 1,
+    -- Топик форума для повторных отправок якоря; 0 = без топика.
+    thread_id       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, user_id)
 );
 

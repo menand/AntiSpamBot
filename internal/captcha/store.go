@@ -13,6 +13,7 @@ type Pending struct {
 	ExpiresAt   time.Time
 	ThreadID    int // топик форума, куда отправлена капча; 0 = без топика
 	EphemeralID int // ≠0: капча эфемерная (видна только юзеру), удалять по этому id
+	Stage       int // стадия серии (1..3): какое сообщение серии сейчас живо
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -72,13 +73,16 @@ func (s *Store) FinishKickoff(chatID, userID int64) {
 	delete(s.inflight, capKey{chatID, userID})
 }
 
-func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID, ephemeralID int) *Pending {
+func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID, ephemeralID, stage int) *Pending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	k := capKey{chatID, userID}
 	if old, ok := s.items[k]; ok {
 		old.Cancel()
+	}
+	if stage < 1 {
+		stage = 1
 	}
 	p := &Pending{
 		ChatID:      chatID,
@@ -88,6 +92,7 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 		ExpiresAt:   expiresAt,
 		ThreadID:    threadID,
 		EphemeralID: ephemeralID,
+		Stage:       stage,
 		cancelCh:    make(chan struct{}),
 	}
 	s.items[k] = p
@@ -149,7 +154,7 @@ func (s *Store) TakeMatch(chatID, userID int64, match func(p *Pending) bool) (*P
 
 // TakeChat изымает и возвращает все ожидающие капчи чата. Используется, когда
 // бот покидает чат, — вызывающий должен вызвать Cancel у каждого возвращённого
-// Pending, чтобы горутины waitTimeout завершились, а не стреляли kick/ban в
+// Pending, чтобы горутины captchaStageLoop завершились, а не стреляли kick/ban в
 // чате, где бота больше нет.
 func (s *Store) TakeChat(chatID int64) []*Pending {
 	s.mu.Lock()

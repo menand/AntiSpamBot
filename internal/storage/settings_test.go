@@ -19,8 +19,8 @@ func TestChatSettingsDefaults(t *testing.T) {
 	if s.MaxAttempts.Valid {
 		t.Error("default max_attempts should be NULL")
 	}
-	if s.CaptchaTimeoutSeconds.Valid {
-		t.Error("default captcha_timeout_seconds should be NULL")
+	if s.CaptchaIntervalMinutes.Valid {
+		t.Error("default captcha_interval_minutes should be NULL")
 	}
 	if s.DailyStatsEnabled {
 		t.Error("default daily_stats_enabled should be OFF")
@@ -78,17 +78,26 @@ func TestSetCaptchaMode(t *testing.T) {
 	}
 }
 
-func TestSetCaptchaTimeoutSec(t *testing.T) {
+func TestSetCaptchaIntervalMin(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
 
-	sec := 60
-	if err := db.SetCaptchaTimeoutSec(ctx, 1, &sec); err != nil {
+	mins := 3
+	if err := db.SetCaptchaIntervalMin(ctx, 1, &mins); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := db.GetChatSettings(ctx, 1)
-	if !s.CaptchaTimeoutSeconds.Valid || s.CaptchaTimeoutSeconds.Int64 != 60 {
-		t.Errorf("got %+v, want 60", s.CaptchaTimeoutSeconds)
+	if !s.CaptchaIntervalMinutes.Valid || s.CaptchaIntervalMinutes.Int64 != 3 {
+		t.Errorf("got %+v, want 3", s.CaptchaIntervalMinutes)
+	}
+
+	// Сброс через nil → обратно в NULL.
+	if err := db.SetCaptchaIntervalMin(ctx, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.CaptchaIntervalMinutes.Valid {
+		t.Errorf("expected NULL after clear, got %+v", s.CaptchaIntervalMinutes)
 	}
 }
 

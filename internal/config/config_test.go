@@ -12,7 +12,7 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{
-		"BOT_TOKEN", "CAPTCHA_TIMEOUT_SECONDS", "MAX_ATTEMPTS", "LOG_LEVEL",
+		"BOT_TOKEN", "CAPTCHA_STAGE_MINUTES", "MAX_ATTEMPTS", "LOG_LEVEL",
 		"ALLOWED_CHATS", "DB_PATH", "NEWCOMER_DAYS", "SILENT_ANNOUNCE_DAYS",
 		"OWNER_IDS", "LOG_FILE", "CAPTCHA_DELAY_MS", "DAILY_STATS_UTC_HOUR",
 		"GROQ_API_KEY", "GROQ_MODEL",
@@ -170,7 +170,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Token != "123:abc" {
 		t.Errorf("token: %q", cfg.Token)
 	}
-	if cfg.CaptchaTimeout != 30*time.Second || cfg.MaxAttempts != 3 ||
+	if cfg.CaptchaStageInterval != 2*time.Minute || cfg.MaxAttempts != 3 ||
 		cfg.NewcomerDays != 7 || cfg.SilentAnnounceDays != 30 ||
 		cfg.CaptchaDelay != 3*time.Second || cfg.DailyStatsUTCHour != 6 {
 		t.Errorf("defaults mismatch: %+v", cfg)
@@ -193,7 +193,8 @@ func TestLoadValidation(t *testing.T) {
 		value string
 	}{
 		{"missing token", "BOT_TOKEN", ""},
-		{"zero timeout", "CAPTCHA_TIMEOUT_SECONDS", "0"},
+		{"zero stage minutes", "CAPTCHA_STAGE_MINUTES", "0"},
+		{"negative stage minutes", "CAPTCHA_STAGE_MINUTES", "-1"},
 		{"zero attempts", "MAX_ATTEMPTS", "0"},
 		{"zero newcomer days", "NEWCOMER_DAYS", "0"},
 		{"negative silent days", "SILENT_ANNOUNCE_DAYS", "-1"},

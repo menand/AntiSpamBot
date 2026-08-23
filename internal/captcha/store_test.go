@@ -8,7 +8,7 @@ import (
 
 func TestStorePutAndTake(t *testing.T) {
 	s := NewStore()
-	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute), 0, 0)
+	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute), 0, 0, 1)
 	if p.ChatID != 1 || p.UserID != 2 || p.MessageID != 100 || p.CorrectIdx != 3 {
 		t.Fatalf("unexpected pending: %+v", p)
 	}
@@ -25,8 +25,8 @@ func TestStorePutAndTake(t *testing.T) {
 
 func TestStorePutCancelsExisting(t *testing.T) {
 	s := NewStore()
-	first := s.Put(1, 2, 100, 0, time.Now().Add(time.Minute), 0, 0)
-	_ = s.Put(1, 2, 200, 0, time.Now().Add(time.Minute), 0, 0) // перезаписывает
+	first := s.Put(1, 2, 100, 0, time.Now().Add(time.Minute), 0, 0, 1)
+	_ = s.Put(1, 2, 200, 0, time.Now().Add(time.Minute), 0, 0, 1) // перезаписывает
 
 	select {
 	case <-first.Done():
@@ -38,7 +38,7 @@ func TestStorePutCancelsExisting(t *testing.T) {
 
 func TestPendingCancelIsIdempotent(t *testing.T) {
 	s := NewStore()
-	p := s.Put(1, 2, 0, 0, time.Now().Add(time.Minute), 0, 0)
+	p := s.Put(1, 2, 0, 0, time.Now().Add(time.Minute), 0, 0, 1)
 	p.Cancel()
 	p.Cancel() // не должен паниковать
 	p.Cancel()
@@ -79,7 +79,7 @@ func TestBeginKickoffExclusive(t *testing.T) {
 
 func TestBeginKickoffBlockedByActiveCaptcha(t *testing.T) {
 	s := NewStore()
-	s.Put(1, 2, 100, 0, time.Now().Add(time.Minute), 0, 0)
+	s.Put(1, 2, 100, 0, time.Now().Add(time.Minute), 0, 0, 1)
 
 	if s.BeginKickoff(1, 2) {
 		t.Fatal("kickoff should fail when a captcha is already active")
@@ -94,9 +94,9 @@ func TestBeginKickoffBlockedByActiveCaptcha(t *testing.T) {
 
 func TestTakeChat(t *testing.T) {
 	s := NewStore()
-	a := s.Put(10, 1, 0, 0, time.Now().Add(time.Minute), 0, 0)
-	b := s.Put(10, 2, 0, 0, time.Now().Add(time.Minute), 0, 0)
-	s.Put(20, 3, 0, 0, time.Now().Add(time.Minute), 0, 0)
+	a := s.Put(10, 1, 0, 0, time.Now().Add(time.Minute), 0, 0, 1)
+	b := s.Put(10, 2, 0, 0, time.Now().Add(time.Minute), 0, 0, 1)
+	s.Put(20, 3, 0, 0, time.Now().Add(time.Minute), 0, 0, 1)
 
 	got := s.TakeChat(10)
 	if len(got) != 2 {
@@ -116,7 +116,7 @@ func TestTakeChat(t *testing.T) {
 
 func TestStoreConcurrentTake(t *testing.T) {
 	s := NewStore()
-	s.Put(1, 2, 0, 0, time.Now().Add(time.Minute), 0, 0)
+	s.Put(1, 2, 0, 0, time.Now().Add(time.Minute), 0, 0, 1)
 
 	const workers = 50
 	var wg sync.WaitGroup
@@ -144,7 +144,7 @@ func TestStoreGet(t *testing.T) {
 	if _, ok := s.Get(1, 2); ok {
 		t.Fatal("Get on empty store must miss")
 	}
-	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute), 0, 0)
+	p := s.Put(1, 2, 100, 3, time.Now().Add(time.Minute), 0, 0, 1)
 	got, ok := s.Get(1, 2)
 	if !ok || got != p {
 		t.Fatal("Get did not return the stored pending")
@@ -164,7 +164,7 @@ func TestStoreGet(t *testing.T) {
 // в которое улеглась бы новая капча того же юзера.
 func TestTakeMatchAtomicGuard(t *testing.T) {
 	s := NewStore()
-	live := s.Put(1, 2, 100, 2, time.Now().Add(time.Minute), 0, 0)
+	live := s.Put(1, 2, 100, 2, time.Now().Add(time.Minute), 0, 0, 1)
 
 	// Чужая клавиатура — не изымается, store не тронут.
 	if _, ok := s.TakeMatch(1, 2, func(p *Pending) bool { return p.MessageID == 999 }); ok {
