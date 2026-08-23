@@ -264,9 +264,10 @@ func (b *Bot) refuseAndDelete(ctx *th.Context, message telego.Message, text stri
 // недоступен, без прав не пройдёт — тогда честно отвечаем без обещания мьюта,
 // которого не было.
 func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
-	muted := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute) == nil
+	merr := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute)
+	muted := merr == nil
 	if !muted {
-		b.log.Debug("punish mute failed", "chat", message.Chat.ID)
+		b.log.Debug("punish mute failed", "err", merr, "chat", message.Chat.ID)
 	}
 	// Сначала ответ (пока якорь-сообщение живо), потом удаление команды.
 	text := "🙅 Это админская команда, не балуйся."
@@ -359,6 +360,13 @@ func (b *Bot) guardModTarget(ctx *th.Context, message telego.Message, targetID i
 		b.replyTo(ctx, message, "Себя-то за что? 🙂")
 		return false
 	}
+	// Сервисный «Telegram»/канальные id (≤ 0): наказание всё равно упало бы
+	// об API с ложным «проверь мои права» — отказываем честно и сразу. Это
+	// последняя линия после резолвера: @username-путь не видит IsBot цели.
+	if targetID == telegramServiceUserID || targetID <= 0 {
+		b.replyTo(ctx, message, "Это не участник чата — наказать не получится.")
+		return false
+	}
 	if b.canManageChat(ctx, targetID, message.Chat.ID) {
 		b.replyTo(ctx, message, "Это админ — не трону.")
 		return false
@@ -428,9 +436,11 @@ func muteLabel(d time.Duration) string {
 // остальных путей резолва конкретного сообщения нет — 0 (не путать с
 // приветствием бота, его чистит cleanupTargetTraces по таблице greetings).
 func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMsgID int, ok bool) {
-	// 1. text_mention — id прямо в entity.
+	// 1. text_mention — id прямо в entity. Та же гигиена, что у /spam:
+	// боты и сервисные отправители целью наказания не бывают.
 	for _, e := range message.Entities {
-		if e.Type == telego.EntityTypeTextMention && e.User != nil {
+		if e.Type == telego.EntityTypeTextMention && e.User != nil &&
+			!e.User.IsBot && e.User.ID > 0 && e.User.ID != telegramServiceUserID {
 			return e.User.ID, 0, true
 		}
 	}
