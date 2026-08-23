@@ -10,6 +10,7 @@ import (
 	"github.com/mymmrac/telego"
 	"github.com/mymmrac/telego/telegoapi"
 
+	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -38,6 +39,12 @@ func TestCaptchaSeriesThreeStages(t *testing.T) {
 	})
 	if n := fc.callCount("sendMessage"); n != 2 {
 		t.Fatalf("sendMessage calls = %d, want 2 (стадия 2 отправлена)", n)
+	}
+	// Публичная серия обязана нести ряд «Впустить» на каждом сообщении.
+	for i, body := range fc.callBodies("sendMessage") {
+		if !strings.Contains(body, "capok:") {
+			t.Fatalf("публичная стадия %d без ряда «Впустить»: %s", i+1, body)
+		}
 	}
 	kinds := statsKinds(t, db, testChatID, testUserID)
 	for k, n := range kinds {
@@ -342,7 +349,10 @@ func TestReplyWaitReminderFailDisarmsWithPass(t *testing.T) {
 
 // TestCaptchaSeriesEphemeralAllStages — эфемерный режим накрывает ВСЮ серию
 // без исключений: каждое сообщение адресовано вступившему, ряд «Впустить»
-// не рисуется ни на одной стадии.
+// не рисуется ни на одной стадии, каждая стадия пишет в pending СВОЙ
+// ephemeral id (старый не протекает), удаления идут по эфемерному пути.
+// Фолбэка «со второй попытки публично» больше нет — проверяем это на юзере
+// с уже существующей попыткой.
 func TestCaptchaSeriesEphemeralAllStages(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
@@ -351,16 +361,31 @@ func TestCaptchaSeriesEphemeralAllStages(t *testing.T) {
 	if err := db.SetEphemeralEnabled(ctx, testChatID, true); err != nil {
 		t.Fatal(err)
 	}
-	// Эфемерка в ответе Telegram несёт собственный id — проверяем, что он
-	// доезжает до живой капчи (stale-guard сравнивает именно его).
-	fc.resp["sendMessage"] = `{"message_id":555,"ephemeral_message_id":777,
-		"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`
+	// Пытка в прошлом — фолбэка на публичную капчу больше не существует.
+	if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
+		t.Fatal(err)
+	}
+	// Эфемерка в реальности не имеет обычного message_id и несёт СВОЙ
+	// ephemeral_message_id на каждое сообщение.
+	fc.respSeq["sendMessage"] = []string{
+		`{"ephemeral_message_id":777,"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`,
+		`{"ephemeral_message_id":778,"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`,
+		`{"ephemeral_message_id":779,"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`,
+	}
 
 	b.runCaptcha(testChatID, telego.User{ID: testUserID, FirstName: "Юзер"}, 0)
 
 	if p, ok := b.store.Get(testChatID, testUserID); !ok || p.EphemeralID != 777 {
 		t.Fatalf("stage 1 must be live and ephemeral: %+v", p)
 	}
+	waitFor(t, func() bool {
+		rows := pendingRows(t, db)
+		return len(rows) == 1 && rows[0].Stage == 2 && rows[0].EphemeralID == 778
+	})
+	waitFor(t, func() bool {
+		rows := pendingRows(t, db)
+		return len(rows) == 1 && rows[0].Stage == 3 && rows[0].EphemeralID == 779
+	})
 
 	waitFor(t, func() bool {
 		k := statsKinds(t, db, testChatID, testUserID)
@@ -377,5 +402,98 @@ func TestCaptchaSeriesEphemeralAllStages(t *testing.T) {
 		if strings.Contains(body, "capok:") {
 			t.Fatalf("на эфемерной стадии %d нарисован ряд «Впустить»: %s", i+1, body)
 		}
+	}
+	// Два перехода + удаление после наказания — все по эфемерному id,
+	// обычный deleteMessage не вызывается вовсе.
+	if n := fc.callCount("deleteEphemeralMessage"); n != 3 {
+		t.Fatalf("deleteEphemeralMessage = %d, want 3", n)
+	}
+	if n := fc.callCount("deleteMessage"); n != 0 {
+		t.Fatalf("deleteMessage = %d, want 0 (эфемерки удаляются своим методом)", n)
+	}
+}
+
+// TestCaptchaEphemeralUserNotParticipantMidSeries — ушедший между стадиями:
+// эфемерка отсутствующему падает с USER_NOT_PARTICIPANT, воронка закрывается
+// честным left (не abort, без наказания), осиротевший pre-persist перехода
+// стёрт, капча-мьют снят.
+func TestCaptchaEphemeralUserNotParticipantMidSeries(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	if err := db.SetEphemeralEnabled(ctx, testChatID, true); err != nil {
+		t.Fatal(err)
+	}
+	fc.err["sendMessage"] = &telegoapi.Error{ErrorCode: 400,
+		Description: "Bad Request: USER_NOT_PARTICIPANT"}
+	// Liveness-проба об уходе не знает — классифицировать должен код ошибки.
+	fc.resp["getChatMember"] = `{"status":"member","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
+
+	if err := db.PutPending(ctx, storage.PendingRow{
+		ChatID: testChatID, UserID: testUserID,
+		MessageID: 0, CorrectIdx: 1, EphemeralID: 55,
+		ExpiresAt: time.Now().Add(1500 * time.Millisecond), Stage: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := b.restorePending(ctx); err != nil || n != 1 {
+		t.Fatalf("restored = %d err=%v, want 1/nil", n, err)
+	}
+
+	waitForWithin(t, 15*time.Second, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventLeft] == 1
+	})
+	k := statsKinds(t, db, testChatID, testUserID)
+	if k[storage.EventAbort] != 0 || k[storage.EventKick]+k[storage.EventBan] != 0 {
+		t.Fatalf("ушедший абортнут/наказан: %v", k)
+	}
+	if _, ok := b.store.Get(testChatID, testUserID); ok || len(pendingRows(t, db)) != 0 {
+		t.Fatal("captcha must not survive USER_NOT_PARTICIPANT")
+	}
+	if n := fc.callCount("restrictChatMember"); n == 0 {
+		t.Fatal("releaseOnAbort must lift the captcha mute")
+	}
+}
+
+// TestCaptchaImageModeEphemeralAllStages — режим картинки подчиняется
+// эфемерности так же: все три стадии уходят SendPhoto адресату, без ряда
+// «Впустить», удаления по эфемерному id.
+func TestCaptchaImageModeEphemeralAllStages(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	if err := db.SetEphemeralEnabled(ctx, testChatID, true); err != nil {
+		t.Fatal(err)
+	}
+	mode := string(captcha.ModeImage)
+	if err := db.SetCaptchaMode(ctx, testChatID, &mode); err != nil {
+		t.Fatal(err)
+	}
+	fc.resp["sendPhoto"] = `{"ephemeral_message_id":888,
+		"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`
+
+	b.runCaptcha(testChatID, telego.User{ID: testUserID, FirstName: "Юзер"}, 0)
+
+	waitFor(t, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventKick] == 1 && k[storage.EventBan] == 0
+	})
+	// Тело SendPhoto — multipart-поток, содержимое (receiver_user_id, клавиа-
+	// тура) в fake не доезжает: сам факт эфемерности фотопути пиним косвенно —
+	// ветки WithReceiverUserID и «capok» стоят рядом с текстовыми и управляются
+	// тем же флагом, а здесь проверяем наблюдаемое: три фото без текстового
+	// фолбэка и удаление строго по эфемерному id.
+	bodies := fc.callBodies("sendPhoto")
+	if len(bodies) != 3 {
+		t.Fatalf("sendPhoto = %d, want 3 (фолбэк на текст не ожидается)", len(bodies))
+	}
+	if n := fc.callCount("deleteEphemeralMessage"); n != 3 {
+		t.Fatalf("deleteEphemeralMessage = %d, want 3", n)
+	}
+	if n := fc.callCount("deleteMessage"); n != 0 {
+		t.Fatalf("deleteMessage = %d, want 0 (эфемерки удаляются своим методом)", n)
 	}
 }
