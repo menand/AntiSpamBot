@@ -480,7 +480,7 @@ func TestOnUserJoinedTrustedAndSpammer(t *testing.T) {
 		if k[storage.EventJoin] != 1 || k[storage.EventSpamBan] != 0 {
 			t.Fatalf("failed-ban fallback must record plain join, got %v", k)
 		}
-		b.cancelCaptchaSilent(testChatID, testUserID) // прибираем waitTimeout
+		b.cancelCaptchaSilent(testChatID, testUserID) // прибираем captchaStageLoop
 	})
 }
 

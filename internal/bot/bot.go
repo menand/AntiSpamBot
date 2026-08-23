@@ -370,6 +370,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 		}
 		expires := row.ExpiresAt
 		expired := expires.Before(now)
+		stage := row.Stage
 		if expired {
 			expires = now.Add(1 * time.Second)
 			// Истекла, пока бот лежал: юзер мог выйти офлайн (лево-апдейт
@@ -381,9 +382,16 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 			if b.restoredCaptchaUserDeparted(lctx, row) {
 				continue
 			}
+			// Простой съел серию: рестарт считает её исчерпанной и по грейсу
+			// исполняет наказание — как прежний одиночный таймаут. Кламп к
+			// финальной стадии заставляет цикл карать, а не слать очередное
+			// напоминание за время, которое юзер и так досидел офлайн.
+			stage = captchaStages
 		}
-		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID, row.EphemeralID)
-		b.goSafe("waitTimeout", func() { b.waitTimeout(p) })
+		p := b.store.Put(row.ChatID, row.UserID, row.MessageID, row.CorrectIdx, expires, row.ThreadID, row.EphemeralID, stage)
+		// Живые строки доигрывают остаток серии со своей стадии; истёкшие —
+		// наказываются секундным грейсом выше.
+		b.goSafe("captchaStageLoop", func() { b.captchaStageLoop(row.ChatID, row.UserID, p) })
 		restored++
 	}
 	for chatID := range staleChats {

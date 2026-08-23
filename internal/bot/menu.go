@@ -199,12 +199,12 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		v, err := strconv.Atoi(parts[3])
-		// < 5 c человек не успеет физически, > 10 мин — капча теряет смысл.
-		if err != nil || v < 5 || v > 600 {
+		// < 1 мин человек не успеет физически, > 10 мин — капча теряет смысл.
+		if err != nil || v < 1 || v > 10 {
 			return nil
 		}
-		if err := b.db.SetCaptchaTimeoutSec(b.runCtx, chatID, &v); err != nil {
-			b.log.Warn("set captcha_timeout", "err", err)
+		if err := b.db.SetCaptchaIntervalMin(b.runCtx, chatID, &v); err != nil {
+			b.log.Warn("set captcha_interval_minutes", "err", err)
 		}
 		return b.renderChatSettings(ctx, query, chatID)
 	case "daily":
@@ -224,20 +224,6 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return b.toggleChatSetting(ctx, query, chatID,
 			func(s storage.ChatSettings) bool { return s.ReplyCheckEnabled },
 			b.db.SetReplyCheckEnabled, "reply_check_enabled")
-	case "rplt":
-		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
-		if !ok {
-			return nil
-		}
-		v, err := strconv.Atoi(parts[3])
-		// < 10 c не успеет и человек, > 10 мин — ожидание теряет смысл.
-		if err != nil || v < 10 || v > 600 {
-			return nil
-		}
-		if err := b.db.SetReplyCheckSeconds(b.runCtx, chatID, &v); err != nil {
-			b.log.Warn("set reply_check_seconds", "err", err)
-		}
-		return b.renderChatSettings(ctx, query, chatID)
 	case "eph":
 		// Тоггл эфемерных служебных сообщений (капча и ответы мод-команд).
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
@@ -780,7 +766,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	}
 
 	maxAttempts := b.effectiveMaxAttempts(s)
-	timeoutSec := int(b.effectiveCaptchaTimeout(s).Seconds())
+	intervalMin := int(b.effectiveStageInterval(s).Minutes())
 	digestHourUTC := b.effectiveDailyHour(s)
 	captchaMode := effectiveCaptchaMode(s)
 
@@ -795,25 +781,24 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	if !b.spamAIEnabled() {
 		spamLabel = "нет ключа 🔑"
 	}
-	replySeconds := effectiveReplyCheckSeconds(s)
 
 	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
 		"⚙️ <b>Настройки: %s</b>\n\n"+
 			"🧩 Капча: <b>%s</b>\n"+
 			"🔄 Попыток до бана: <b>%d</b>\n"+
-			"⏱ Секунд на ответ: <b>%d</b>\n"+
+			"⏱ Интервал напоминаний: <b>%d мин</b> (3 сообщения: капча → напоминание → последнее предупреждение)\n"+
 			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
-			"💬 Требовать ответа на приветствие: <b>%s</b> (%d сек)\n"+
+			"💬 Требовать ответа на приветствие: <b>%s</b>\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
 			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)\n"+
 			"👻 Эфемерные сообщения (капча и мод-ответы видны только адресату): <b>%s</b>",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
-		maxAttempts, timeoutSec,
+		maxAttempts, intervalMin,
 		onOffLabel(s.GreetingEnabled), greetingText,
-		onOffLabel(s.ReplyCheckEnabled), replySeconds,
+		onOffLabel(s.ReplyCheckEnabled),
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
@@ -824,7 +809,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	rows := [][]telego.InlineKeyboardButton{
 		captchaModeRow(chatID, captchaMode),
 		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}, "х"),
-		intPresetRow(chatID, "tmo", timeoutSec, []int{15, 30, 45, 60}, "с"),
+		intPresetRow(chatID, "tmo", intervalMin, []int{1, 2, 3}, "мин"),
 		{
 			tu.InlineKeyboardButton(toggleLabel("🎉 Приветствие", s.GreetingEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
@@ -849,11 +834,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
 		},
 	}
-	// Пресеты секунд ожидания — только при включённом режиме (как у антиспама).
-	if s.ReplyCheckEnabled {
-		rows = append(rows,
-			intPresetRow(chatID, "rplt", replySeconds, []int{30, 60, 90, 120}, "с"))
-	}
+	// Пресеты секунд ожидания убраны вместе с reply_check_seconds: серия
+	// напоминаний живёт на общем с капчей интервале («tmo» выше).
 	// Пресеты антиспама показываем только при включённой фиче — экран и так
 	// плотный.
 	if s.SpamCheckEnabled {

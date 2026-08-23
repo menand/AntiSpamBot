@@ -46,8 +46,11 @@ func TestPunishReasonColumns(t *testing.T) {
 				if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 					t.Fatal(err)
 				}
-				b.waitReplyTimeout(b.replies.Put(testChatID, testUserID,
-					time.Now().Add(-time.Millisecond)))
+				// Серия исчерпана: финальная стадия с истёкшим дедлайном —
+				// цикл карает за молчание (noreply), как прежний waitReplyTimeout.
+				p := b.replies.Put(testChatID, testUserID,
+					time.Now().Add(-time.Millisecond), 0, captchaStages)
+				b.replyWaitLoop(testChatID, testUserID, p)
 			} else if err := b.onFail(ctx, putCaptcha(b, db, testChatID, testUserID, 77), "таймаут"); err != nil {
 				t.Fatal(err)
 			}
@@ -281,7 +284,7 @@ func TestRunCaptchaAborts(t *testing.T) {
 		if fc.callCount("restrictChatMember") == 0 {
 			t.Fatal("user must be restricted before the keyboard goes out")
 		}
-		b.cancelCaptchaSilent(testChatID, testUserID) // прибираем waitTimeout
+		b.cancelCaptchaSilent(testChatID, testUserID) // прибираем captchaStageLoop
 	})
 
 	t.Run("PutPending упал (БД закрыта) — fail-open впускает", func(t *testing.T) {

@@ -76,6 +76,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"owner_settings", "last_stats_period", `ALTER TABLE owner_settings ADD COLUMN last_stats_period TEXT`},
 		{"chats", "bot_added_at", `ALTER TABLE chats ADD COLUMN bot_added_at INTEGER`},
 		{"spam_votes", "initiator_id", `ALTER TABLE spam_votes ADD COLUMN initiator_id INTEGER NOT NULL DEFAULT 0`},
+		{"chat_settings", "captcha_interval_minutes", `ALTER TABLE chat_settings ADD COLUMN captcha_interval_minutes INTEGER`},
+		{"pending_captchas", "stage", `ALTER TABLE pending_captchas ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
+		{"pending_replies", "stage", `ALTER TABLE pending_replies ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
+		{"pending_replies", "thread_id", `ALTER TABLE pending_replies ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}
@@ -92,6 +96,18 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			_ = raw.Close()
 			return nil, fmt.Errorf("apply migration %q: %w", m.stmt, err)
 		}
+	}
+
+	// Разовая конвертация легаси-пер-чатовых таймаутов (секунды одиночной
+	// капчи) в минуты интервала серии: ceil(сек/60), минимум 1. Идемпотентно —
+	// заполняет только NULL; старая колонка остаётся как архив (не читается).
+	if _, err := raw.ExecContext(ctx, `
+		UPDATE chat_settings
+		SET captcha_interval_minutes = max(1, CAST((captcha_timeout_seconds + 59) / 60 AS INTEGER))
+		WHERE captcha_interval_minutes IS NULL AND captcha_timeout_seconds IS NOT NULL
+	`); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("migrate captcha_timeout_seconds to interval minutes: %w", err)
 	}
 
 	return &DB{sql: raw}, nil

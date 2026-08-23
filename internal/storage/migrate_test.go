@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -21,9 +22,14 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_, _ = db.RecordMessage(ctx, old, 1, now)
 	_ = db.IncMessage(ctx, old, now, true)
 	_ = db.SetGreetingEnabled(ctx, old, false)
-	maxAtt, tmo, hour, mode, greet := 5, 45, 21, "emoji", "Привет, {name}!"
+	maxAtt, hour, mode, greet := 5, 21, "emoji", "Привет, {name}!"
 	_ = db.SetMaxAttempts(ctx, old, &maxAtt)
-	_ = db.SetCaptchaTimeoutSec(ctx, old, &tmo)
+	intervalMin := 3
+	_ = db.SetCaptchaIntervalMin(ctx, old, &intervalMin)
+	// Легаси-колонка таймаута в секундах: сеттера больше нет, сеем сырым
+	// UPDATE — миграция данных при открытии обязана была сконвертировать её
+	// в минуты интервала (см. TestLegacyCaptchaTimeoutConverted).
+	_, _ = db.sql.ExecContext(ctx, `UPDATE chat_settings SET captcha_timeout_seconds = 90 WHERE chat_id = ?`, old)
 	_ = db.SetDailyStatsEnabled(ctx, old, true)
 	_ = db.SetDailyStatsHour(ctx, old, &hour)
 	_ = db.SetCaptchaMode(ctx, old, &mode)
@@ -39,7 +45,9 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.SetSpamVoteMargin(ctx, old, &svm)
 	rpls := 90
 	_ = db.SetReplyCheckEnabled(ctx, old, true)
-	_ = db.SetReplyCheckSeconds(ctx, old, &rpls)
+	// reply_check_seconds — легаси (серия напоминаний живёт на общем
+	// интервале): колонка переносится, но в Go-структуре её больше нет.
+	_, _ = db.sql.ExecContext(ctx, `UPDATE chat_settings SET reply_check_seconds = ? WHERE chat_id = ?`, rpls, old)
 	_ = db.SetEphemeralEnabled(ctx, old, true)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
 	_ = db.AddTrusted(ctx, old, 1, now)
@@ -92,8 +100,8 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if !ms.MaxAttempts.Valid || ms.MaxAttempts.Int64 != 5 {
 		t.Errorf("max_attempts did not migrate: %+v", ms.MaxAttempts)
 	}
-	if !ms.CaptchaTimeoutSeconds.Valid || ms.CaptchaTimeoutSeconds.Int64 != 45 {
-		t.Errorf("captcha_timeout_seconds did not migrate: %+v", ms.CaptchaTimeoutSeconds)
+	if !ms.CaptchaIntervalMinutes.Valid || ms.CaptchaIntervalMinutes.Int64 != 3 {
+		t.Errorf("captcha_interval_minutes did not migrate: %+v", ms.CaptchaIntervalMinutes)
 	}
 	if !ms.DailyStatsEnabled {
 		t.Error("daily_stats_enabled did not migrate")
@@ -127,9 +135,6 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.ReplyCheckEnabled {
 		t.Error("reply_check_enabled did not migrate")
-	}
-	if !ms.ReplyCheckSeconds.Valid || ms.ReplyCheckSeconds.Int64 != 90 {
-		t.Errorf("reply_check_seconds did not migrate: %+v", ms.ReplyCheckSeconds)
 	}
 	if !ms.EphemeralEnabled {
 		t.Error("ephemeral_enabled did not migrate")
@@ -235,6 +240,68 @@ func TestMigrateChat_SameIDNoop(t *testing.T) {
 	}
 	if _, ok, _ := db.MemberJoinedAt(ctx, 42, 1); !ok {
 		t.Error("self-migrate wiped data")
+	}
+}
+
+// TestLegacyCaptchaTimeoutConverted — разовая data-миграция при открытии БД:
+// легаси captcha_timeout_seconds (секунды одиночного таймаута) конвертируется
+// в captcha_interval_minutes (ceil до целых минут, минимум 1). Идемпотентно:
+// непустое новое значение не перетирается.
+func TestLegacyCaptchaTimeoutConverted(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	// Первый Open: сеем легаси-значения сырыми строками chat_settings.
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, captcha_timeout_seconds) VALUES
+			(-1, 30), (-2, 60), (-3, 90), (-4, NULL)
+	`)
+	if err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	_ = db.Close()
+
+	// Второй Open: миграция конвертации обязана отработать.
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	want := map[int64]int64{-1: 1, -2: 1, -3: 2, -4: 0} // 0 = остался NULL
+	for chatID, w := range want {
+		s, err := db.GetChatSettings(ctx, chatID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if w == 0 {
+			if s.CaptchaIntervalMinutes.Valid {
+				t.Errorf("chat %d: interval must stay NULL, got %+v", chatID, s.CaptchaIntervalMinutes)
+			}
+			continue
+		}
+		if !s.CaptchaIntervalMinutes.Valid || s.CaptchaIntervalMinutes.Int64 != w {
+			t.Errorf("chat %d: interval = %+v, want %d", chatID, s.CaptchaIntervalMinutes, w)
+		}
+	}
+
+	// Идемпотентность: третий Open не перетирает уже выставленное значение.
+	intervalMin := 7
+	if err := db.SetCaptchaIntervalMin(ctx, -1, &intervalMin); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s, _ := db.GetChatSettings(ctx, -1)
+	if !s.CaptchaIntervalMinutes.Valid || s.CaptchaIntervalMinutes.Int64 != 7 {
+		t.Errorf("re-open must not overwrite explicit interval: %+v", s.CaptchaIntervalMinutes)
 	}
 }
 
