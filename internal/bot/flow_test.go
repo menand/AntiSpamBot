@@ -17,6 +17,9 @@ import (
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/config"
+	"github.com/menand/AntiSpamBot/internal/gemini"
+	"github.com/menand/AntiSpamBot/internal/gigachat"
+	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -130,11 +133,17 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		runCtx:  context.Background(),
 		replies: newReplyStore(),
 
+		// Пустые ключи = провайдеры выключены (как без env в проде);
+		// тесты ИИ-цепочки подменяют поля фейками llmClassifier.
+		groqc:         groq.New("", ""),
+		gemic:         gemini.New("", ""),
+		gigac:         gigachat.New("", "", "", groq.SystemPrompt),
 		chatCache:     map[int64]storage.ChatInfo{},
 		userCache:     map[int64]storage.UserInfo{},
 		greetInput:    map[int64]greetInputState{},
 		adminCache:    map[chatUser]adminCacheEntry{},
 		approvalCache: map[int64]bool{},
+		spamGateCache: map[int64]bool{},
 	}
 	return b, db, fc
 }

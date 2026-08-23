@@ -398,3 +398,36 @@ func TestYoungSpamVotes(t *testing.T) {
 		t.Fatalf("want only the fresh vote, got %+v", young)
 	}
 }
+
+func TestPutSpamVoteOnceOnePerAuthor(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	vote := func(botMsg int, author int64) SpamVote {
+		return SpamVote{ChatID: -5, BotMsgID: botMsg, TargetMsgID: 1,
+			AuthorID: author, Prob: 100, CreatedAt: time.Now()}
+	}
+
+	if ok, err := db.PutSpamVoteOnce(ctx, vote(10, 42)); err != nil || !ok {
+		t.Fatalf("first plashka must win: ok=%v err=%v", ok, err)
+	}
+	// Вторая плашка на того же автора не проходит, строка остаётся одна.
+	ok, err := db.PutSpamVoteOnce(ctx, vote(11, 42))
+	if err != nil || ok {
+		t.Fatalf("second plashka for same author must lose: ok=%v err=%v", ok, err)
+	}
+	if pending, _ := db.HasPendingVoteForAuthor(ctx, -5, 42); !pending {
+		t.Fatal("original vote must survive the lost race")
+	}
+	// Другой автор независим.
+	if ok, err := db.PutSpamVoteOnce(ctx, vote(13, 43)); err != nil || !ok {
+		t.Fatalf("other author must not be blocked: ok=%v err=%v", ok, err)
+	}
+	// После Take плашка снова возможна.
+	if taken, err := db.TakeSpamVote(ctx, -5, 10); err != nil || !taken {
+		t.Fatalf("take must win: %v", err)
+	}
+	if ok, err := db.PutSpamVoteOnce(ctx, vote(12, 42)); err != nil || !ok {
+		t.Fatalf("re-arm after take must succeed: ok=%v err=%v", ok, err)
+	}
+}

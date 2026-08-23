@@ -261,17 +261,24 @@ func (b *Bot) refuseAndDelete(ctx *th.Context, message telego.Message, text stri
 // punishNonAdmin — не-админ дёрнул админскую команду: минутный мьют + ответ +
 // удаление самой команды (как на успешных админских ветках — служебной команде
 // нечего висеть в чате). Мьют и удаление best-effort: в обычной group рестрикт
-// недоступен, без прав не пройдёт — тогда остаётся только ответ.
+// недоступен, без прав не пройдёт — тогда честно отвечаем без обещания мьюта,
+// которого не было.
 func (b *Bot) punishNonAdmin(ctx *th.Context, message telego.Message) {
-	if err := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute); err != nil {
-		b.log.Debug("punish mute failed", "err", err, "chat", message.Chat.ID)
+	muted := b.mute(b.runCtx, message.Chat.ID, message.From.ID, time.Minute) == nil
+	if !muted {
+		b.log.Debug("punish mute failed", "chat", message.Chat.ID)
 	}
 	// Сначала ответ (пока якорь-сообщение живо), потом удаление команды.
-	b.replyTo(ctx, message, "🙅 Это админская команда, не балуйся. Вот тебе мьют на 1 минуту, раз хотел.")
+	text := "🙅 Это админская команда, не балуйся."
+	if muted {
+		text += " Мьют на 1 минуту."
+	}
+	b.replyTo(ctx, message, text)
 	if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 		b.log.Debug("delete punished command", "err", err, "chat", message.Chat.ID)
 	}
-	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID, "user", message.From.ID)
+	b.log.Info("non-admin punished for mod command", "chat", message.Chat.ID,
+		"user", message.From.ID, "muted", muted)
 }
 
 // handleGroupHelpCommand — /help в группе: справка о командах, ВСЕГДА
@@ -453,7 +460,13 @@ func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMs
 				return id, 0, true
 			}
 		}
-		if r.From != nil && !r.From.IsBot {
+		// Та же гигиена цели, что у /spam (resolveReportTarget): автофорварды
+		// привязанного канала (From там сервисный «Telegram», IsBot=false!),
+		// боты и каналы целью наказания быть не могут — иначе ban/kick упал
+		// бы об API, а админ получил ложное «проверь мои права» вместо
+		// честного «не понял цель».
+		if !r.IsAutomaticForward && r.From != nil && !r.From.IsBot &&
+			r.From.ID > 0 && r.From.ID != telegramServiceUserID {
 			return r.From.ID, r.MessageID, true
 		}
 	}

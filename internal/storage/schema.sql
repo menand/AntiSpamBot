@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS events (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
-    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban' | 'left' | 'abort' | 'mute'
+    kind    TEXT    NOT NULL, -- 'join' | 'pass' | 'kick' | 'ban' | 'spamban' | 'left' | 'abort' | 'mute' | 'suspect'
     at      INTEGER NOT NULL,
     -- Причина кика/бана: 'captcha' | 'noreply' | 'mod:<adminID>' |
     -- 'vote:<id,id,...>' | 'global'. NULL/'' — нет (join/pass и старые строки).

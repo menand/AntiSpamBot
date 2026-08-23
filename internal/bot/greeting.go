@@ -129,6 +129,30 @@ func (b *Bot) takeGreetingInput(userID int64) (chatID int64, ok, expired bool) {
 	return st.chatID, true, false
 }
 
+// cancelGreetingInputOnCommand разряжает взведённый ввод приветствия, когда
+// админ отправил в ЛС команду. Зарегистрированные команды (/start, /help,
+// /stats...) перехватываются своими хендлерами раньше handlePrivateText и без
+// этого разряда оставляли бы ввод висеть: следующее обычное сообщение молча
+// превратилось бы в шаблон. Подтверждения те же, что у команд, дошедших до
+// handlePrivateText («отменён» / «устарел»). Зовётся из pre-routing
+// middleware; некомандные сообщения не трогает.
+func (b *Bot) cancelGreetingInputOnCommand(ctx context.Context, message telego.Message) {
+	if message.Chat.Type != "private" || message.From == nil || message.From.IsBot {
+		return
+	}
+	if !strings.HasPrefix(strings.TrimSpace(message.Text), "/") {
+		return
+	}
+	if _, ok, expired := b.takeGreetingInput(message.From.ID); ok {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
+			"Ок, ввод текста приветствия отменён.").WithParseMode(telego.ModeHTML))
+	} else if expired {
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
+			"⌛ Запрос на текст приветствия устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.").
+			WithParseMode(telego.ModeHTML))
+	}
+}
+
 // handlePrivateText получает некомандные личные сообщения. Его единственная
 // работа — флоу ввода текста приветствия; всё остальное игнорируется (та же
 // тишина, что была до появления этого флоу).
