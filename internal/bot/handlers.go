@@ -129,7 +129,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		// при reply-check «прошёл» ещё не записан, и без left юзер навсегда
 		// висел бы в «В процессе» — ручной кик админа из клиента не пишет
 		// ничего сам. Свои события не дублируем: бот-инициаторы (бот-кик,
-		// waitReplyTimeout, /kick, /ban, вердикт антиспама) уже записали
+		// replyWaitLoop, /kick, /ban, вердикт антиспама) уже записали
 		// своё (botOrigin), а их Take снимает ожидание до нашей ветки.
 		if b.cancelReplyWait(upd.Chat.ID, user.ID) && !botOrigin {
 			if err := b.db.RecordEvent(b.runCtx, upd.Chat.ID, user.ID, storage.EventLeft, time.Now(), ""); err != nil {
@@ -1363,17 +1363,63 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 			return
 		}
 
-		// Промежуточная стадия истекла: убираем её сообщение и показываем
-		// следующее (новый челлендж — старая клавиатура удалена вместе с
-		// сообщением, stale-guard по message_id не даст решиться живой
-		// стадии кликом по мёртвой).
+		// Промежуточная стадия истекла. Переход персистим ДО исполнения:
+		// между Take и следующим PutPending строка в БД описывала бы уже
+		// истёкшую стадию, и крэш в этом окне (деплои тут рутинны) клампил
+		// бы рестарт к финальной стадии с грейс-киком юзера, у которого
+		// оставались стадии. message_id в строке до конца перехода — старый;
+		// после успешной отправки sendCaptchaStage перезапишет его своим.
+		settings := b.chatSettings(ctx, chatID)
+		if err := b.db.PutPending(ctx, storage.PendingRow{
+			ChatID:      chatID,
+			UserID:      userID,
+			MessageID:   p.MessageID,
+			CorrectIdx:  p.CorrectIdx,
+			ExpiresAt:   time.Now().Add(b.effectiveStageInterval(settings)),
+			ThreadID:    p.ThreadID,
+			EphemeralID: p.EphemeralID,
+			Stage:       p.Stage + 1,
+		}); err != nil {
+			b.log.Warn("persist stage transition", "err", err,
+				"chat", chatID, "user", userID, "stage", p.Stage+1)
+		}
+
+		// Убираем истёкшее сообщение и показываем следующее (новый челлендж —
+		// старая клавиатура удалена вместе с сообщением, stale-guard по
+		// message_id не даст решиться живой стадии кликом по мёртвой).
 		if derr := b.deleteBotMessage(ctx, chatID, p.MessageID, p.EphemeralID, userID); derr != nil {
 			b.log.Debug("delete expired captcha stage",
 				"err", derr, "chat", chatID, "user", userID, "msg", p.MessageID)
 		}
-		next := b.sendCaptchaStage(ctx, b.chatSettings(ctx, chatID), chatID, userID, p.ThreadID, p.Stage+1)
+		// Замок kickoff на время отправки: между Take и следующим Put в store
+		// окно, куда дубль-доставка входа (chat_member + new_chat_members)
+		// запустила бы вторую серию с дублем сообщения капчи.
+		if !b.store.BeginKickoff(chatID, userID) {
+			// Дубль-доставка успела раньше — её серия подхватит юзера.
+			return
+		}
+		next := b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
+		b.store.FinishKickoff(chatID, userID)
 		if next == nil {
 			// Серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
+			// Страховка от осиротевшего перехода: pre-persist выше мог успеть
+			// записать следующую стадию под СТАРЫМ message_id — гасим её по
+			// этому guard'у, иначе рестарт поднял бы призрачную капчу.
+			if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
+				b.log.Warn("delete orphaned stage transition",
+					"err", err, "chat", chatID, "user", userID)
+			}
+			return
+		}
+		// Капча могла быть решена колбэком, пока уходила следующая стадия
+		// (секунды ретраев под 429): тогда Get промахнётся, а только что
+		// отправленное сообщение останется висеть с живой клавиатурой.
+		// Проверка через Get, НЕ Take: изымать живую стадию здесь нельзя.
+		if cur, ok := b.store.Get(chatID, userID); !ok || cur != next {
+			if derr := b.deleteBotMessage(ctx, chatID, next.MessageID, next.EphemeralID, userID); derr != nil {
+				b.log.Debug("delete captcha of already-resolved stage",
+					"err", derr, "chat", chatID, "user", userID, "msg", next.MessageID)
+			}
 			return
 		}
 		p = next
@@ -1420,7 +1466,8 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 }
 
 // cancelCaptchaSilent тихо гасит активную капчу юзера после успешного
-// наказания инициатором (/kick, /ban, спам-вердикт): таймаут капчи иначе// записал бы СВОЙ kick/ban поверх уже учтённого события инициатора, задваивая
+// наказания инициатором (/kick, /ban, спам-вердикт): таймаут серии иначе
+// записал бы СВОЙ kick/ban поверх уже учтённого события инициатора, задваивая
 // воронку статистики. Без событий — их пишет инициатор.
 func (b *Bot) cancelCaptchaSilent(chatID, userID int64) {
 	p, ok := b.store.Take(chatID, userID)
@@ -1597,37 +1644,35 @@ func (b *Bot) onFail(ctx context.Context, p *captcha.Pending, reason string) err
 // промпт, 2 — напоминание, 3 — последнее предупреждение. minutes — интервал
 // стадии; упоминание и верный эмодзи подставляются вызывающим.
 func captchaStageText(stage int, mention, prompt string, minutes int) string {
-	mins := pluralRU(minutes, "минуту", "минуты", "минут")
 	switch stage {
 	case 2:
 		return fmt.Sprintf("⏳ %s, напоминаю: капча ещё не пройдена.\n"+
-			"Выбери <b>%s</b>.\n⏱ У тебя ещё %d %s.",
-			mention, prompt, minutes, mins)
+			"Выбери <b>%s</b>.\n⏱ У тебя ещё %s.",
+			mention, prompt, minutesNom(minutes))
 	case 3:
 		return fmt.Sprintf("⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ, %s!\n"+
-			"Выбери <b>%s</b>, иначе через %d %s тебя исключат из чата.",
-			mention, prompt, minutes, mins)
+			"Выбери <b>%s</b>, иначе через %s тебя исключат из чата.",
+			mention, prompt, minutesAcc(minutes))
 	default:
-		return fmt.Sprintf("Привет, %s!\nДля защиты от спама выбери <b>%s</b>.\n⏱ У тебя %d %s.",
-			mention, prompt, minutes, mins)
+		return fmt.Sprintf("Привет, %s!\nДля защиты от спама выбери <b>%s</b>.\n⏱ У тебя %s.",
+			mention, prompt, minutesNom(minutes))
 	}
 }
 
 // captchaPhotoCaption — подпись к картинке капчи по стадиям серии.
 func captchaPhotoCaption(stage int, mention string, minutes int) string {
-	mins := pluralRU(minutes, "минуту", "минуты", "минут")
 	switch stage {
 	case 2:
 		return fmt.Sprintf("⏳ %s, напоминаю: капча ещё не пройдена.\n"+
-			"Выбери эмодзи, наиболее похожее на картинку, в течение %d %s.",
-			mention, minutes, mins)
+			"Выбери эмодзи, наиболее похожее на картинку, в течение %s.",
+			mention, minutesGen(minutes))
 	case 3:
 		return fmt.Sprintf("⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ, %s!\n"+
-			"Выбери эмодзи, наиболее похожее на картинку, — через %d %s тебя исключат из чата.",
-			mention, minutes, mins)
+			"Выбери эмодзи, наиболее похожее на картинку, — через %s тебя исключат из чата.",
+			mention, minutesAcc(minutes))
 	default:
-		return fmt.Sprintf("Привет, %s!\nДля защиты от спама выбери эмодзи, наиболее похожее на картинку, в течение %d %s.",
-			mention, minutes, mins)
+		return fmt.Sprintf("Привет, %s!\nДля защиты от спама выбери эмодзи, наиболее похожее на картинку, в течение %s.",
+			mention, minutesGen(minutes))
 	}
 }
 

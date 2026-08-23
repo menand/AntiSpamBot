@@ -37,19 +37,21 @@ type greetInputState struct {
 // release, до этого сетевого round-trip'а, иначе юзер успел бы написать в окне
 // release→arm и был бы кикнут за молчание, хотя ответил.
 func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) bool {
-	return b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
+	_, sent := b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
+	return sent
 }
 
 // sendGreetingAnchor шлёт якорное сообщение стадии stage серии «ответь на
 // приветствие» (и просто приветствие, когда reply-check выключен): тело
 // приветствия + строка-требование стадии. Напоминания (стадии 2+) повторяют
 // то же тело приветствия с усиленной строкой — три сообщения, как в серии
-// капчи. Сообщает, ушло ли сообщение.
-func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID, stage int) bool {
+// капчи. Возвращает message_id отправленного сообщения (0 — не отправлено)
+// и флаг доставки.
+func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID, stage int) (int, bool) {
 	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
 	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
 	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
-		return true
+		return 0, true
 	}
 	infos, err := b.db.GetUserInfos(ctx, []int64{userID})
 	if err != nil {
@@ -58,7 +60,7 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	mention := mentionOrID(infos, userID)
 	text := renderGreeting(s.GreetingText.String, s.GreetingEntities.String, mention)
 	if s.ReplyCheckEnabled {
-		text += replyRequirementLine(stage, int(b.effectiveStageInterval(s).Minutes()))
+		text += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(s).Minutes())))
 	}
 
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
@@ -76,14 +78,14 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 		return e
 	}); err != nil || sent == nil {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
-		return false
+		return 0, false
 	}
 	// Помним id приветствия: при спам-бане юзера revoke стирает только его
 	// сообщения, «Добро пожаловать» бота сносим сами по этой записи.
 	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
 		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
-	return true
+	return sent.MessageID, true
 }
 
 // renderGreeting собирает текст приветствия. Шаблон с сохранёнными

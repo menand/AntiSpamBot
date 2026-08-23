@@ -104,12 +104,16 @@ func (d *DB) PutPendingReply(ctx context.Context, r PendingReply) error {
 	return nil
 }
 
-// DeletePendingReplyIf — тот же guard, что у DeletePendingIfMsg: очистка
-// по дедлайну, чтобы хвост старого ожидания не стёр строку перевзведённого.
-func (d *DB) DeletePendingReplyIf(ctx context.Context, chatID, userID int64, expiresAt time.Time) error {
+// DeletePendingReplyIf — guard-удаление по СТАДИИ: очистка хвоста завершившейся
+// стадии не должна стереть строку следующей (переход персистится ДО отправки
+// напоминания, так что во время него в БД уже лежит stage+1). Guard по
+// expires_at здесь не годится: цикл серии переписывает дедлайн в середине
+// окна, и ответивший в это окно юзер стирал бы чужую строку или оставлял
+// призрак, кикающий позже.
+func (d *DB) DeletePendingReplyIf(ctx context.Context, chatID, userID int64, stage int) error {
 	_, err := d.sql.ExecContext(ctx,
-		`DELETE FROM pending_replies WHERE chat_id = ? AND user_id = ? AND expires_at = ?`,
-		chatID, userID, expiresAt.Unix())
+		`DELETE FROM pending_replies WHERE chat_id = ? AND user_id = ? AND stage = ?`,
+		chatID, userID, stage)
 	if err != nil {
 		return fmt.Errorf("delete pending reply (guarded): %w", err)
 	}

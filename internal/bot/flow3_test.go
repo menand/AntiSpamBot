@@ -22,7 +22,7 @@ import (
 func TestPunishReasonColumns(t *testing.T) {
 	tests := []struct {
 		name        string
-		noreply     bool // true — путь waitReplyTimeout, false — onFail
+		noreply     bool // true — путь replyWaitLoop, false — onFail
 		preAttempts int
 		wantKind    storage.EventKind
 	}{
@@ -193,7 +193,7 @@ func TestOnSuccessRealDisarm(t *testing.T) {
 				if !armed {
 					t.Fatal("reply wait must be armed before the greeting send")
 				}
-				p.Cancel() // прибираем горутину waitReplyTimeout
+				p.Cancel() // прибираем горутину replyWaitLoop
 				return
 			}
 			if armed {
