@@ -31,9 +31,13 @@ import (
 type fakeCaller struct {
 	mu     sync.Mutex
 	calls  []string
-	bodies []string                    // тела запросов, параллельно с calls (индексы совпадают)
-	resp   map[string]string           // method → raw JSON result
-	err    map[string]*telegoapi.Error // method → ошибка
+	bodies []string          // тела запросов, параллельно с calls (индексы совпадают)
+	resp   map[string]string // method → raw JSON result
+	// respSeq — method → очередь ответов: вызов берёт следующую запись,
+	// последняя повторяется. Для проверок «каждой стадии серии свой ответ»
+	// (например, свой ephemeral_message_id).
+	respSeq map[string][]string
+	err     map[string]*telegoapi.Error // method → ошибка
 	// errWhen — точечный сбой: метод проходит, если fn(data)==false.
 	errWhen func(method string, data *telegoapi.RequestData) bool
 }
@@ -50,6 +54,12 @@ func (f *fakeCaller) Call(_ context.Context, url string, data *telegoapi.Request
 	apiErr := f.err[method]
 	failWhen := f.errWhen != nil && f.errWhen(method, data)
 	want := f.resp[method]
+	if seq := f.respSeq[method]; len(seq) > 0 {
+		want = seq[0]
+		if len(seq) > 1 {
+			f.respSeq[method] = seq[1:]
+		}
+	}
 	f.mu.Unlock()
 	if apiErr != nil || failWhen {
 		if apiErr == nil {
@@ -118,7 +128,8 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 			"sendMessage": `{"message_id":555,"date":1700000000,
 				"chat":{"id":-100100,"type":"supergroup"}}`,
 		},
-		err: map[string]*telegoapi.Error{},
+		respSeq: map[string][]string{},
+		err:     map[string]*telegoapi.Error{},
 	}
 	api, err := telego.NewBot("110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX", telego.WithAPICaller(fc), telego.WithDiscardLogger())
 	if err != nil {

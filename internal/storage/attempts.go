@@ -52,8 +52,9 @@ func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl tim
 }
 
 // AttemptCount возвращает текущее значение счётчика провалов БЕЗ инкремента:
-// 0 — записи нет или она старше ttl. Нужен эскалации эфемерной капчи: со
-// второй попытки она шлётся публично.
+// 0 — записи нет или она старше ttl. Читающая половина IncrementAttempt —
+// тесты сверяют им лестницу попыток (продовый путь читает счётчик только
+// через IncrementAttempt).
 func (d *DB) AttemptCount(ctx context.Context, chatID, userID int64, ttl time.Duration) (int, error) {
 	var count int
 	var updated int64
