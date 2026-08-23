@@ -41,7 +41,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 var tgBackoffs = []time.Duration{0, 1 * time.Second, 2 * time.Second, 4 * time.Second}
 
 // kickUnbanBackoffs — короткая лестница для обеих половин kick: весь путь
-// провала капчи живёт в 10-секундном cleanup-контексте waitTimeout, и
+// провала капчи живёт в 10-секундном cleanup-контексте стадии капчи, и
 // tgBackoffs (7 c чистого сна) заморили бы поздние попытки, как только
 // добавится латентность вызовов. Четыре попытки при ~1.8 c сна.
 var kickUnbanBackoffs = []time.Duration{0, 300 * time.Millisecond, 600 * time.Millisecond, 900 * time.Millisecond}

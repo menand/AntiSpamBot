@@ -113,19 +113,19 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	}
 
 	// chat_settings — PK chat_id. Если у нового чата уже есть настройки, оставляем их.
-	// captcha_timeout_seconds — легаси-колонка: копируется, чтобы архив не терялся,
-	// но нигде не читается; живая — captcha_interval_minutes.
+	// captcha_timeout_seconds / reply_check_seconds — легаси-колонки: копируются,
+	// чтобы архив не терялся, но нигде не читаются; живая — captcha_interval_minutes.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, ephemeral_enabled)
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, ephemeral_enabled
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {

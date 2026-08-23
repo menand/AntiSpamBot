@@ -58,6 +58,16 @@ func (s *replyStore) Put(chatID, userID int64, expiresAt time.Time, threadID, st
 	return p
 }
 
+// Get подсматривает активное ожидание, не изымая его — identity-проверка
+// дедлайна цикла без передачи права разбираться с ним (забрать может только
+// Take: ответ юзера, его выход, финальная кара).
+func (s *replyStore) Get(chatID, userID int64) (*replyPending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.items[chatUser{chatID, userID}]
+	return p, ok
+}
+
 // Take атомарно забирает ожидание: победитель (сообщение юзера, его выход,
 // таймаут) разбирается с ним, проигравшие гонку получают ok=false.
 func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
@@ -124,8 +134,10 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 	p.Cancel()
 	// Строку гасим ДО записи пасса: окно между ними микросекундное, но
 	// рестарт в нём воскресил бы ожидание для уже ответившего — с киком за
-	// «молчание», которого не было.
-	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.ExpiresAt); err != nil {
+	// «молчание», которого не было. Guard по стадии: переход к следующей
+	// персистится ДО отправки напоминания, так что ответ, прилетевший в окно
+	// пересылки, стирает СВОЮ строку и не трогает уже записанную следующую.
+	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.Stage); err != nil {
 		b.log.Warn("delete pending reply on satisfy", "err", err, "chat", chatID, "user", userID)
 	}
 	// Поздний ответ (стадии 2+): исходное приветствие уже удалено при смене
@@ -153,7 +165,7 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
 	if p, ok := b.replies.Take(chatID, userID); ok {
 		p.Cancel()
-		if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.ExpiresAt); err != nil {
+		if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.Stage); err != nil {
 			b.log.Warn("delete pending reply on cancel", "err", err, "chat", chatID, "user", userID)
 		}
 		return true
@@ -183,17 +195,11 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		case <-timer.C:
 		}
 
-		// Единственный победитель дедлайна: identity-проверка отсекает гонку
-		// «ответ юзера успел изъять ожидание между таймером и Take».
-		taken, ok := b.replies.Take(chatID, userID)
-		if !ok || taken != p {
+		// Identity-проверка БЕЗ изъятия: забрать ожидание вправе только
+		// настоящий победитель (ответ юзера, его выход, финальная кара ниже).
+		if cur, ok := b.replies.Get(chatID, userID); !ok || cur != p {
 			return
 		}
-
-		// Якорь текущей стадии сносим: «напиши что-нибудь» без сообщения,
-		// к которому оно прикреплено, — мусор в ленте. (Тот же порядок, что
-		// у прежнего waitReplyTimeout: якорь удаляется до наказания.)
-		b.deleteReplyAnchor(ctx, chatID, userID)
 
 		// Серия исчерпана: та же лестница наказаний, что у капчи (общий
 		// punishAttempt): счётчик attempts с гвардией «ошибка счётчика
@@ -202,6 +208,11 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// pending_replies удаляем только после успеха — рестарт повторит
 		// наказание иначе.
 		if p.Stage >= captchaStages {
+			taken, ok := b.replies.Take(chatID, userID)
+			if !ok || taken != p {
+				return
+			}
+			b.deleteReplyAnchor(ctx, chatID, userID)
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := b.punishAttempt(cleanupCtx, chatID, userID, storage.ReasonNoReply, "молчание",
@@ -211,7 +222,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 				b.log.Error("punish silent user", "err", err, "chat", chatID, "user", userID)
 				return
 			}
-			if err := b.db.DeletePendingReplyIf(cleanupCtx, chatID, userID, p.ExpiresAt); err != nil {
+			if err := b.db.DeletePendingReplyIf(cleanupCtx, chatID, userID, p.Stage); err != nil {
 				// Строка — механизм повтора наказания при рестарте; потерять её
 				// молча = повторный кик/бан уже наказанного.
 				b.log.Warn("delete pending reply after punish", "err", err, "chat", chatID, "user", userID)
@@ -219,34 +230,71 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			return
 		}
 
-		// Следующая стадия: настройки перечитываем, чтобы правки интервала из
-		// меню подхватывались следующими стадиями (редкое событие — минуты).
-		s := b.chatSettings(ctx, chatID)
-		if !b.sendGreetingAnchor(ctx, s, chatID, userID, p.ThreadID, p.Stage+1) {
+		// Промежуточная стадия. Порядок принципиален:
+		// 1) переход персистится ДО исполнения — иначе крэш в окне пересылки
+		//    оставил бы в БД истёкшую стадию, и рестарт клампил бы серию к
+		//    финалу с грейс-киком юзера, у которого оставались стадии;
+		// 2) ожидание изымается ПОСЛЕ отправки напоминания: ответ юзера,
+		//    прилетевший в секунды ретраев отправки, обязан застать pending
+		//    в store (replyWaitSatisfied), иначе серия дожала бы написавшего.
+		settings := b.chatSettings(ctx, chatID)
+		nextExpires := time.Now().Add(b.effectiveStageInterval(settings))
+		if err := b.db.PutPendingReply(ctx, storage.PendingReply{
+			ChatID: chatID, UserID: userID, ExpiresAt: nextExpires,
+			Stage: p.Stage + 1, ThreadID: p.ThreadID,
+		}); err != nil {
+			b.log.Warn("persist reply stage transition", "err", err,
+				"chat", chatID, "user", userID, "stage", p.Stage+1)
+		}
+
+		// Якорь текущей стадии сносим: «напиши что-нибудь» без сообщения,
+		// к которому оно прикреплено, — мусор в ленте.
+		b.deleteReplyAnchor(ctx, chatID, userID)
+
+		msgID, sent := b.sendGreetingAnchor(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
+		if !sent {
 			// Напоминание не ушло даже после ретраев (429-шторм, сеть), а
 			// предыдущий якорь мы только что удалили: требование «напиши
 			// что-нибудь» юзер выполнить не может — он его не видит. Снимаем
 			// ожидание и закрываем воронку пассом: невозможность ответить —
 			// не вина юзера (прецедент onSuccess / замьюченного /mute).
-			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.ExpiresAt); err != nil {
-				b.log.Warn("delete pending reply on disarmed wait", "err", err, "chat", chatID, "user", userID)
+			// Если пасс уже записал satisfier (ответ проскочил в окно
+			// ретраев) — второй не пишем.
+			taken, took := b.replies.Take(chatID, userID)
+			if !took || taken == p {
+				if took {
+					taken.Cancel()
+				}
+				if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
+					b.log.Warn("delete pending reply on disarmed wait", "err", err, "chat", chatID, "user", userID)
+				}
+				if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+					b.log.Warn("record pass event (disarmed reply wait)", "err", err)
+				}
+				b.log.Warn("reply wait disarmed — reminder send failed",
+					"chat", chatID, "user", userID, "stage", p.Stage+1)
 			}
-			if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-				b.log.Warn("record pass event (disarmed reply wait)", "err", err)
-			}
-			b.log.Warn("reply wait disarmed — reminder send failed",
-				"chat", chatID, "user", userID, "stage", p.Stage+1)
 			return
 		}
-		expires := time.Now().Add(b.effectiveStageInterval(s))
-		next := b.replies.Put(chatID, userID, expires, p.ThreadID, p.Stage+1)
-		if err := b.db.PutPendingReply(ctx, storage.PendingReply{
-			ChatID: chatID, UserID: userID, ExpiresAt: expires,
-			Stage: next.Stage, ThreadID: next.ThreadID,
-		}); err != nil {
-			b.log.Warn("persist pending reply (next stage)", "err", err, "chat", chatID, "user", userID)
+
+		taken, ok := b.replies.Take(chatID, userID)
+		if !ok || taken != p {
+			// Юзер ответил (или ожидание снято), пока напоминание уходило:
+			// пасс уже записан satisfier'ом, а только что отправленное
+			// напоминание — лишнее, сносим.
+			if msgID != 0 {
+				if derr := b.deleteMessage(ctx, chatID, msgID); derr != nil {
+					b.log.Debug("delete reminder of already-satisfied wait",
+						"err", derr, "chat", chatID, "msg", msgID)
+				}
+			}
+			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
+				b.log.Debug("delete transitioned row of satisfied wait",
+					"err", err, "chat", chatID, "user", userID)
+			}
+			return
 		}
-		p = next
+		p = b.replies.Put(chatID, userID, nextExpires, p.ThreadID, p.Stage+1)
 	}
 }
 
@@ -346,8 +394,8 @@ func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.Pending
 	if s := m.MemberStatus(); s != "left" && s != "kicked" {
 		return false
 	}
-	// Удаляем по исходному дедлайну — строка ещё с ним лежит.
-	if err := b.db.DeletePendingReplyIf(ctx, row.ChatID, row.UserID, row.ExpiresAt); err != nil {
+	// Удаляем по исходной стадии — строка ещё с ней лежит.
+	if err := b.db.DeletePendingReplyIf(ctx, row.ChatID, row.UserID, row.Stage); err != nil {
 		b.log.Warn("delete expired pending reply of departed user", "err", err)
 	}
 	b.recordLeftEvent(ctx, row.ChatID, row.UserID, "left while offline")
@@ -358,18 +406,18 @@ func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.Pending
 
 // replyRequirementLine — строка-требование для стадии stage серии (владелец
 // выбрал «любое сообщение», не строгий reply). Стадия 1 — нейтральная, 2 —
-// напоминание, 3 — последнее предупреждение.
-func replyRequirementLine(stage, minutes int) string {
-	mins := pluralRU(minutes, "минуту", "минуты", "минут")
+// напоминание, 3 — последнее предупреждение. minutesStr — интервал в родительном
+// падеже («в течение 2 минут»), готовит minutesGen.
+func replyRequirementLine(stage int, minutesStr string) string {
 	switch stage {
 	case 2:
-		return fmt.Sprintf("\n\n⏳ Напоминание: напиши что-нибудь в чат в течение %d %s — иначе придётся зайти заново.",
-			minutes, mins)
+		return fmt.Sprintf("\n\n⏳ Напоминание: напиши что-нибудь в чат в течение %s — иначе придётся зайти заново.",
+			minutesStr)
 	case 3:
-		return fmt.Sprintf("\n\n⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: напиши что-нибудь в чат в течение %d %s — иначе тебя исключат из чата.",
-			minutes, mins)
+		return fmt.Sprintf("\n\n⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: напиши что-нибудь в чат в течение %s — иначе тебя исключат из чата.",
+			minutesStr)
 	default:
-		return fmt.Sprintf("\n\n⏱ Напиши что-нибудь в чат в течение %d %s — иначе придётся зайти заново.",
-			minutes, mins)
+		return fmt.Sprintf("\n\n⏱ Напиши что-нибудь в чат в течение %s — иначе придётся зайти заново.",
+			minutesStr)
 	}
 }

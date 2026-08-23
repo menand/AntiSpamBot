@@ -24,6 +24,22 @@ func pluralRU(n int, one, few, many string) string {
 	}
 }
 
+// minutesNom/minutesGen/minutesAcc — «N минут» в нужном падеже: формы
+// «минута» склоняются, и один тапл на все контексты даёт «У тебя 1 минуту» /
+// «в течение 2 минуты». Им. п. — «У тебя 2 минуты»; род. — «в течение 1
+// минуты», «в течение 2 минут»; вин. (после «через») — «через 2 минуты».
+func minutesNom(n int) string {
+	return fmt.Sprintf("%d %s", n, pluralRU(n, "минута", "минуты", "минут"))
+}
+
+func minutesGen(n int) string {
+	return fmt.Sprintf("%d %s", n, pluralRU(n, "минуты", "минут", "минут"))
+}
+
+func minutesAcc(n int) string {
+	return fmt.Sprintf("%d %s", n, pluralRU(n, "минуту", "минуты", "минут"))
+}
+
 // humanDaysRU форматирует срок в днях как «N год/лет» / «N месяц/ев» / «N день/дней».
 func humanDaysRU(days int) string {
 	if days < 0 {

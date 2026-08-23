@@ -3,10 +3,12 @@ package bot
 import (
 	"context"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -27,6 +29,9 @@ func TestCaptchaSeriesThreeStages(t *testing.T) {
 		t.Fatalf("stage 1 must be armed: %+v", rows)
 	}
 
+	// Переход персистится ДО отправки напоминания, так что ждём отправку,
+	// а не строку стадии.
+	waitFor(t, func() bool { return fc.callCount("sendMessage") >= 2 })
 	waitFor(t, func() bool {
 		rows := pendingRows(t, db)
 		return len(rows) == 1 && rows[0].Stage == 2
@@ -124,6 +129,7 @@ func TestRestoreResumesRemainingSeriesStages(t *testing.T) {
 		t.Fatalf("restored = %d err=%v, want 1/nil", n, err)
 	}
 
+	waitFor(t, func() bool { return fc.callCount("sendMessage") >= 1 })
 	waitFor(t, func() bool {
 		rows := pendingRows(t, db)
 		return len(rows) == 1 && rows[0].Stage == 3
@@ -138,6 +144,20 @@ func TestRestoreResumesRemainingSeriesStages(t *testing.T) {
 	})
 	if rows := pendingRows(t, db); len(rows) != 0 {
 		t.Fatalf("pending rows = %d, want 0", len(rows))
+	}
+}
+
+// waitForWithin — waitFor с нестандартным дедлайном (определён в
+// review_fixes_test.go): для путей длиннее пяти секунд, например лестницы
+// ретраев отправки.
+func waitForWithin(t *testing.T, within time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not reached within deadline")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -193,4 +213,129 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 			t.Fatalf("deleteMessage calls = %d, want 0 (обычное приветствие)", n)
 		}
 	})
+}
+
+// TestCaptchaSeriesDepartedMidSeries — юзер вышел между стадиями (лево-апдейт
+// потерян): liveness-перепроверка перед Put закрывает воронку left'ом с
+// размьютом, напоминание не остаётся в чате, наказания нет.
+func TestCaptchaSeriesDepartedMidSeries(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	fc.resp["getChatMember"] = `{"status":"left","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
+
+	// Живая строка стадии 1 с вот-вот истекающим дедлайном.
+	if err := db.PutPending(ctx, storage.PendingRow{
+		ChatID: testChatID, UserID: testUserID, MessageID: 10,
+		CorrectIdx: 2, ExpiresAt: time.Now().Add(1500 * time.Millisecond), Stage: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := b.restorePending(ctx); err != nil || n != 1 {
+		t.Fatalf("restored = %d err=%v, want 1/nil", n, err)
+	}
+
+	waitFor(t, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventLeft] == 1
+	})
+	k := statsKinds(t, db, testChatID, testUserID)
+	if k[storage.EventKick]+k[storage.EventBan]+k[storage.EventAbort] != 0 {
+		t.Fatalf("ушедший между стадиями наказан: %v", k)
+	}
+	// Публичная отправка ушедшему проходит успешно — liveness ловит её
+	// след и удаляет только что отправленное сообщение.
+	waitFor(t, func() bool { return fc.callCount("deleteMessage") >= 2 })
+	waitFor(t, func() bool { return fc.callCount("restrictChatMember") >= 1 }) // releaseOnAbort
+	if rows := pendingRows(t, db); len(rows) != 0 {
+		t.Fatalf("pending rows = %d, want 0", len(rows))
+	}
+}
+
+// TestReplyWaitSeriesThreeStages — серия напоминаний зеркалит капчу: два
+// промежуточных таймаута без событий, эскалация текста, топик соблюдён,
+// ровно один noreply-кик в конце.
+func TestReplyWaitSeriesThreeStages(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	// Цикл перечитывает настройки из БД на каждой стадии: тумблер обязан
+	// быть персистентным, иначе напоминания уйдут без строк-требований.
+	if err := db.SetReplyCheckEnabled(ctx, testChatID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
+	if _, ok := b.sendGreetingAnchor(ctx, s, testChatID, testUserID, 77, 1); !ok {
+		t.Fatal("anchor send failed")
+	}
+	b.maybeArmReplyWait(s, testChatID, testUserID, 77)
+
+	waitFor(t, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventKick] == 1 && k[storage.EventBan] == 0 && k[storage.EventPass] == 0
+	})
+	bodies := fc.callBodies("sendMessage")
+	if len(bodies) != 3 {
+		t.Fatalf("sendMessage = %d, want 3 (якорь + напоминание + предупреждение)", len(bodies))
+	}
+	if !strings.Contains(bodies[1], "Напоминание") || !strings.Contains(bodies[2], "ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ") {
+		t.Fatalf("тексты стадий не эскалируют: %q / %q", bodies[1], bodies[2])
+	}
+	if !strings.Contains(bodies[1], `"message_thread_id":77`) {
+		t.Fatalf("напоминание ушло мимо топика: %s", bodies[1])
+	}
+	// Якорь ст.1 при переходе, якорь ст.2 при переходе, якорь ст.3 перед карой.
+	if n := fc.callCount("deleteMessage"); n != 3 {
+		t.Fatalf("deleteMessage = %d, want 3", n)
+	}
+	list, err := db.RecentEventUsers(ctx, testChatID, 10,
+		[]storage.EventKind{storage.EventKick}, []string{storage.ReasonNoReply})
+	if err != nil || len(list) != 1 || list[0].UserID != testUserID {
+		t.Fatalf("want one noreply kick, got %+v err=%v", list, err)
+	}
+}
+
+// TestReplyWaitReminderFailDisarmsWithPass — упавшее напоминание не карает:
+// серия снимается с компенсирующим пассом (предыдущий якорь уже удалён —
+// юзер требования не видел).
+func TestReplyWaitReminderFailDisarmsWithPass(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	// Ломаем только эскалации: 400 не ретраится по смыслу, но лестницу
+	// прогоняет; берём его вместо 429, чтобы не ждать лишних секунд.
+	fc.errWhen = func(_ string, data *telegoapi.RequestData) bool {
+		return data != nil && strings.Contains(string(data.BodyRaw), "Напоминание")
+	}
+	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	if err := db.SetReplyCheckEnabled(ctx, testChatID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := b.sendGreetingAnchor(ctx, s, testChatID, testUserID, 0, 1); !ok {
+		t.Fatal("anchor send failed")
+	}
+	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
+
+	// Лестница ретраев 400 (0+1+2+4 c) длиннее стандартных пяти секунд.
+	waitForWithin(t, 20*time.Second, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventPass] == 1
+	})
+	k := statsKinds(t, db, testChatID, testUserID)
+	if k[storage.EventKick]+k[storage.EventBan] != 0 {
+		t.Fatalf("юзер наказан за недоставленное требование: %v", k)
+	}
+	rows, err := db.LoadAllPendingReplies(ctx)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("pending_replies = %v err=%v, want empty", rows, err)
+	}
+	if _, ok := b.replies.Take(testChatID, testUserID); ok {
+		t.Fatal("reply wait must be disarmed")
+	}
+	_ = fc
 }

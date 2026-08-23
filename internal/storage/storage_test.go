@@ -377,13 +377,13 @@ func TestDeletePendingIfMsg(t *testing.T) {
 func TestDeletePendingReplyIf(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)
-	exp := time.Now().Add(30 * time.Second).Truncate(time.Second)
 
-	if err := db.PutPendingReply(ctx, PendingReply{ChatID: 1, UserID: 2, ExpiresAt: exp}); err != nil {
+	if err := db.PutPendingReply(ctx, PendingReply{ChatID: 1, UserID: 2,
+		ExpiresAt: time.Now().Add(30 * time.Second), Stage: 1}); err != nil {
 		t.Fatal(err)
 	}
-	// Чужой дедлайн (перевзведённое ожидание) — не трогаем.
-	if err := db.DeletePendingReplyIf(ctx, 1, 2, exp.Add(time.Minute)); err != nil {
+	// Чужая стадия (переход уже персистил следующую) — не трогаем.
+	if err := db.DeletePendingReplyIf(ctx, 1, 2, 2); err != nil {
 		t.Fatal(err)
 	}
 	var n int
@@ -391,9 +391,9 @@ func TestDeletePendingReplyIf(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Fatalf("guarded delete must not remove a re-armed wait, left %d", n)
+		t.Fatalf("guarded delete must not remove a next-stage row, left %d", n)
 	}
-	if err := db.DeletePendingReplyIf(ctx, 1, 2, exp); err != nil {
+	if err := db.DeletePendingReplyIf(ctx, 1, 2, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_replies`).Scan(&n); err != nil {

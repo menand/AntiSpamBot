@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     spam_whitelist_msgs     INTEGER, -- NULL = 5; сообщений до белого списка
     spam_vote_margin        INTEGER, -- NULL = 3; перевес голосов для вердикта
     reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- режим «требовать ответа»
-    reply_check_seconds     INTEGER, -- NULL = 60; сколько секунд ждать ответа
+    reply_check_seconds     INTEGER, -- легаси (серия напоминаний живёт на captcha_interval_minutes); не читается
     ephemeral_enabled       INTEGER NOT NULL DEFAULT 0  -- служебные сообщения эфемерно (Bot API 10.2)
 );
 

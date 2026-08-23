@@ -44,7 +44,7 @@ func TestReplyStorePutReplacesAndCancels(t *testing.T) {
 
 	select {
 	case <-old.Done():
-		// старое ожидание отменено — его waitReplyTimeout выйдет тихо
+		// старое ожидание отменено — его replyWaitLoop выйдет тихо
 	case <-time.After(time.Second):
 		t.Fatal("old pending must be cancelled on re-Put")
 	}
