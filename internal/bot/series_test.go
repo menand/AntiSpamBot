@@ -339,3 +339,43 @@ func TestReplyWaitReminderFailDisarmsWithPass(t *testing.T) {
 	}
 	_ = fc
 }
+
+// TestCaptchaSeriesEphemeralAllStages — эфемерный режим накрывает ВСЮ серию
+// без исключений: каждое сообщение адресовано вступившему, ряд «Впустить»
+// не рисуется ни на одной стадии.
+func TestCaptchaSeriesEphemeralAllStages(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
+	if err := db.SetEphemeralEnabled(ctx, testChatID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Эфемерка в ответе Telegram несёт собственный id — проверяем, что он
+	// доезжает до живой капчи (stale-guard сравнивает именно его).
+	fc.resp["sendMessage"] = `{"message_id":555,"ephemeral_message_id":777,
+		"date":1700000000,"chat":{"id":-100100,"type":"supergroup"}}`
+
+	b.runCaptcha(testChatID, telego.User{ID: testUserID, FirstName: "Юзер"}, 0)
+
+	if p, ok := b.store.Get(testChatID, testUserID); !ok || p.EphemeralID != 777 {
+		t.Fatalf("stage 1 must be live and ephemeral: %+v", p)
+	}
+
+	waitFor(t, func() bool {
+		k := statsKinds(t, db, testChatID, testUserID)
+		return k[storage.EventKick] == 1 && k[storage.EventBan] == 0
+	})
+	bodies := fc.callBodies("sendMessage")
+	if len(bodies) != 3 {
+		t.Fatalf("sendMessage = %d, want 3 (вся серия)", len(bodies))
+	}
+	for i, body := range bodies {
+		if !strings.Contains(body, `"receiver_user_id":7`) {
+			t.Fatalf("стадия %d ушла публично: %s", i+1, body)
+		}
+		if strings.Contains(body, "capok:") {
+			t.Fatalf("на эфемерной стадии %d нарисован ряд «Впустить»: %s", i+1, body)
+		}
+	}
+}
