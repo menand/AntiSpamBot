@@ -187,13 +187,6 @@ func (b *Bot) waitReplyTimeout(p *replyPending) {
 		}
 	}
 
-	// Приветствие-якорь сносим: «Добро пожаловать, X!» без X — мусор.
-	if msgID, ok, err := b.db.TakeGreetingMsg(ctx, p.ChatID, p.UserID); err == nil && ok {
-		if err := b.deleteMessage(ctx, p.ChatID, msgID); err != nil {
-			b.log.Debug("delete greeting of silent user", "err", err, "chat", p.ChatID)
-		}
-	}
-
 	// Та же лестница наказаний, что у капчи (общий punishAttempt): счётчик
 	// attempts с гвардией «ошибка счётчика запрещает бан», порог
 	// effectiveMaxAttempts, дальше бан. Событие и уведомление — ПОСЛЕ
@@ -225,6 +218,11 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 	now := time.Now()
 	staleChats := map[int64]struct{}{}
 	restored := 0
+	// Общий бюджет на все liveness-пробы истёкших строк — как в
+	// restorePending: массовый простой не должен тянуть рестарт по 10 c за
+	// строку. Исчерпался — оставшиеся строки наказываются по грейсу.
+	lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer lcancel()
 	for _, row := range rows {
 		// Чат мог стать необслуживаемым за время простоя (ALLOWED_CHATS,
 		// отклонение владельцем, кик бота): таймеры наказаний туда стрелять
@@ -239,8 +237,9 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 			// Истекла, пока бот лежал: юзер мог уйти офлайн (left-апдейт
 			// потерян), и слепой grace-кик записал бы фантомный kick в
 			// воронку. Живая проверка: ушедшему — left без наказания,
-			// присутствующему — штатный грейс; ошибка API — старое поведение.
-			if b.restoredReplyUserDeparted(ctx, row) {
+			// присутствующему — штатный грейс; ошибка API (включая
+			// исчерпанный общий бюджет проб) — старое поведение.
+			if b.restoredReplyUserDeparted(lctx, row) {
 				continue
 			}
 			// Грейс синхронизируем и в БД: строка после наказания удаляется
@@ -276,9 +275,7 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 // фантомного кика за молчание. true — исход решён здесь. Ошибка API — false
 // (наказываем по грейсу, как раньше).
 func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.PendingReply) bool {
-	lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	m, err := b.api.GetChatMember(lctx, &telego.GetChatMemberParams{
+	m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(row.ChatID),
 		UserID: row.UserID,
 	})
@@ -291,10 +288,10 @@ func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.Pending
 		return false
 	}
 	// Удаляем по исходному дедлайну — строка ещё с ним лежит.
-	if err := b.db.DeletePendingReplyIf(lctx, row.ChatID, row.UserID, row.ExpiresAt); err != nil {
+	if err := b.db.DeletePendingReplyIf(ctx, row.ChatID, row.UserID, row.ExpiresAt); err != nil {
 		b.log.Warn("delete expired pending reply of departed user", "err", err)
 	}
-	b.recordLeftEvent(lctx, row.ChatID, row.UserID, "left while offline")
+	b.recordLeftEvent(ctx, row.ChatID, row.UserID, "left while offline")
 	b.log.Info("expired reply wait closed — user left while offline",
 		"chat", row.ChatID, "user", row.UserID)
 	return true

@@ -732,8 +732,9 @@ func TestSpamGateCacheInvalidation(t *testing.T) {
 	t.Run("негатив кэшируется", func(t *testing.T) {
 		b, db, _ := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
-		b.cfg.GroqAPIKey = "key" // ИИ доступен — гейт реально стоит на пути
-
+		// ИИ доступен (иначе maybeSpamCheck вышел бы раньше гейта)…
+		b.groqc = &fakeLLM{enabled: true}
+		// …но тумблер чата выключен.
 		if b.spamCheckEnabledCached(testChatID) {
 			t.Fatal("default chat must have the check disabled")
 		}

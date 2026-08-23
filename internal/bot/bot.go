@@ -353,6 +353,11 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 	now := time.Now()
 	staleChats := map[int64]struct{}{}
 	restored := 0
+	// Общий бюджет на все liveness-пробы истёкших строк: без него массовый
+	// джойн перед падением тянул бы рестарт по 10 c за строку. Исчерпался —
+	// оставшиеся строки наказываются по грейсу (fail-open к старому пути).
+	lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer lcancel()
 	for _, row := range rows {
 		// Чат мог стать необслуживаемым за время простоя (вышли из
 		// ALLOWED_CHATS, владелец отклонил, бота кикнули): таймеры наказаний
@@ -373,7 +378,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 			// проверка, что у живого пути перед Put: ушедшему — left и
 			// снятие мьюта, присутствующему — штатный грейс-таймаут. Ошибка
 			// API — старое поведение (наказание, fail-open).
-			if b.restoredCaptchaUserDeparted(ctx, row) {
+			if b.restoredCaptchaUserDeparted(lctx, row) {
 				continue
 			}
 		}
@@ -395,11 +400,10 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 // restoredCaptchaUserDeparted закрывает истёкшую за простой капчу юзера,
 // который за это время вышел/был убран: left вместо фантомного кика. Капча-
 // мьют пережил рестарт (Telegram хранит restriction) — снимаем его. true —
-// исход решён здесь; ошибка API — false (наказываем по грейсу, как раньше).
+// исход решён здесь; ошибка API (включая исчерпанный общий бюджет проб) —
+// false (наказываем по грейсу, как раньше).
 func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.PendingRow) bool {
-	lctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	m, err := b.api.GetChatMember(lctx, &telego.GetChatMemberParams{
+	m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(row.ChatID),
 		UserID: row.UserID,
 	})
@@ -411,10 +415,10 @@ func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.Pendi
 	if s := m.MemberStatus(); s != "left" && s != "kicked" {
 		return false
 	}
-	if err := b.db.DeletePending(lctx, row.ChatID, row.UserID); err != nil {
+	if err := b.db.DeletePending(ctx, row.ChatID, row.UserID); err != nil {
 		b.log.Warn("delete expired pending of departed user", "err", err)
 	}
-	b.recordLeftEvent(lctx, row.ChatID, row.UserID, "left while offline")
+	b.recordLeftEvent(ctx, row.ChatID, row.UserID, "left while offline")
 	// releaseOnAbort на живом ctx съел бы бюджет рестарта лестницей ретраев —
 	// гоняем асинхронно на своём bounded-бюджете.
 	rowChatID, rowUserID := row.ChatID, row.UserID

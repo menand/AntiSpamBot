@@ -281,8 +281,11 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
 			b.log.Warn("set spam_check_enabled", "err", err)
 		} else {
-			// Единственный писатель флага — сбрасываем кэш спам-гейта.
-			b.delSpamGateCache(chatID)
+			// Единственный писатель флага — публикуем новое значение сразу,
+			// а не через сброс: иначе читатель горячего пути, промахнувшийся
+			// по кэшу до записи и доложивший старьё после сброса, навсегда
+			// закэшировал бы устаревший тумблер.
+			b.setSpamGateCache(chatID, !s.SpamCheckEnabled)
 		}
 		b.toggleMu.Unlock()
 		return b.renderChatSettings(ctx, query, chatID)
