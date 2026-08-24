@@ -160,6 +160,14 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		"chat_type", upd.Chat.Type,
 		"old", oldStatus, "new", newStatus)
 
+	// Любая смена нашего статуса инвалидирует кэш «бот сам админ»: понижение
+	// administrator→member проходит мимо веток ниже, а от этого флага зависит
+	// cache-fallback золотого голоса (isGoldenVoice) — устаревший позитив
+	// дарил бы золотой голос по чужому кэшу до 6 часов.
+	if b.me != nil {
+		b.invalidateAdminCache(upd.Chat.ID, b.me.ID)
+	}
+
 	if newStatus == "left" || newStatus == "kicked" {
 		b.dropChat(b.runCtx, upd.Chat.ID, "bot left/kicked")
 		return nil

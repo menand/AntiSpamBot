@@ -141,6 +141,26 @@ func (b *Bot) cacheAdmin(chatID, userID int64, isAdmin bool) {
 	b.adminMu.Unlock()
 }
 
+// isGoldenVoice — «золотой голос»: владелец бота или админ этого чата. Его
+// кнопка решает спам-плашку единолично, а его /spam исполняется мгновенно.
+// Админство проверяем ЖИВО, мимо позитивного кэша: разжалованный админ в
+// чате без наших прав не выпадает из 6-часового кэша (chat_member не
+// приходит), а золотой голос банит глобально. Ошибка живой проверки — откат
+// на кэш ТОЛЬКО когда бот сам админ в этом чате: там Telegram доставляет
+// chat_member и кэш самоинвалидируется; в чатах без наших прав кэш ненадёжен
+// по построению — сетевой сбой там не дарит золотой голос.
+func (b *Bot) isGoldenVoice(chatID, userID int64) bool {
+	if b.isOwner(userID) {
+		return true
+	}
+	isAdmin, sure := b.isChatAdminFresh(b.runCtx, chatID, userID)
+	if !sure {
+		isAdmin = b.isChatAdminCached(b.runCtx, chatID, userID) &&
+			b.isChatAdminCached(b.runCtx, chatID, b.me.ID)
+	}
+	return isAdmin
+}
+
 // spamAIEnabled — доступен ли хоть один LLM-провайдер для спам-анализа.
 func (b *Bot) spamAIEnabled() bool {
 	return b.groqc.Enabled() || b.gemic.Enabled() || b.gigac.Enabled()
@@ -727,23 +747,8 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		voteWord = "спам"
 	}
 
-	// Золотой голос: админ или владелец бота решает единолично. Админство
-	// проверяем ЖИВО, мимо позитивного кэша: разжалованный админ в чате без
-	// наших прав не выпадает из 6-часового кэша (chat_member не приходит),
-	// а здесь его голос банит глобально. Ошибка живой проверки — откат на
-	// кэш ТОЛЬКО когда бот сам админ в этом чате: там Telegram доставляет
-	// chat_member и кэш самоинвалидируется; в чатах без наших прав кэш
-	// ненадёжен по построению — сетевой сбой там не дарит золотой голос.
-	golden := b.isOwner(voter)
-	if !golden {
-		isAdmin, sure := b.isChatAdminFresh(b.runCtx, chatID, voter)
-		if !sure {
-			isAdmin = b.isChatAdminCached(b.runCtx, chatID, voter) &&
-				b.isChatAdminCached(b.runCtx, chatID, b.me.ID)
-		}
-		golden = isAdmin
-	}
-	if golden {
+	// Золотой голос: админ или владелец бота решает единолично (isGoldenVoice).
+	if b.isGoldenVoice(chatID, voter) {
 		b.log.Info("spam vote ballot", "chat", chatID, "bot_msg", botMsgID,
 			"voter", userLabel(query.From), "vote", voteWord, "golden", true)
 		// Тост ПОСЛЕ разрешения гонки TakeSpamVote: проигравшему параллельному
@@ -881,6 +886,68 @@ func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 	return false, false
 }
 
+// executeSpamBan исполняет «спам»-полвердикта: локальный перманентный бан
+// с чисткой сообщений, гашение активных проверок цели, событие spamban,
+// запись в глобальную базу спамеров. Общий путь вердиктов голосования
+// (resolveSpamVote) и мгновенного админского /spam. reason — причина события
+// (vote:<ids> / "vote:"), why — человекочитаемое объяснение для лога.
+// Возвращает, удался ли локальный бан: он гейтит и кросс-бан (banEverywhere),
+// и честность уведомлений владельцам.
+func (b *Bot) executeSpamBan(v storage.SpamVote, reason, why string) bool {
+	banned := false
+	if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
+		// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
+		// событие spamban не пишем, его приветствие и активные проверки
+		// НЕ трогаем — капча/ожидание ответа продолжают жить, иначе
+		// провал бана оставил бы его в капча-мьюте навсегда без шанса
+		// на восстановление (pending-строки уже не спасти).
+		b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
+	} else {
+		banned = true
+		// Гасим активные проверки ПОСЛЕ успешного бана (до записи
+		// события): таймауты не должны добавить свой kick/noreply поверх
+		// spamban. Ответить по старой капче/якорю забаненный больше не
+		// может — невозможность пройти проверку не его вина, закрываем
+		// воронку пассом (прецедент /mute), иначе при reply-check он
+		// навсегда зависнет в «В процессе».
+		b.cancelCaptchaSilent(v.ChatID, v.AuthorID)
+		if b.cancelReplyWait(v.ChatID, v.AuthorID) {
+			if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (banned with armed wait)", "err", err)
+			}
+		}
+		if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
+			time.Now(), reason); err != nil {
+			b.log.Warn("record spamban event", "err", err, "chat", v.ChatID, "user", v.AuthorID)
+		}
+		// Приветствие бота для этого юзера revoke не трогает — сносим сами.
+		if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
+			if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
+				b.log.Debug("delete greeting of banned user", "err", err, "chat", v.ChatID)
+			}
+		}
+	}
+	// revoke обычно уже стёр сообщение; ручное удаление — страховка на
+	// случай неудавшегося бана (нет прав), поэтому ошибку глушим тихо.
+	// У профильной плашки целевого сообщения нет (TargetMsgID == 0).
+	if v.TargetMsgID != 0 {
+		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
+			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
+		}
+	}
+	// Общая база — только при УДАВШЕМСЯ бане: неисполнимый вердикт (нет прав
+	// в исходном чате) не должен инстант-банить юзера во всех остальных
+	// чатах без единого бюллетеня там. Снимается ручным unban в любом чате.
+	if banned {
+		if err := b.db.AddSpamBanned(b.runCtx, v.AuthorID, v.ChatID, time.Now()); err != nil {
+			b.log.Warn("add spam banned", "err", err, "user", v.AuthorID)
+		}
+	}
+	b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
+		"banned", banned, "why", why)
+	return banned
+}
+
 // resolveSpamVote исполняет вердикт. TakeSpamVote атомарен: первый вызвавший
 // исполняет, проигравшие гонку выходят молча — двойной бан/удаление исключены.
 // Возвращает, достался ли этому вызывавшему исполнять вердикт: тост «Решено»
@@ -888,7 +955,7 @@ func voteVerdict(yes, no, margin int) (isSpam, decided bool) {
 func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	// Подписчики уведомлений и бюллетени — до Take: он удаляет бюллетени в
 	// своей транзакции. Бюллетени нужны всегда: причина события (vote:<ids>)
-	// пишется в статистику по голосам «за». Проигравший гонку прочитает зря —
+	// пишется в статистику по голосам «за». Проигравший гонку прочитал зря —
 	// не страшно, он выйдет по !taken.
 	targets := b.spamNotifyTargets(b.runCtx)
 	ballots, err := b.db.ListBallots(b.runCtx, v.ChatID, v.BotMsgID)
@@ -903,61 +970,10 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	if !taken {
 		return false
 	}
-	// banned — удался ли локальный бан: гейтит и глобальную базу, и
-	// кросс-бан (см. ниже).
+	// banned — удался ли локальный бан: гейтит кросс-бан (fanout ниже).
 	banned := false
 	if spam {
-		if err := b.banRevoke(b.runCtx, v.ChatID, v.AuthorID); err != nil {
-			// Бан не прошёл (обычно нет прав): юзер остаётся в чате, поэтому
-			// событие spamban не пишем, его приветствие и активные проверки
-			// НЕ трогаем — капча/ожидание ответа продолжают жить, иначе
-			// провал бана оставил бы его в капча-мьюте навсегда без шанса
-			// на восстановление (pending-строки уже не спасти).
-			b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
-		} else {
-			banned = true
-			// Гасим активные проверки ПОСЛЕ успешного бана (до записи
-			// события): таймауты не должны добавить свой kick/noreply поверх
-			// spamban. Ответить по старой капче/якорю забаненный больше не
-			// может — невозможность пройти проверку не его вина, закрываем
-			// воронку пассом (прецедент /mute), иначе при reply-check он
-			// навсегда зависнет в «В процессе».
-			b.cancelCaptchaSilent(v.ChatID, v.AuthorID)
-			if b.cancelReplyWait(v.ChatID, v.AuthorID) {
-				if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventPass, time.Now(), ""); err != nil {
-					b.log.Warn("record pass event (banned with armed wait)", "err", err)
-				}
-			}
-			if err := b.db.RecordEvent(b.runCtx, v.ChatID, v.AuthorID, storage.EventSpamBan,
-				time.Now(), voteReason(ballots)); err != nil {
-				b.log.Warn("record spamban event", "err", err, "chat", v.ChatID, "user", v.AuthorID)
-			}
-			// Приветствие бота для этого юзера revoke не трогает — сносим сами.
-			if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, v.ChatID, v.AuthorID); err == nil && ok {
-				if err := b.deleteMessage(b.runCtx, v.ChatID, msgID); err != nil {
-					b.log.Debug("delete greeting of banned user", "err", err, "chat", v.ChatID)
-				}
-			}
-		}
-		// revoke обычно уже стёр сообщение; ручное удаление — страховка на
-		// случай неудавшегося бана (нет прав), поэтому ошибку глушим тихо.
-		// У профильной плашки целевого сообщения нет (TargetMsgID == 0).
-		if v.TargetMsgID != 0 {
-			if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
-				b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
-			}
-		}
-		// Общая база и кросс-бан — только при УДАВШЕМСЯ бане: неисполнимый
-		// вердикт (нет прав в исходном чате) не должен инстант-банить юзера
-		// во всех остальных чатах без единого бюллетеня там. Снимается это
-		// по-прежнему ручным unban в любом чате.
-		if banned {
-			if err := b.db.AddSpamBanned(b.runCtx, v.AuthorID, v.ChatID, time.Now()); err != nil {
-				b.log.Warn("add spam banned", "err", err, "user", v.AuthorID)
-			}
-		}
-		b.log.Info("spam verdict: ban", "chat", v.ChatID, "user", v.AuthorID,
-			"banned", banned, "why", why)
+		banned = b.executeSpamBan(v, voteReason(ballots), why)
 	} else {
 		b.log.Info("spam verdict: not spam", "chat", v.ChatID, "user", v.AuthorID, "why", why)
 	}
@@ -978,23 +994,38 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	return true
 }
 
+// serviceableGroupChatsExcept — все обслуживаемые group/supergroup реестра,
+// кроме исходного чата. Общий скелет обходов banEverywhere (кросс-бан вердикта)
+// и fullUnbanEverywhere (полный разбан).
+func (b *Bot) serviceableGroupChatsExcept(originChatID int64) ([]storage.ChatInfo, error) {
+	chats, err := b.db.ListChats(b.runCtx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storage.ChatInfo, 0, len(chats))
+	for _, c := range chats {
+		if c.ChatID == originChatID || (c.Type != "group" && c.Type != "supergroup") ||
+			!b.chatServiceable(c.ChatID) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
 // banEverywhere банит юзера во всех группах бота, кроме исходной. Возвращает
 // HTML-ссылки (chatLinkHTML) чатов, где бан прошёл. Событие spamban пишется только в чате
 // вердикта (вызывающим) — иначе статистика «Забанены» размножится.
 // Best effort в один заход, без retryTG: типовая ошибка тут — «нет прав»,
 // перманентная, и лестница ретраев лишь растянула бы обход на минуты.
 func (b *Bot) banEverywhere(originChatID, userID int64) []string {
-	chats, err := b.db.ListChats(b.runCtx)
+	chats, err := b.serviceableGroupChatsExcept(originChatID)
 	if err != nil {
 		b.log.Warn("ban everywhere: list chats", "err", err)
 		return nil
 	}
 	var banned []string
 	for _, c := range chats {
-		if c.ChatID == originChatID || (c.Type != "group" && c.Type != "supergroup") ||
-			!b.chatServiceable(c.ChatID) {
-			continue
-		}
 		// Пер-чатовое доверие (/whitelist) сильнее глобальной базы: админ,
 		// впустивший юзера в свой чат без капчи, не ожидает его бана там по
 		// чужому вердикту — join-хук соблюдает тот же приоритет. Ошибка
