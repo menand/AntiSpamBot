@@ -1389,7 +1389,15 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 		// окно, куда дубль-доставка входа (chat_member + new_chat_members)
 		// запустила бы вторую серию с дублем сообщения капчи.
 		if !b.store.BeginKickoff(chatID, userID) {
-			// Дубль-доставка успела раньше — её серия подхватит юзера.
+			// Дубль-доставка успела раньше — её серия подхватит юзера. Но
+			// pre-persist выше уже мог записать следующую стадию под СТАРЫМ
+			// message_id: если дубль-серия оборвётся до своего persist,
+			// рестарт поднял бы призрачную капчу с грейс-киком. Гасим по
+			// guard'у; для строки, перезаписанной дублем, это no-op.
+			if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
+				b.log.Warn("delete orphaned stage transition (kickoff lost)",
+					"err", err, "chat", chatID, "user", userID)
+			}
 			return
 		}
 		next := b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
