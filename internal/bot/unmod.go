@@ -67,7 +67,7 @@ func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action
 	// Снятие мьюта — RestrictChatMember, он работает только в супергруппах
 	// (тот же честный гейт, что у /mute).
 	if action == "m" && message.Chat.Type != "supergroup" {
-		b.replyTo(ctx, message, "Мьют работает только в супергруппах.")
+		b.refuseAndDelete(ctx, message, "Мьют работает только в супергруппах.")
 		return nil
 	}
 	a := unmodActions[action]

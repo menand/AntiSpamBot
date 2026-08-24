@@ -256,24 +256,33 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			// Напоминание не ушло даже после ретраев (429-шторм, сеть), а
 			// предыдущий якорь мы только что удалили: требование «напиши
 			// что-нибудь» юзер выполнить не может — он его не видит. Снимаем
-			// ожидание и закрываем воронку пассом: невозможность ответить —
-			// не вина юзера (прецедент onSuccess / замьюченного /mute).
-			// Если пасс уже записал satisfier (ответ проскочил в окно
-			// ретраев) — второй не пишем.
+			// ожидание: невозможность ответить — не вина юзера (прецедент
+			// onSuccess / замьюченного /mute).
 			taken, took := b.replies.Take(chatID, userID)
-			if !took || taken == p {
-				if took {
-					taken.Cancel()
-				}
-				if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
-					b.log.Warn("delete pending reply on disarmed wait", "err", err, "chat", chatID, "user", userID)
-				}
-				if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-					b.log.Warn("record pass event (disarmed reply wait)", "err", err)
-				}
-				b.log.Warn("reply wait disarmed — reminder send failed",
-					"chat", chatID, "user", userID, "stage", p.Stage+1)
+			// Строку стадии N+1 гасим всегда: у satisfier'а и cancelReplyWait
+			// гвард идёт по ИХ стадии (p.Stage), предзапpersistенную следующую
+			// она не достаёт — без этой очистки рестарт воскресил бы фантомную
+			// стадию с киком за «молчание».
+			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
+				b.log.Warn("delete pending reply on disarmed wait", "err", err, "chat", chatID, "user", userID)
 			}
+			if !took || taken != p {
+				// Пока напоминание уходило в ретраях, ожидание уже разрешил
+				// другой (ответ юзера, выход, /mute) — терминальное событие
+				// записал он. Проигравший гонку — no-op по событиям: второй
+				// пасс поверх чужого исхода ломал бы воронку.
+				b.log.Info("reply wait resolved by winner — reminder send failed",
+					"chat", chatID, "user", userID, "stage", p.Stage+1)
+				return
+			}
+			taken.Cancel()
+			// Компенсирующий пасс — только когда серия была ещё у нас и
+			// другого исхода у неё не появилось.
+			if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (disarmed reply wait)", "err", err)
+			}
+			b.log.Warn("reply wait disarmed — reminder send failed",
+				"chat", chatID, "user", userID, "stage", p.Stage+1)
 			return
 		}
 
@@ -348,8 +357,9 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 			}
 			// Простой съел серию: рестарт карает по грейсу, как прежний
 			// одиночный таймаут. Кламп к финальной стадии + синхронизация в
-			// БД (guard удаления идёт по expires_at) заставляют цикл наказать,
-			// а не слать очередное напоминание.
+			// БД (guard удаления идёт по СТАДИИ — кламп обязан доехать до
+			// строки) заставляют цикл наказать, а не слать очередное
+			// напоминание.
 			expires = now.Add(1 * time.Second)
 			stage = captchaStages
 			if err := b.db.PutPendingReply(ctx, storage.PendingReply{
