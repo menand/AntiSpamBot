@@ -295,6 +295,14 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 	})
 }
 
+const (
+	// Подсказки в чат, пока бот инертен в ожидании решения владельца:
+	// вопрос владельцам не доставлен никому vs доставлен хотя бы одному.
+	pendingHintAskStart = "🤖 Жду подтверждения владельца: напиши мне в личку команду /start — " +
+		"пришлю туда вопрос об этом чате. После подтверждения начну работать."
+	pendingHintWaiting = "🤖 Жду подтверждения владельца — как подтвердит, начну работу."
+)
+
 // askOwnerApproval — новый чат, добавленный не владельцем: помечаем pending и
 // спрашиваем владельцев ЛС.
 func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
@@ -339,12 +347,22 @@ func (b *Bot) askOwnerApproval(upd *telego.ChatMemberUpdated) {
 		// запускали бота в ЛС / закрыли ЛС): честно скажем об этом в чате —
 		// иначе добавивший видит мёртвого бота без объяснений.
 		b.log.Warn("owner approval prompt undelivered — notifying chat", "chat", chatID)
-		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID),
-			"🤖 Жду подтверждения владельца: напиши мне в личку команду /start — "+
-				"пришлю туда вопрос об этом чате. После подтверждения начну работать.").
-			WithParseMode(telego.ModeHTML)); err != nil {
-			b.log.Warn("send pending hint to chat", "err", err, "chat", chatID)
-		}
+		b.postOwnerPendingHint(chatID, pendingHintAskStart)
+	default:
+		// Вопрос доставлен хотя бы одному владельцу — но добавившие админы в
+		// чате до решения не видели НИЧЕГО: молчание выглядело как сломанный
+		// бот. Короткая строка объясняет инертность, не требуя действий.
+		b.log.Info("owner approval prompt delivered — posting chat notice", "chat", chatID)
+		b.postOwnerPendingHint(chatID, pendingHintWaiting)
+	}
+}
+
+// postOwnerPendingHint — строка в чат о том, что бот ждёт решения владельца
+// (best-effort: недоставленная подсказка не меняет ход подтверждения).
+func (b *Bot) postOwnerPendingHint(chatID int64, text string) {
+	if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(chatID), text).
+		WithParseMode(telego.ModeHTML)); err != nil {
+		b.log.Warn("send pending hint to chat", "err", err, "chat", chatID)
 	}
 }
 
@@ -437,12 +455,12 @@ func (b *Bot) carryApprovalOnMigrate(ctx context.Context, oldID, newID int64) {
 			b.setApprovalCache(newID, true)
 		case !delivered:
 			b.log.Warn("migrated approval prompt undelivered — notifying chat", "chat", newID)
-			if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(newID),
-				"🤖 Жду подтверждения владельца: напиши мне в личку команду /start — "+
-					"пришлю туда вопрос об этом чате. После подтверждения начну работать.").
-				WithParseMode(telego.ModeHTML)); err != nil {
-				b.log.Warn("send pending hint to chat", "err", err, "chat", newID)
-			}
+			b.postOwnerPendingHint(newID, pendingHintAskStart)
+		default:
+			// Как при обычном добавлении: доставленный вопрос не должен
+			// оставлять чат в полной темноте до решения владельца.
+			b.log.Info("migrated approval prompt delivered — posting chat notice", "chat", newID)
+			b.postOwnerPendingHint(newID, pendingHintWaiting)
 		}
 	}
 }

@@ -45,12 +45,13 @@ var unmodActions = map[string]unmodAction{
 	"m": {kinds: []storage.EventKind{storage.EventMute},
 		title: "🔇 Последние замьюченные",
 		empty: "Мьютов не помню — некого размьючивать."},
-	// «Провалившие капчу» — кики/баны с причиной captcha|noreply; спам-баны и
-	// ручные /kick|/ban сюда не попадают.
+	// «Провалившие проверку входа» — кики/баны с причиной captcha|noreply
+	// (noreply = режим «ответь на приветствие»); спам-баны и ручные
+	// /kick|/ban сюда не попадают.
 	"w": {kinds: []storage.EventKind{storage.EventKick, storage.EventBan},
 		reasons: []string{storage.ReasonCaptcha, storage.ReasonNoReply},
-		title:   "🧩 Последние провалившие капчу",
-		empty:   "Провалов капчи не помню — некого добавлять в доверенных."},
+		title:   "🧩 Последние провалившие проверку входа",
+		empty:   "Проваливших проверку входа не помню — некого добавлять в доверенных."},
 }
 
 func (b *Bot) handleUnbanCommand(ctx *th.Context, message telego.Message) error {
@@ -78,9 +79,10 @@ func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action
 		return nil
 	}
 	// Снятие мьюта — RestrictChatMember, он работает только в супергруппах
-	// (тот же честный гейт, что у /mute).
+	// (тот же честный гейт, что у /mute). Просили же РАЗМьютить — копия
+	// «Мьют работает…» сбивала с толку.
 	if action == "m" && message.Chat.Type != "supergroup" {
-		b.refuseAndDelete(ctx, message, "Мьют работает только в супергруппах.")
+		b.refuseAndDelete(ctx, message, "Мьют и размьют работают только в супергруппах.")
 		return nil
 	}
 	a := unmodActions[action]
@@ -314,7 +316,11 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 		return nil
 	}
 	// Лёгкий гард цели без якоря-команды (кнопка): не бот, не сам нажавший,
-	// не админ/владелец. Отказ — тостом: реплаять не на что.
+	// не админ/владелец, не сервисный/канальный id. Отказ — тостом:
+	// реплаять не на что. Последний случай зеркалит хвост guardModTarget
+	// (modcmd.go): сегодня RecentEventUsers таких id не выдаёт, но первый же
+	// новый kind события с channel/service id не должен доехать до
+	// release/unban с ложным «проверь мои права».
 	switch {
 	case b.me != nil && targetID == b.me.ID:
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
@@ -323,6 +329,10 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 	case targetID == query.From.ID:
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
 			WithText("Себя-то за что?").WithShowAlert())
+		return nil
+	case targetID == telegramServiceUserID || targetID <= 0:
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Это не участник чата.").WithShowAlert())
 		return nil
 	case b.canManageChat(ctx, targetID, chatID):
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).

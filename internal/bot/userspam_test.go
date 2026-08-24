@@ -11,7 +11,7 @@ func TestManualVoteText(t *testing.T) {
 	got := manualVoteText(reporter, suspect, 2, 1, 3)
 
 	for _, want := range []string{
-		"🚩", reporter, suspect, "Забанить?",
+		"🚩", reporter, suspect, "считает сообщение от",
 		"перевес в 3 голоса", "Голос админа решает сразу",
 		"не голосуют",
 		"🚫 Спам: <b>2</b>", "✅ Не спам: <b>1</b>",

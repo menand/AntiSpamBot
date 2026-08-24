@@ -139,45 +139,34 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 		infos = map[int64]storage.UserInfo{}
 	}
 
-	sent, err := b.api.SendMessage(b.runCtx,
+	msgID, out := b.createSpamPlashka("spam report",
 		tu.Message(tu.ID(chatID), manualVoteText(
 			mentionOrID(infos, message.From.ID),
 			mentionOrID(infos, targetID),
 			0, 0, effectiveSpamVoteMargin(s))).
 			WithParseMode(telego.ModeHTML).
 			WithReplyParameters(&telego.ReplyParameters{MessageID: r.MessageID}).
-			WithReplyMarkup(spamVoteKeyboard()))
-	if err != nil {
-		b.log.Warn("send spam report message", "err", err, "chat", chatID)
-		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
-			"Не получилось повесить плашку — попробуй ещё раз.")
-		return nil
-	}
-	// Атомарный захват «одна плашка на автора»: проиграв гонку, сносим свою
-	// свежую плашку — иначе две живых голосовалки дали бы два независимых
-	// вердикта (двойной spamban/banEverywhere и дубли уведомлений).
-	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, storage.SpamVote{
-		ChatID:      chatID,
-		BotMsgID:    sent.MessageID,
-		TargetMsgID: r.MessageID,
-		AuthorID:    targetID,
-		InitiatorID: message.From.ID,
-		Prob:        100, // легаси-колонка NOT NULL, никогда не отображается
-		CreatedAt:   time.Now(),
-	})
-	if err != nil {
-		b.log.Error("persist spam report vote", "err", err, "chat", chatID)
-		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
-		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
-			"Не получилось сохранить голосование — попробуй позже.")
-		return nil
-	}
-	if !inserted {
-		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
-		b.log.Info("spam report lost race — plashka already up for author",
-			"chat", chatID, "target", targetID)
-		b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message),
-			"Плашка голосования на этого юзера уже висит — голосуй там.")
+			WithReplyMarkup(spamVoteKeyboard()),
+		storage.SpamVote{
+			ChatID:      chatID,
+			TargetMsgID: r.MessageID,
+			AuthorID:    targetID,
+			InitiatorID: message.From.ID,
+			Prob:        100, // легаси-колонка NOT NULL, никогда не отображается
+			CreatedAt:   time.Now(),
+		})
+	if out != plashkaSent {
+		switch out {
+		case plashkaLostRace:
+			b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message),
+				"Плашка голосования на этого юзера уже висит — голосуй там.")
+		case plashkaPersistFailed:
+			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
+				"Не получилось сохранить голосование — попробуй позже.")
+		default:
+			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
+				"Не получилось повесить плашку — попробуй ещё раз.")
+		}
 		return nil
 	}
 
@@ -189,7 +178,7 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From))
 
 	b.log.Info("spam report", "chat", chatID, "target", targetID,
-		"by", message.From.ID, "bot_msg", sent.MessageID)
+		"by", message.From.ID, "bot_msg", msgID)
 	return nil
 }
 
@@ -229,9 +218,11 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 
 	// Висящую на авторе плашку снимаем: репорт золотого голоса закрыл вопрос
 	// раньше сообщества. Best effort — ошибка БД не отменяет вердикт.
+	// botMsgID == 0 — синтетическая lock-строка прошлого golden-репорта:
+	// deleteMessage(0) не вызываем (инвариант проекта).
 	if botMsgID, up, terr := b.db.TakeSpamVoteByAuthor(b.runCtx, chatID, targetID); terr != nil {
 		b.log.Warn("golden report: take pending vote", "err", terr, "chat", chatID, "target", targetID)
-	} else if up {
+	} else if up && botMsgID != 0 {
 		if err := b.deleteMessage(b.runCtx, chatID, botMsgID); err != nil {
 			b.log.Debug("delete taken vote plashka", "err", err, "chat", chatID)
 		}
@@ -301,7 +292,7 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 	// Подтверждение адресовано исполнителю (modReceiver: в эфемерном чате
 	// увидит только он, как у /kick|/ban) — реплаем на цель якориться нельзя,
 	// revoke уже стёр её. Исход честный по флагу бана.
-	text := "🚩 " + b.mentionFor(message.From.ID) + " распознал спамера — " +
+	text := "🚩 " + b.mentionFor(message.From.ID) + " распознал(а) спамера — " +
 		b.mentionFor(targetID) + " забанен с чисткой сообщений."
 	if !banned {
 		text = "🚩 Репорт принят, но забанить не удалось — проверьте права бота."
@@ -353,8 +344,11 @@ func voteTallyLine(yes, no int) string {
 
 // manualVoteText — текст плашки народного репорта; заголовок с инициатором
 // переживает перерисовки счёта и рестарты (voteView читает initiator_id).
+// Формулировка «считает сообщение спамом» согласована с кнопками
+// «Да, спам / Нет, не спам» (spamVoteKeyboard): вопрос «Забанить?» при таких
+// кнопках читался как подмена темы голосования.
 func manualVoteText(reporter, suspect string, yes, no, margin int) string {
-	return fmt.Sprintf("<b>🚩 Репорт:</b> %s считает, что %s — спамер. Забанить?\n\n%s\n"+
+	return fmt.Sprintf("<b>🚩 Репорт:</b> %s считает сообщение от %s спамом.\n\n%s\n"+
 		"<i>Инициатор репорта и подозреваемый не голосуют.</i>\n\n%s",
 		reporter, suspect, voteRuleLine(margin), voteTallyLine(yes, no))
 }

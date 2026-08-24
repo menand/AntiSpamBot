@@ -510,7 +510,9 @@ func (b *Bot) cleanupTargetTraces(chatID, targetID int64) {
 			b.log.Debug("delete greeting of moderated user", "err", err, "chat", chatID)
 		}
 	}
-	if botMsgID, ok, err := b.db.TakeSpamVoteByAuthor(b.runCtx, chatID, targetID); err == nil && ok {
+	// botMsgID == 0 — синтетическая lock-строка golden-репорта: инвариант
+	// проекта — deleteMessage(0) не вызывать.
+	if botMsgID, ok, err := b.db.TakeSpamVoteByAuthor(b.runCtx, chatID, targetID); err == nil && ok && botMsgID != 0 {
 		if err := b.deleteMessage(b.runCtx, chatID, botMsgID); err != nil {
 			b.log.Debug("delete vote plashka of moderated user", "err", err, "chat", chatID)
 		}

@@ -200,15 +200,7 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		// Новый чат. Добавил сам владелец — его действие и есть согласие:
 		// апрувим без переспроса. Иначе — спрашиваем владельцев ЛС.
 		if b.isOwner(upd.From.ID) {
-			b.log.Info("chat added by owner, auto-approved", "chat", upd.Chat.ID)
-			if err := b.db.SetChatApproval(b.runCtx, upd.Chat.ID, storage.ChatApproved); err != nil {
-				b.log.Warn("approve chat added by owner", "err", err, "chat", upd.Chat.ID)
-				return nil
-			}
-			b.setApprovalCache(upd.Chat.ID, true)
-			b.rememberChat(b.runCtx, info)
-			b.markBotAddedAt(upd.Chat.ID)
-			b.checkAdminRights(upd)
+			b.approveChatByOwner(upd, info, "новый чат")
 			return nil
 		}
 		b.askOwnerApproval(upd)
@@ -228,12 +220,47 @@ func (b *Bot) handleMyChatMember(ctx *th.Context, update telego.Update) error {
 		b.markBotAddedAt(upd.Chat.ID)
 		return nil
 	default:
-		// rejected: leave не прошёл или событие догнало выход — чат инертен.
-		b.setApprovalCache(upd.Chat.ID, false)
-		b.rememberChat(b.runCtx, info)
-		b.markBotAddedAt(upd.Chat.ID)
+		// rejected при живом боте в чате: «Нет» владельца прозвучало, а leave
+		// не прошёл — либо бота выгнали и ДОБАВИЛИ ЗАНОВО (строка реестра
+		// переживает удаление). Раньше ветка молча кешировала false: чат навсегда
+		// оставался инертным без единого объяснения, а восстановить его можно
+		// было только неуничтоженной кнопкой в ЛС владельца. Даём второй раунд:
+		// владелец сам добавил — его действие и есть согласие; иначе
+		// переспрашиваем как новый чат (askOwnerApproval переведёт rejected →
+		// pending, разошлёт вопрос и честно скажет в чате, чего мы ждём).
+		if b.isOwner(upd.From.ID) {
+			b.approveChatByOwner(upd, info, "чат вернулся после rejected")
+			return nil
+		}
+		b.log.Info("rejected chat re-added — re-asking owners", "chat", upd.Chat.ID, "added_by", upd.From.ID)
+		b.askOwnerApproval(upd)
 		return nil
 	}
+}
+
+// approveChatByOwner — автоапрув чата, добавленного самим владельцем (его
+// действие = согласие). Общая для нового чата и для пере-добавленного после
+// rejected; why — причина для лога.
+func (b *Bot) approveChatByOwner(upd *telego.ChatMemberUpdated, info storage.ChatInfo, why string) {
+	b.log.Info("chat added by owner, auto-approved", "chat", upd.Chat.ID, "why", why)
+	if err := b.db.SetChatApproval(b.runCtx, upd.Chat.ID, storage.ChatApproved); err != nil {
+		// Статус не записан — чат останется инертным до следующего события,
+		// которое повторит попытку (fail-closed по умолчанию).
+		b.log.Warn("approve chat added by owner", "err", err, "chat", upd.Chat.ID)
+		return
+	}
+	b.setApprovalCache(upd.Chat.ID, true)
+	b.rememberChat(b.runCtx, info)
+	b.markBotAddedAt(upd.Chat.ID)
+	b.checkAdminRights(upd)
+}
+
+// joinedRecently — дедуп-маркер «капча решена только что»: UpsertMember
+// пишет joined_at=now при каждом прохождении (onSuccess, trusted-admit).
+// Ошибка чтения трактуется как «не недавно» — обычный путь капчи (fail-safe).
+func (b *Bot) joinedRecently(ctx context.Context, chatID, userID int64) bool {
+	joinedAt, ok, err := b.db.MemberJoinedAt(ctx, chatID, userID)
+	return err == nil && ok && time.Since(joinedAt) < time.Minute
 }
 
 // markBotAddedAt штампует дату первого появления бота в чате (для /info).
@@ -401,8 +428,7 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 		// banKnownSpammer, здесь нельзя: IsCaptchaActive всё это время удалял
 		// бы сообщения только что впущенного. Побочный эффект: повторный вход
 		// в течение минуты обходится без второго приветствия и событий — ок.
-		if joinedAt, ok, jerr := b.db.MemberJoinedAt(b.runCtx, chatID, user.ID); jerr == nil && ok &&
-			time.Since(joinedAt) < time.Minute {
+		if b.joinedRecently(b.runCtx, chatID, user.ID) {
 			return
 		}
 		if !b.store.BeginKickoff(chatID, user.ID) {
@@ -424,8 +450,7 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			// BeginKickoff — уже после освобождения замка. Без повторной
 			// проверки она задвоила бы join+pass и отправила второе
 			// приветствие.
-			if joinedAt, ok, jerr := b.db.MemberJoinedAt(b.runCtx, chatID, user.ID); jerr == nil && ok &&
-				time.Since(joinedAt) < time.Minute {
+			if b.joinedRecently(b.runCtx, chatID, user.ID) {
 				b.store.FinishKickoff(chatID, user.ID)
 				released = true
 				return
@@ -508,6 +533,25 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 		})
 		return
 	}
+	// Дедуп ПОЗДНЕЙ дубль-доставки: Telegram переигрывает неподтверждённые
+	// апдейты после деплоя/разрыва, и повтор мог догнать нас УЖЕ после того,
+	// как капча разрешилась и onSuccess записал свежий joined_at. BeginKickoff
+	// ниже ловит только живую капчу/inflight — решённую он не видит, и без
+	// этой проверки юзера заново замьючило бы серией, а в статистику упал бы
+	// второй join и фантомный кик. Тот же bail-out по свежему joined_at, что
+	// у trusted-ветки выше; побочный эффект тоже совпадает с ней и принят
+	// сознательно: ре-вход в течение минуты после прохождения обходит капчу.
+	// Исключение — require-reply: там молчаливый пропуск оставил бы юзера
+	// без перевзведённого ожидания и якоря-приветствия, т.е. допущенным, не
+	// выполнив второй шаг проверки, — поэтому при включённом режиме едем
+	// через обычную капчу (она после успеха переармит reply-wait).
+	if b.joinedRecently(b.runCtx, chatID, user.ID) {
+		if s := b.chatSettings(b.runCtx, chatID); !s.ReplyCheckEnabled {
+			return
+		}
+		b.log.Info("recently passed user rejoined with reply-check on — re-running captcha",
+			"chat", chatID, "user", user.ID)
+	}
 	if !b.startCaptcha(chatID, user, threadID) {
 		// Дубль-доставка (chat_member + new_chat_members) — уже посчитано.
 		return
@@ -560,11 +604,15 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 		return capMsg != nil && !staleCaptchaClick(live, capMsg)
 	})
 	if !ok {
-		text := "Время вышло."
+		// Живого pending нет: чаще всего даблклик верного ответа спустя
+		// мгновение после прохождения — «Время вышло» здесь фактическая ложь,
+		// таймаут-то не наступал. Нейтральная формулировка честна во всех
+		// случаях (капчу могли решить/снять и без нас).
+		text := "Эта капча уже не активна."
 		stale := false
 		if live, still := b.store.Get(chatID, query.From.ID); still &&
 			(capMsg == nil || staleCaptchaClick(live, capMsg)) {
-			text, stale = "Эта капча уже не активна.", true
+			text, stale = "Это устаревшая клавиатура.", true
 		}
 		answer := tu.CallbackQuery(query.ID).WithText(text)
 		if stale {
@@ -1573,21 +1621,30 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	// Ожидание ответа взводим СРАЗУ после размьюта, до сетевой отправки
 	// приветствия: юзер уже может писать, и его первое сообщение должно
 	// застать ожидание активным (иначе гонка → кик написавшего).
-	b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID)
-	if !b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID) && s.ReplyCheckEnabled {
-		// Приветствие-якорь с требованием не ушёл даже после ретраев
-		// (429-шторм масс-джойна, сеть): требование «напиши что-нибудь»
-		// юзер выполнить не может — он его никогда не видел. Снимаем
-		// ожидание и закрываем воронку пассом: невозможность ответить —
-		// не вина юзера (та же логика, что у /mute замьюченного), иначе
-		// таймаут серии кикнул бы его за молчание по вине инфраструктуры.
-		if b.cancelReplyWait(p.ChatID, p.UserID) {
-			if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
-				b.log.Warn("record pass event", "err", err)
+	if b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID) {
+		if !b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID) && s.ReplyCheckEnabled {
+			// Приветствие-якорь с требованием не ушёл даже после ретраев
+			// (429-шторм масс-джойна, сеть): требование «напиши что-нибудь»
+			// юзер выполнить не может — он его никогда не видел. Снимаем
+			// ожидание и закрываем воронку пассом: невозможность ответить —
+			// не вина юзера (та же логика, что у /mute замьюченного), иначе
+			// таймаут серии кикнул бы его за молчание по вине инфраструктуры.
+			if b.cancelReplyWait(p.ChatID, p.UserID) {
+				if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
+					b.log.Warn("record pass event", "err", err)
+				}
+				b.log.Warn("reply wait disarmed — greeting send failed",
+					"chat", p.ChatID, "user", p.UserID)
 			}
-			b.log.Warn("reply wait disarmed — greeting send failed",
-				"chat", p.ChatID, "user", p.UserID)
 		}
+	} else if s.ReplyCheckEnabled {
+		// Армирование сорвалось (fail-open при провале персистентности,
+		// см. maybeArmReplyWait): ожидания нет и не будет — строчка
+		// «напиши что-нибудь, иначе придётся зайти заново» была бы ложью,
+		// которую никто не проверяет. Шлём приветствие как обычное.
+		plain := s
+		plain.ReplyCheckEnabled = false
+		b.maybeSendGreeting(ctx, plain, p.ChatID, p.UserID, p.ThreadID)
 	}
 	// Затем — ИИ-оценка профиля новичка (асинхронная внутри).
 	b.maybeProfileCheck(p.ChatID, p.UserID, p.ThreadID)

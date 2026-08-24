@@ -32,7 +32,11 @@ func entitiesToHTML(text string, entities []telego.MessageEntity) string {
 		if e.Offset < 0 || e.Length <= 0 || e.Offset >= n {
 			continue
 		}
-		if e.Offset+e.Length > n {
+		// Overflow-free форма: e.Offset+e.Length при Length у MaxInt64
+		// переполнилась бы в отрицательное, кламп пропускал — и дальше по циклу
+		// utf16.Decode падал бы slice-bounds panic. Гварды выше дают
+		// n-e.Offset >= 1, так что вычитание безопасно.
+		if e.Length > n-e.Offset {
 			e.Length = n - e.Offset
 		}
 		ents = append(ents, e)
@@ -48,6 +52,27 @@ func entitiesToHTML(text string, entities []telego.MessageEntity) string {
 		}
 		return ents[i].Length > ents[j].Length
 	})
+	// Пересекающиеся (НЕ вложенные) entity отбрасываем: стек ниже умеет
+	// закрывать только по LIFO, перекрёстная пара оставила бы незакрытый
+	// тег и отказ отправки. Telegram такие не шлёт («либо вложены, либо не
+	// пересекаются»), источник — только crafted greeting_entities.
+	// Сравнение с БЕГУЩИМ МАКСИМУМОМ концов, а не только с последней
+	// оставленной: тройка «предок — вложенный — пересекающий предка» иначе
+	// просачивалась бы мимо парного фильтра (против вложенного соседа она
+	// пересечением не выглядит).
+	kept := ents[:0]
+	maxEnd := 0
+	for _, e := range ents {
+		end := e.Offset + e.Length
+		if e.Offset < maxEnd && end > maxEnd {
+			continue
+		}
+		if end > maxEnd {
+			maxEnd = end
+		}
+		kept = append(kept, e)
+	}
+	ents = kept
 
 	type open struct {
 		ent telego.MessageEntity

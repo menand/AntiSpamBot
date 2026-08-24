@@ -39,7 +39,7 @@ func assertGoldenBanned(t *testing.T, b *Bot, db *storage.DB, fc *fakeCaller) {
 		t.Fatalf("golden report must not create a vote plashka (pending=%v err=%v)", pending, err)
 	}
 	got := strings.Join(fc.callBodies("sendMessage"), "\n")
-	if !strings.Contains(got, "распознал спамера") {
+	if !strings.Contains(got, "распознал(а) спамера") {
 		t.Fatalf("want public confirmation, got:\n%s", got)
 	}
 	if strings.Contains(got, "историей сообщений") {

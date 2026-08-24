@@ -33,7 +33,12 @@ const (
 )
 
 func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) error {
-	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+	// Ветка eph отвечает на callback САМА (единственный answer с текстом
+	// предупреждения при первом включении): повторный answer по тому же ID
+	// Telegram отклоняет с QUERY_ID_INVALID, алерт бы молча терялся.
+	if !strings.HasPrefix(query.Data, "menu:eph:") {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+	}
 
 	if query.Message == nil {
 		return nil
@@ -230,9 +235,25 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !ok {
 			return nil
 		}
-		return b.toggleChatSetting(ctx, query, chatID,
+		// Предыдущее состояние снимается ПОД мьютексом тоггла (после
+		// успешной записи): чтение снаружи гонялось бы с параллельным
+		// переключением и на сбое БД показывало бы «первое включение» ложно.
+		var wasOn bool
+		err := b.toggleChatSetting(ctx, query, chatID,
 			func(s storage.ChatSettings) bool { return s.EphemeralEnabled },
-			b.db.SetEphemeralEnabled, "ephemeral_enabled")
+			b.db.SetEphemeralEnabled, "ephemeral_enabled",
+			func(prev bool) { wasOn = prev })
+		if err == nil {
+			alert := ""
+			if !wasOn {
+				// Первое включение: настройки описывают механику, но не
+				// принятые trade-offs — доводим их до включающего.
+				alert = "Помни: офлайн-участник может не увидеть ни одного сообщения капчи, а кнопка «Впустить» админам недоступна."
+			}
+			_ = b.api.AnswerCallbackQuery(ctx,
+				tu.CallbackQuery(query.ID).WithText(alert))
+		}
+		return err
 	case "sil":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
@@ -483,7 +504,8 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 // инверсии реального значения. Запись — на runCtx (конвенция «DB writes from
 // callbacks» из CLAUDE.md): начатый тоггл не должен теряться на shutdown.
 func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, chatID int64,
-	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string) error {
+	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string,
+	afterSet ...func(prev bool)) error {
 	// Чтение+запись под общим мьютексом: параллельный даблклик иначе дважды
 	// прочёл бы одно значение и записал одну инверсию вместо двух. Замок
 	// держим ТОЛЬКО на паре DB-вызовов — рендер экрана (сетевой round-trip)
@@ -496,10 +518,16 @@ func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, cha
 		b.log.Warn("get chat settings", "err", err, "chat", chatID)
 		return nil
 	}
-	if err := set(b.runCtx, chatID, !get(s)); err != nil {
+	prev := get(s)
+	if err := set(b.runCtx, chatID, !prev); err != nil {
 		b.log.Warn("set "+what, "err", err, "chat", chatID)
 	}
 	b.toggleMu.Unlock()
+	// Колбэкам отдаём значение ДО инверсии — уже после успешной записи и
+	// снятия замка (например, «это было первое включение?» для алертов).
+	for _, cb := range afterSet {
+		cb(prev)
+	}
 	return b.renderChatSettings(ctx, query, chatID)
 }
 
@@ -530,7 +558,7 @@ func (b *Bot) toggleOwnerSetting(ctx *th.Context, query telego.CallbackQuery,
 
 func (b *Bot) mainMenuText(userID int64) string {
 	text := "🤖 <b>Меню</b>\n\n" +
-		"Я анти-спам бот для Telegram-групп. Показываю новым участникам капчу с цветными кружками — живые пропускаются, боты кикаются.\n\n" +
+		"Я анти-спам бот для Telegram-групп. Показываю новым участникам капчу (кружки, эмодзи или картинка — режим выбирается в настройках чата) — живые пропускаются, боты кикаются.\n\n" +
 		"Выбери раздел:"
 	if b.isOwner(userID) {
 		text += "\n\n<i>Ты владелец бота (OWNER_IDS).</i>"

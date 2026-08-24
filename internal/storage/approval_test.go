@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sync"
 	"testing"
 )
 
@@ -107,6 +108,104 @@ func TestClaimChatApproval(t *testing.T) {
 	if claimed {
 		t.Fatal("claim on unknown chat must not claim")
 	}
+}
+
+// TestClaimChatApprovalConcurrentFirstPressWins — контракт атомарности под
+// настоящей конкуренцией: telego обрабатывает callback'и параллельно, и
+// несколько владельцев могут нажать «Да»/«Нет» одновременно. Ровно один
+// претендент выигрывает, финальный статус совпадает с решением победителя —
+// никогда не смесь.
+func TestClaimChatApprovalConcurrentFirstPressWins(t *testing.T) {
+	ctx := context.Background()
+
+	cases := []struct {
+		name  string
+		first string // решение горутин при same=true; иначе — половины
+		same  bool   // все претенденты требуют одно и то же решение
+	}{
+		{name: "approved против rejected", first: ChatApproved},
+		{name: "rejected против approved", first: ChatRejected},
+		{name: "одинаковые решения", first: ChatApproved, same: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTest(t)
+			if err := db.SetChatApproval(ctx, 1, ChatPending); err != nil {
+				t.Fatal(err)
+			}
+
+			opposite := ChatRejected
+			if tc.first == ChatRejected {
+				opposite = ChatApproved
+			}
+			const racers = 8
+			var (
+				wg        sync.WaitGroup
+				wins      = make([]bool, racers)
+				decisions = make([]string, racers)
+			)
+			for i := 0; i < racers; i++ {
+				d := opposite
+				if tc.same || i%2 == 0 {
+					d = tc.first
+				}
+				decisions[i] = d
+				wg.Add(1)
+				go func(i int, d string) {
+					defer wg.Done()
+					claimed, err := db.ClaimChatApproval(ctx, 1, d)
+					if err != nil {
+						t.Errorf("claim %q: %v", d, err)
+						return
+					}
+					wins[i] = claimed
+				}(i, d)
+			}
+			wg.Wait()
+
+			total := 0
+			wantStatus := ""
+			for i, w := range wins {
+				if w {
+					total++
+					wantStatus = decisions[i]
+				}
+			}
+			if total != 1 {
+				t.Fatalf("claims won = %d, want exactly 1 (%v)", total, wins)
+			}
+			got, exists, err := db.GetChatApproval(ctx, 1)
+			if err != nil || !exists {
+				t.Fatalf("get after race: (%q, %v, err %v)", got, exists, err)
+			}
+			if got != wantStatus {
+				t.Fatalf("final status = %q, want winner's decision %q (никаких смесей)", got, wantStatus)
+			}
+		})
+	}
+
+	t.Run("неизвестный чат — все проигрывают", func(t *testing.T) {
+		db := openTest(t)
+		var inner sync.WaitGroup
+		results := make([]bool, 4)
+		for i := 0; i < 4; i++ {
+			inner.Add(1)
+			go func(i int) {
+				defer inner.Done()
+				claimed, err := db.ClaimChatApproval(ctx, 424242, ChatApproved)
+				if err != nil {
+					t.Error(err)
+				}
+				results[i] = claimed
+			}(i)
+		}
+		inner.Wait()
+		for _, claimed := range results {
+			if claimed {
+				t.Fatal("claim on unknown chat must not win")
+			}
+		}
+	})
 }
 
 func TestReapproveChat(t *testing.T) {
