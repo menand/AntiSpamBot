@@ -339,7 +339,7 @@ func (b *Bot) setCommands(ctx context.Context) error {
 			{Command: "start", Description: "Меню"},
 			{Command: "help", Description: "Все команды бота"},
 			{Command: "whatsnew", Description: "Что нового в боте"},
-			{Command: "chats", Description: "Мои чаты (для владельцев бота)"},
+			{Command: "chats", Description: "Мои чаты (для админов и владельца)"},
 			{Command: "info", Description: "Uptime бота (для владельцев)"},
 			{Command: "logs", Description: "Прислать лог-файл (для владельцев бота)"},
 		},

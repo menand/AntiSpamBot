@@ -81,6 +81,30 @@ func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
 	return p, ok
 }
 
+// Replace — compare-and-swap перехода стадии: под тем же мьютексом меняет
+// старый pending на следующий ТОЛЬКО если текущий всё ещё old. Закрывает окно
+// между раздельными Take и Put: ответ юзера, проскочивший между ними, раньше
+// промахивался бы мимо store и не записывал свой pass — серия продолжала бы
+// наказывать молчанием написавшего. false = ожидание уже разрешил другой
+// (изъятие состоялось), перевзводить нечего.
+func (s *replyStore) Replace(chatID, userID int64, old *replyPending,
+	expiresAt time.Time, threadID, stage int) (*replyPending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := chatUser{chatID, userID}
+	if cur, ok := s.items[k]; !ok || cur != old {
+		return nil, false
+	}
+	if stage < 1 {
+		stage = 1
+	}
+	next := &replyPending{ChatID: chatID, UserID: userID, ExpiresAt: expiresAt,
+		ThreadID: threadID, Stage: stage,
+		cancelCh: make(chan struct{})}
+	s.items[k] = next
+	return next, true
+}
+
 // TakeChat забирает все ожидания чата (бот покинул чат).
 func (s *replyStore) TakeChat(chatID int64) []*replyPending {
 	s.mu.Lock()
@@ -98,9 +122,12 @@ func (s *replyStore) TakeChat(chatID int64) []*replyPending {
 // maybeArmReplyWait — хук после приветствия в onSuccess: при включённом
 // режиме взводит серию напоминаний (стадия 1). Само приветствие-якорь шлёт
 // onSuccess ДО этого вызова — см. комментарий там про порядок release→arm.
-func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) {
+// Возвращает true, если ожидание реально взведено: false (режим выключен
+// или провал персистентности) говорит onSuccess не рисовать в приветствии
+// требование, которое никто не проверяет.
+func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) bool {
 	if !s.ReplyCheckEnabled {
-		return
+		return false
 	}
 	interval := b.effectiveStageInterval(s)
 	deadline := time.Now().Add(interval)
@@ -109,9 +136,27 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 		ChatID: chatID, UserID: userID, ExpiresAt: deadline,
 		Stage: 1, ThreadID: threadID,
 	}); err != nil {
-		b.log.Warn("persist pending reply", "err", err, "chat", chatID, "user", userID)
+		// Прецедент капчи (её pre-persist abort): сбой БД коррелирует с
+		// близким рестартом, а строка pending_replies — единственный механизм
+		// повтора наказания после него. Молчаливая деградация «живём по
+		// памяти» означала бы: рестарт тихо терял ожидание, а живой процесс
+		// карал за молчание, которого после рестарта никто бы не повторил.
+		// Снимаем ожидание с компенсирующим пассом (якорь-то ещё не отправлен:
+		// arming стоит ДО приветствия — юзер останется с обычным welcome),
+		// серию не запускаем.
+		b.log.Error("persist pending reply — disarming wait", "err", err,
+			"chat", chatID, "user", userID)
+		if armed, ok := b.replies.Take(chatID, userID); ok && armed == p {
+			armed.Cancel()
+			if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record compensating pass (reply arm failed)", "err", err,
+					"chat", chatID, "user", userID)
+			}
+		}
+		return false
 	}
 	b.goSafe("replyWaitLoop", func() { b.replyWaitLoop(chatID, userID, p) })
+	return true
 }
 
 // messageHasUserContent — сообщение несёт реальный ввод юзера (текст, подпись
@@ -260,7 +305,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			// onSuccess / замьюченного /mute).
 			taken, took := b.replies.Take(chatID, userID)
 			// Строку стадии N+1 гасим всегда: у satisfier'а и cancelReplyWait
-			// гвард идёт по ИХ стадии (p.Stage), предзапpersistенную следующую
+			// гвард идёт по ИХ стадии (p.Stage), предзаписанную следующую
 			// она не достаёт — без этой очистки рестарт воскресил бы фантомную
 			// стадию с киком за «молчание».
 			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
@@ -286,11 +331,13 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			return
 		}
 
-		taken, ok := b.replies.Take(chatID, userID)
-		if !ok || taken != p {
+		next, advanced := b.replies.Replace(chatID, userID, p, nextExpires, p.ThreadID, p.Stage+1)
+		if !advanced {
 			// Юзер ответил (или ожидание снято), пока напоминание уходило:
 			// пасс уже записан satisfier'ом, а только что отправленное
-			// напоминание — лишнее, сносим.
+			// напоминание — лишнее, сносим. CAS не перевзводил стадию, так
+			// что предзаписанную строку N+1 чистим здесь — satisfier
+			// гасил СВОЮ (старую) стадию.
 			if msgID != 0 {
 				if derr := b.deleteMessage(ctx, chatID, msgID); derr != nil {
 					b.log.Debug("delete reminder of already-satisfied wait",
@@ -298,12 +345,14 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 				}
 			}
 			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
-				b.log.Debug("delete transitioned row of satisfied wait",
+				// Выжившая строка N+1 воскресила бы фантомное ожидание при
+				// рестарте — с грейс-киком ответившего юзера. Не глушим.
+				b.log.Warn("delete transitioned row of satisfied wait",
 					"err", err, "chat", chatID, "user", userID)
 			}
 			return
 		}
-		p = b.replies.Put(chatID, userID, nextExpires, p.ThreadID, p.Stage+1)
+		p = next
 	}
 }
 

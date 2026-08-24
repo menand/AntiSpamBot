@@ -63,7 +63,8 @@ short_id() { echo "${1:7:12}"; }
 
 # DM владельцам из OWNER_IDS. Возвращает успех, если хотя бы одна отправка
 # прошла (curl без ошибок) — notify_once держит маркер только при успехе.
-# Токен не логируется.
+# Токен не логируется и не попадает в argv: URL передаётся через конфиг на
+# stdin (-K -), иначе он светился бы в ps на время каждого cron-тика.
 notify_owners() {
     local token msg owner sent=0
     token="$(parse_env BOT_TOKEN)" || return 1
@@ -71,8 +72,8 @@ notify_owners() {
     msg="$1"
     for owner in $(parse_env OWNER_IDS | tr ',' ' '); do
         [ -z "$owner" ] && continue
-        if curl -s --max-time 10 -o /dev/null \
-            "https://api.telegram.org/bot${token}/sendMessage" \
+        if printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
+            curl -s --max-time 10 -o /dev/null -K - \
             --data-urlencode "chat_id=${owner}" \
             --data-urlencode "text=${msg}"; then
             sent=1
@@ -167,7 +168,9 @@ fi
 TOKEN="$(parse_env BOT_TOKEN || true)"
 GETME_OK=0
 if [ -n "$TOKEN" ]; then
-    if curl -s --max-time 5 "https://api.telegram.org/bot${TOKEN}/getMe" | grep -q '"ok":true'; then
+    # Тот же приём, что и в notify_owners: токен не в argv (виден в ps).
+    if printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TOKEN" |
+        curl -s --max-time 5 -K - | grep -q '"ok":true'; then
         GETME_OK=1
     fi
 fi

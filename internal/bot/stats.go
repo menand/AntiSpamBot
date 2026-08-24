@@ -257,11 +257,18 @@ func renderStats(
 
 	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
 		func(i int, uc storage.UserCount) string {
-			// Secs за пределами суток — мусор из битых исторических данных,
-			// показываем без времени.
+			// Ниже минуты — честные секунды («решил подозрительно быстро»
+			// читается именно тут), выше — человеческие минуты/часы. Secs за
+			// пределами суток — мусор из битых исторических данных, показываем
+			// без времени.
 			if uc.Secs >= 0 && uc.Secs <= 86400 {
-				return fmt.Sprintf("%d. %s — за %d сек\n",
-					i+1, mentionWithUsername(infos, uc.UserID), uc.Secs)
+				d := time.Duration(uc.Secs) * time.Second
+				if d < time.Minute {
+					return fmt.Sprintf("%d. %s — за %d сек\n",
+						i+1, mentionWithUsername(infos, uc.UserID), uc.Secs)
+				}
+				return fmt.Sprintf("%d. %s — за %s\n",
+					i+1, mentionWithUsername(infos, uc.UserID), humanDurationRU(d))
 			}
 			return fmt.Sprintf("%d. %s\n", i+1, mentionWithUsername(infos, uc.UserID))
 		})
@@ -288,7 +295,10 @@ func renderStats(
 				reasonSuffix(uc.LastReason, infos))
 		})
 
-	appendUserList(&sb, "\n⛔️ <b>Забанены:</b>\n", banned,
+	// Список мерджит ban+spamban (капча-баны + вердикты ИИ-антиспама) — суффикс
+	// в заголовке, чтобы числа не «расходились» с пулей воронки выше (та
+	// считает только капча-баны, и это осознанное разделение).
+	appendUserList(&sb, "\n⛔️ <b>Забанены (вкл. ИИ-антиспам):</b>\n", banned,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s%s\n", i+1,
 				mentionWithUsername(infos, uc.UserID),
@@ -299,7 +309,7 @@ func renderStats(
 		fmt.Fprintf(&sb, "\n<i>Новичок — тот, кто прошёл капчу за последние %d дн.</i>", newcomerDays)
 	}
 	if p == periodAll {
-		fmt.Fprintf(&sb, "\n<i>Статистика собирается с момента запуска бота в этом чате.</i>")
+		fmt.Fprintf(&sb, "\n<i>События хранятся за последние ~180 дней, счётчики сообщений — за всё время.</i>")
 	}
 
 	return sb.String()

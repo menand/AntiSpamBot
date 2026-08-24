@@ -607,17 +607,7 @@ func TestSpamVoteMarginResolutionHandlerLevel(t *testing.T) {
 			}
 		}
 	}
-	press := func(voter int64) {
-		t.Helper()
-		query := telego.CallbackQuery{
-			ID: "q", From: telego.User{ID: voter, FirstName: "Голосующий"}, Data: "sv:1",
-			Message: &telego.Message{MessageID: 7,
-				Chat: telego.Chat{ID: testChatID, Type: "supergroup"}},
-		}
-		if err := b.handleSpamVoteCallback(nil, query); err != nil {
-			t.Fatal(err)
-		}
-	}
+	press := func(voter int64) { pressSpamVote(t, b, 7, voter) }
 
 	press(101)
 	press(102)

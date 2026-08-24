@@ -172,6 +172,11 @@ CREATE TABLE IF NOT EXISTS spam_ballots (
     PRIMARY KEY (chat_id, bot_msg_id, voter_id)
 );
 
+-- Пробы «одна плашка на автора» (PutSpamVoteOnce/HasPendingVoteForAuthor/
+-- TakeSpamVoteByAuthor) ищут по автору: HasPendingVoteForAuthor стоит на
+-- горячем пути спам-чека перед каждым LLM-вызовом.
+CREATE INDEX IF NOT EXISTS idx_spam_votes_chat_author ON spam_votes(chat_id, author_id);
+
 -- Общая база спамеров: вердикт «спам» в любом чате баним во всех чатах бота,
 -- а при входе такого юзера в новый чат — мгновенный бан вместо капчи.
 -- Ручной разбан админом в любом чате снимает флаг (DeleteSpamBanned из

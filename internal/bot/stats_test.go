@@ -85,6 +85,7 @@ func TestRenderStatsNewMemberSeconds(t *testing.T) {
 	}
 	out := renderStats(periodDay, "сегодня", s, 7,
 		newMembers, nil, nil, nil, map[int64]storage.UserInfo{})
+	// Ниже минуты рендерятся честные секунды; выше — humanDurationRU.
 	if !strings.Contains(out, "id2001</a> — за 12 сек") {
 		t.Fatalf("expected solve time for 2001:\n%s", out)
 	}

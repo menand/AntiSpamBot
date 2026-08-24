@@ -323,34 +323,18 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 		return
 	}
 
-	sent, err := b.api.SendMessage(b.runCtx,
+	if _, out := b.createSpamPlashka("AI spam",
 		tu.Message(tu.ID(chatID), spamVoteText(0, 0, effectiveSpamVoteMargin(s))).
 			WithParseMode(telego.ModeHTML).
 			WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}).
-			WithReplyMarkup(spamVoteKeyboard()))
-	if err != nil {
-		b.log.Warn("send spam vote message", "err", err, "chat", chatID)
-		return
-	}
-	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, storage.SpamVote{
-		ChatID:      chatID,
-		BotMsgID:    sent.MessageID,
-		TargetMsgID: message.MessageID,
-		AuthorID:    user.ID,
-		Prob:        100, // ponytail: легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
-		CreatedAt:   time.Now(),
-	})
-	if err != nil {
-		// Без строки в БД кнопки мертвы — снимаем плашку, не мусорим.
-		b.log.Error("persist spam vote", "err", err, "chat", chatID)
-		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
-		return
-	}
-	if !inserted {
-		// У автора уже висит плашка (например, пришёл /spam во время LLM-чека):
-		// сносим дубль, событий и уведомлений не пишем.
-		b.log.Info("AI spam plashka lost race — vote already pending", "chat", chatID, "user", user.ID)
-		_ = b.deleteMessage(b.runCtx, chatID, sent.MessageID)
+			WithReplyMarkup(spamVoteKeyboard()),
+		storage.SpamVote{
+			ChatID:      chatID,
+			TargetMsgID: message.MessageID,
+			AuthorID:    user.ID,
+			Prob:        100, // легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
+			CreatedAt:   time.Now(),
+		}); out != plashkaSent {
 		return
 	}
 	// История подозрений для /info: только при живой плашке.
@@ -679,6 +663,49 @@ func spamVoteKeyboard() *telego.InlineKeyboardMarkup {
 	))
 }
 
+// plashkaOutcome — исход создания спам-плашки (ИИ-чек, профиль-чек, ручной
+// /spam): три сайта раньше держали копии одной последовательности «отправить →
+// PutSpamVoteOnce → при провале снести своё сообщение», и дрейф между ними
+// молча ломал бы инвариант «одна плашка на автора» (сайт без сноса при
+// проигранной гонке оставил бы мёртвую клавиатуру на сутки до свипа).
+type plashkaOutcome int
+
+const (
+	plashkaSent          plashkaOutcome = iota // плашка жива, строка захвачена нами
+	plashkaLostRace                            // у автора уже есть плашка — нашу снесли
+	plashkaSendFailed                          // сообщение не ушло даже после ретраев
+	plashkaPersistFailed                       // строка не записана, кнопки были бы мертвы
+)
+
+// createSpamPlashka — общая фабрика: отправляет сообщение голосования и
+// атомарно захватывает строку «одна плашка на автора»; при провале persist
+// или проигранной гонке сносит СВОЁ свежее сообщение (две живых голосовалки
+// на одного автора дали бы два независимых вердикта и дубли уведомлений).
+// what — префикс логов ("AI spam" / "profile" / "spam report").
+func (b *Bot) createSpamPlashka(what string, params *telego.SendMessageParams, vote storage.SpamVote) (msgID int, out plashkaOutcome) {
+	sent, err := b.api.SendMessage(b.runCtx, params)
+	if err != nil {
+		b.log.Warn("send "+what+" vote message", "err", err, "chat", vote.ChatID)
+		return 0, plashkaSendFailed
+	}
+	vote.BotMsgID = sent.MessageID
+	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, vote)
+	if err != nil {
+		// Без строки в БД кнопки мертвы, а свипер плашку не увидит (он читает
+		// только БД) — снимаем сразу.
+		b.log.Error("persist "+what+" vote", "err", err, "chat", vote.ChatID)
+		_ = b.deleteMessage(b.runCtx, vote.ChatID, sent.MessageID)
+		return sent.MessageID, plashkaPersistFailed
+	}
+	if !inserted {
+		b.log.Info(what+" plashka lost race — vote already pending",
+			"chat", vote.ChatID, "user", vote.AuthorID)
+		_ = b.deleteMessage(b.runCtx, vote.ChatID, sent.MessageID)
+		return sent.MessageID, plashkaLostRace
+	}
+	return sent.MessageID, plashkaSent
+}
+
 // handleSpamVoteCallback — нажатия «Да, спам» / «Нет, не спам».
 func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery) error {
 	if query.Message == nil {
@@ -730,7 +757,7 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	if v.InitiatorID != 0 && voter == v.InitiatorID {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).
-				WithText("Ты начал это голосование — твой голос в нём не считается.").
+				WithText("Ты начал(а) это голосование — твой голос в нём не считается.").
 				WithShowAlert())
 		return nil
 	}
@@ -977,8 +1004,13 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	} else {
 		b.log.Info("spam verdict: not spam", "chat", v.ChatID, "user", v.AuthorID, "why", why)
 	}
-	if err := b.deleteMessage(b.runCtx, v.ChatID, v.BotMsgID); err != nil {
-		b.log.Warn("delete spam vote message", "err", err, "chat", v.ChatID)
+	// Плашку снимает победитель гонки. BotMsgID == 0 — синтетическая строка
+	// golden-репорта (плашки не было): инвариант проекта — deleteMessage(0)
+	// не вызывать; бюллетени к таким строкам прикрепиться не могут.
+	if v.BotMsgID != 0 {
+		if err := b.deleteMessage(b.runCtx, v.ChatID, v.BotMsgID); err != nil {
+			b.log.Warn("delete spam vote message", "err", err, "chat", v.ChatID)
+		}
 	}
 	// Кросс-бан и уведомления — в горутине: обход всех чатов не должен
 	// держать колбэк-хендлер (плашка уже снята, вердикт исполнен).
@@ -1153,8 +1185,13 @@ func (b *Bot) sweepExpiredVotes(ctx context.Context) {
 		if err != nil || !taken {
 			continue
 		}
-		if err := b.deleteMessage(ctx, v.ChatID, v.BotMsgID); err != nil {
-			b.log.Warn("delete expired spam vote message", "err", err, "chat", v.ChatID)
+		// BotMsgID == 0 — синтетическая lock-строка golden-репорта (userspam.go):
+		// её release мог потеряться при крэше между PutSpamVoteOnce и
+		// TakeSpamVote. Инвариант проекта — deleteMessage(0) не вызывать.
+		if v.BotMsgID != 0 {
+			if err := b.deleteMessage(ctx, v.ChatID, v.BotMsgID); err != nil {
+				b.log.Warn("delete expired spam vote message", "err", err, "chat", v.ChatID)
+			}
 		}
 		b.log.Info("spam vote expired without quorum",
 			"chat", v.ChatID, "user", v.AuthorID)
