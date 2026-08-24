@@ -799,19 +799,31 @@ func seedTrusted(t *testing.T, db *storage.DB, userID int64) {
 	}
 }
 
-// TestSpamReportTrustGateFailClosed — ошибка чтения счётчика НЕ пропускает
-// репорт: fail-closed, как у гейта бюллетеней.
+// TestSpamReportTrustGateFailClosed — ошибка чтения БД на пути до плашки НЕ
+// пропускает репорт: fail-closed (после реордеринга гейтов закрытая БД валится
+// раньше — на pending-проверке или trust-гейте, но инвариант тот же:
+// непроверенное состояние = отказ, а не плашка).
 func TestSpamReportTrustGateFailClosed(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
 	cmd := reportCommand(9, &telego.User{ID: 42, FirstName: "Цель"})
 
-	_ = db.Close() // sql.ErrConnDone на UserMessageTotal
+	// Прогреваем кэш апрува: иначе команда упрётся в самый первый гейт
+	// (chatServiceable), и тест проверял бы его, а не fail-closed пути репорта.
+	b.setApprovalCache(testChatID, true)
+	_ = db.Close() // sql.ErrConnDone на любом обращении к БД
 	if err := b.handleSpamCommand(nil, cmd); err != nil {
 		t.Fatal(err)
 	}
-	if n := fc.callCount("sendMessage"); n != 0 {
-		t.Fatalf("trust-gate DB error must fail CLOSED — плашка не создаётся (sendMessage=%d)", n)
+	// Отказ-сообщение отправить можно, плашку и бан — нет: инвариант
+	// fail-closed именно в отсутствии исполнения.
+	if n := fc.callCount("banChatMember"); n != 0 {
+		t.Fatalf("DB failure must not ban (banChatMember=%d)", n)
+	}
+	for _, body := range fc.callBodies("sendMessage") {
+		if strings.Contains(body, "Репорт:") {
+			t.Fatalf("DB failure must fail CLOSED — плашка не создаётся:\n%s", body)
+		}
 	}
 }
 
@@ -819,7 +831,7 @@ func TestSpamReportTrustGateFailClosed(t *testing.T) {
 func TestSpamReportBelowTrustRefused(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
-	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 42})); err != nil {
+	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 777})); err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(fc.callBodies("sendMessage"), "\n")
