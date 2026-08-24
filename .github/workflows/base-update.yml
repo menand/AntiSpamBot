@@ -1,9 +1,10 @@
 name: Base image update check
 
 # Часовой дозор базовых образов прод-контейнера. Каждый час сверяет дайджесты
-# golang:1.26-alpine и alpine:3.24 на Docker Hub с дайджестами, запечёнными в
-# последний ghcr.io/menand/antispambot:latest (labels base.digest.*, их пишет
-# ci.yml при сборке). Разошлись — вышел новый патч Go/Alpine (часто security):
+# баз из Dockerfile (golang:X.Y-alpine, alpine:Z.W) на Docker Hub с дайджестами,
+# запечёнными в последний ghcr.io/menand/antispambot:latest (labels
+# base.digest.*, их пишет ci.yml при сборке). Разошлись — вышел новый патч
+# Go/Alpine (часто security):
 # триггерим пересборку через workflow_dispatch ci.yml (rebuild_image=true);
 # тесты там прогоняются, VDS подхватит новый образ сам (auto-deploy рестартует
 # только при смене image ID). Совпали — ничего не делаем, бесплатный no-op.
@@ -25,6 +26,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # Теги баз читаются из Dockerfile — нужен checkout (хардкод здесь пережил
+      # бамп 1.26→1.27 и месяц следил бы за устаревшим тегом).
+      - uses: actions/checkout@v7
+
       - uses: docker/setup-buildx-action@v4
 
       # Инспекция ghcr работает и без логина, ПКА пакет публичный; логин
@@ -39,8 +44,10 @@ jobs:
       - name: Current upstream base digests
         id: current
         run: |
-          echo "golang=$(docker buildx imagetools inspect golang:1.26-alpine | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
-          echo "alpine=$(docker buildx imagetools inspect alpine:3.24 | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          GOLANG=$(awk '/^FROM golang/{print $2; exit}' Dockerfile)
+          ALPINE=$(awk '/^FROM alpine/{print $2; exit}' Dockerfile)
+          echo "golang=$(docker buildx imagetools inspect "$GOLANG" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          echo "alpine=$(docker buildx imagetools inspect "$ALPINE" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
 
       - name: Base digests baked into the published image
         id: baked
