@@ -14,11 +14,12 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// «Восстанавливающие» команды модерации: /unban, /unmute, /whitelist. Две
-// формы у каждой: с целью (@username / text_mention / реплай — резолв тот же,
-// что у /kick) — действие сразу; без цели — публичная плашка «10 последних» с
-// кнопками выбора. Весь стейт выбора живёт в callback data (mc:<a>:<userID>) —
-// pending-структур и TTL нет, рестарты безразличны, жать может любой админ.
+// «Восстанавливающие» команды модерации: /unban, /fullunban, /unmute,
+// /whitelist. Две формы у каждой: с целью (@username / text_mention / реплай —
+// резолв тот же, что у /kick) — действие сразу; без цели — публичная плашка
+// «10 последних» с кнопками выбора. Весь стейт выбора живёт в callback data
+// (mc:<a>:<userID>) — pending-структур и TTL нет, рестарты безразличны, жать
+// может любой админ.
 
 // unmodListLimit — сколько юзеров показывает плашка выбора.
 const unmodListLimit = 10
@@ -36,6 +37,11 @@ var unmodActions = map[string]unmodAction{
 	"u": {kinds: []storage.EventKind{storage.EventBan, storage.EventSpamBan},
 		title: "🚫 Последние забаненные",
 		empty: "Банов не помню — некого разбанивать."},
+	// Полный разбан: тот же список источников, что у «u», но действие
+	// снимает баны во ВСЕХ чатах бота и чистит глобальную базу спамеров.
+	"f": {kinds: []storage.EventKind{storage.EventBan, storage.EventSpamBan},
+		title: "🌍 Последние забаненные (полный разбан)",
+		empty: "Банов не помню — некого полностью разбанивать."},
 	"m": {kinds: []storage.EventKind{storage.EventMute},
 		title: "🔇 Последние замьюченные",
 		empty: "Мьютов не помню — некого размьючивать."},
@@ -44,11 +50,18 @@ var unmodActions = map[string]unmodAction{
 	"w": {kinds: []storage.EventKind{storage.EventKick, storage.EventBan},
 		reasons: []string{storage.ReasonCaptcha, storage.ReasonNoReply},
 		title:   "🧩 Последние провалившие капчу",
-		empty:   "Провалов капчи не помню — некого добавлять в доверенные."},
+		empty:   "Провалов капчи не помню — некого добавлять в доверенных."},
 }
 
 func (b *Bot) handleUnbanCommand(ctx *th.Context, message telego.Message) error {
 	return b.handleUnmodCommand(ctx, message, "u")
+}
+
+// handleFullunbanCommand — /fullunban: снять баны юзера во ВСЕХ чатах бота,
+// вычеркнуть его из глобальной базы спамеров и сбросить попытки капчи везде.
+// Форма и гейты те же, что у остальных восстанавливающих команд.
+func (b *Bot) handleFullunbanCommand(ctx *th.Context, message telego.Message) error {
+	return b.handleUnmodCommand(ctx, message, "f")
 }
 
 func (b *Bot) handleUnmuteCommand(ctx *th.Context, message telego.Message) error {
@@ -200,6 +213,29 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 			b.log.Warn("unban: reset attempts", "err", err, "chat", chatID, "user", targetID)
 		}
 		return "♻️ " + mention + " разбанен — может зайти заново.", nil
+	case "f":
+		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
+			return "", err
+		}
+		// removed — был ли юзер в глобальной базе спамеров: для честного
+		// текста итога (наш unban forgiveness-хук не проходит).
+		removed, derr := b.db.DeleteSpamBanned(b.runCtx, targetID)
+		if derr != nil {
+			b.log.Warn("fullunban: delete spam banned", "err", derr, "user", targetID)
+		}
+		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
+			b.log.Warn("fullunban: reset attempts", "err", err, "chat", chatID, "user", targetID)
+		}
+		// Остальные чаты и их attempts — в фоне: обход реестра с ретраями
+		// не должен висеть на хендлере/кнопке (прецедент spamVerdictFanout).
+		b.goSafe("fullunbanFanout", func() {
+			b.fullUnbanEverywhere(chatID, targetID)
+		})
+		text := "🌍 " + mention + " полностью разбанен во всех моих чатах"
+		if removed {
+			text += " и вычеркнут из базы спамеров"
+		}
+		return text + ".", nil
 	case "m":
 		// Снятие мьюта = вернуть дефолтные права чата — ровно то, что release
 		// делает после пройденной капчи.
@@ -224,7 +260,29 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 	return "", fmt.Errorf("unknown unmod action %q", action)
 }
 
-// handleModChoiceCallback — кнопки плашек /unban|/unmute|/whitelist:
+// fullUnbanEverywhere снимает бан и счётчик попыток во всех остальных чатах
+// реестра. Unban идемпотентен (OnlyIfBanned), ошибка одного чата (обычно нет
+// прав) — Warn и дальше. Доверенные юзеры исключением не служат: разбан
+// никому не вредит.
+func (b *Bot) fullUnbanEverywhere(originChatID, userID int64) {
+	chats, err := b.serviceableGroupChatsExcept(originChatID)
+	if err != nil {
+		b.log.Warn("fullunban: list chats", "err", err)
+		return
+	}
+	for _, c := range chats {
+		if err := b.unban(b.runCtx, c.ChatID, userID); err != nil {
+			b.log.Warn("fullunban: cross-chat unban", "err", err, "chat", c.ChatID, "user", userID)
+			continue
+		}
+		if err := b.db.ResetAttempts(b.runCtx, c.ChatID, userID); err != nil {
+			b.log.Warn("fullunban: reset attempts", "err", err, "chat", c.ChatID, "user", userID)
+		}
+		b.log.Info("fullunban: cross-chat unban", "chat", c.ChatID, "user", userID)
+	}
+}
+
+// handleModChoiceCallback — кнопки плашек /unban|/fullunban|/unmute|/whitelist:
 // «mc:<a>:<userID>» — применить действие, «mc:x» — закрыть плашку.
 func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuery) error {
 	if query.Message == nil {

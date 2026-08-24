@@ -299,6 +299,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))
 	bh.HandleMessage(b.handleSpamCommand, th.CommandEqual("spam"))
 	bh.HandleMessage(b.handleUnbanCommand, th.CommandEqual("unban"))
+	bh.HandleMessage(b.handleFullunbanCommand, th.CommandEqual("fullunban"))
 	bh.HandleMessage(b.handleUnmuteCommand, th.CommandEqual("unmute"))
 	bh.HandleMessage(b.handleWhitelistCommand, th.CommandEqual("whitelist"))
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatsnew"))
