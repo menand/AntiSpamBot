@@ -212,6 +212,19 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.Stage); err != nil {
 		b.log.Warn("delete pending reply on satisfy", "err", err, "chat", chatID, "user", userID)
 	}
+	// Стадия 1: приветствие остаётся в чате, но кнопка «Впустить» больше
+	// неактуальна — снимаем клавиатуру. Строку greetings НЕ удаляем: она
+	// нужна cleanupTargetTraces для удаления приветствия при спам-бане.
+	if p.Stage == 1 {
+		if msgID, ok, err := b.db.GetGreetingMsg(b.runCtx, chatID, userID); err == nil && ok {
+			if _, err := b.api.EditMessageReplyMarkup(b.runCtx, &telego.EditMessageReplyMarkupParams{
+				ChatID:    tu.ID(chatID),
+				MessageID: msgID,
+			}); err != nil {
+				b.log.Debug("remove reply-approve button", "err", err, "chat", chatID, "msg", msgID)
+			}
+		}
+	}
 	// Поздний ответ (стадии 2+): исходное приветствие уже удалено при смене
 	// стадии, живой якорь — напоминание. Прошёл — сносим и его: пинать
 	// ответившего больше незачем. Ответивший на первой стадии сохраняет

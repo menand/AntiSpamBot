@@ -565,6 +565,23 @@ func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bo
 	return msgID, true, nil
 }
 
+// GetGreetingMsg возвращает message_id приветствия БЕЗ удаления строки.
+// Нужен, чтобы снять клавиатуру после ответа юзера, сохранив запись для
+// будущей очистки (cleanupTargetTraces при спам-бане).
+func (d *DB) GetGreetingMsg(ctx context.Context, chatID, userID int64) (int, bool, error) {
+	var msgID int
+	err := d.sql.QueryRowContext(ctx,
+		`SELECT message_id FROM greetings WHERE chat_id = ? AND user_id = ?`,
+		chatID, userID).Scan(&msgID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get greeting: %w", err)
+	}
+	return msgID, true, nil
+}
+
 // GreetingUserByMsg находит юзера по message_id его приветствия — резолв
 // цели для /kick|/ban реплаем на «Добро пожаловать». (0, false, nil) — нет.
 func (d *DB) GreetingUserByMsg(ctx context.Context, chatID int64, messageID int) (int64, bool, error) {
