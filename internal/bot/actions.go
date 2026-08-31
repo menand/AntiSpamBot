@@ -83,7 +83,7 @@ func isNotModified(err error) bool {
 
 // isUserNotParticipant матчит «USER_NOT_PARTICIPANT»: адресат уже покинул чат
 // (типично — ушёл в окне между restrict и доставкой эфемерной капчи, а в
-// масс-джойн эфемерка с WithReceiverUserID требует участника). Ретраить такой
+// масс-джойн эфемерка с EphemeralMessageParameters требует участника). Ретраить такой
 // 400 бессмысленно — это не транзиентная ошибка, юзер физически вне чата;
 // и это не провал капчи (kick событие не пишем), а честный EventLeft.
 func isUserNotParticipant(err error) bool {

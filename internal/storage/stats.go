@@ -62,11 +62,12 @@ const (
 // Причины киков/банов (events.reason). Префиксные форматы несут ID для
 // рендера имён в статистике/уведомлениях; парсит их humanReason в internal/bot.
 const (
-	ReasonCaptcha    = "captcha" // не прошёл капчу (неверный ответ или таймаут)
-	ReasonNoReply    = "noreply" // не ответил на приветствие (режим «требовать ответа»)
-	ReasonGlobal     = "global"  // мгновенный бан: юзер в глобальной базе спамеров
-	ReasonModPrefix  = "mod:"    // + adminID: команда /kick|/ban админа
-	ReasonVotePrefix = "vote:"   // + id,id,...: вердикт голосования (голоса «за»)
+	ReasonCaptcha      = "captcha"        // не прошёл капчу (неверный ответ или таймаут)
+	ReasonNoReply      = "noreply"        // не ответил на приветствие (режим «требовать ответа»)
+	ReasonGlobal       = "global"         // мгновенный бан: юзер в глобальной базе спамеров
+	ReasonModPrefix    = "mod:"           // + adminID: команда /kick|/ban админа
+	ReasonVotePrefix   = "vote:"          // + id,id,...: вердикт голосования (голоса «за»)
+	ReasonReplyApprove = "reply_approve:" // + adminID: админ впустил вручную через кнопку на приветствии
 )
 
 // RecordEvent пишет событие; reason — причина для kick/ban/spamban (см.

@@ -541,7 +541,7 @@ func (b *Bot) replyTo(ctx *th.Context, message telego.Message, text string) {
 		params = params.WithMessageThreadID(message.MessageThreadID)
 	}
 	if recv := b.modReceiver(message.Chat.ID, message); recv != 0 {
-		params = params.WithReceiverUserID(recv)
+		params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(recv)})
 	}
 	if _, err := b.api.SendMessage(ctx, params); err != nil {
 		b.log.Debug("reply send", "err", err, "chat", message.Chat.ID)
@@ -555,7 +555,7 @@ func (b *Bot) sendPlain(chatID int64, threadID int, receiverID int64, text strin
 		params = params.WithMessageThreadID(threadID)
 	}
 	if receiverID != 0 {
-		params = params.WithReceiverUserID(receiverID)
+		params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(receiverID)})
 	}
 	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
 		b.log.Debug("plain send", "err", err, "chat", chatID)
@@ -568,7 +568,7 @@ func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string
 		params = params.WithMessageThreadID(threadID)
 	}
 	if receiverID != 0 {
-		params = params.WithReceiverUserID(receiverID)
+		params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(receiverID)})
 	}
 	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
 		b.log.Debug("html send", "err", err, "chat", chatID)

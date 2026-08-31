@@ -178,7 +178,7 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 2)
+		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 2, 0)
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
 			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 2,
 		}); err != nil {
@@ -207,7 +207,7 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1)
+		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 0)
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
 			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 1,
 		}); err != nil {
@@ -481,9 +481,9 @@ func TestCaptchaImageModeEphemeralAllStages(t *testing.T) {
 		k := statsKinds(t, db, testChatID, testUserID)
 		return k[storage.EventKick] == 1 && k[storage.EventBan] == 0
 	})
-	// Тело SendPhoto — multipart-поток, содержимое (receiver_user_id, клавиа-
+	// Тело SendPhoto — multipart-поток, содержимое (ephemeral_message_parameters, клавиа-
 	// тура) в fake не доезжает: сам факт эфемерности фотопути пиним косвенно —
-	// ветки WithReceiverUserID и «capok» стоят рядом с текстовыми и управляются
+	// ветки EphemeralMessageParameters и «capok» стоят рядом с текстовыми и управляются
 	// тем же флагом, а здесь проверяем наблюдаемое: три фото без текстового
 	// фолбэка и удаление строго по эфемерному id.
 	bodies := fc.callBodies("sendPhoto")

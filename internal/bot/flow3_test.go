@@ -49,7 +49,7 @@ func TestPunishReasonColumns(t *testing.T) {
 				// Серия исчерпана: финальная стадия с истёкшим дедлайном —
 				// цикл карает за молчание (noreply), как прежний waitReplyTimeout.
 				p := b.replies.Put(testChatID, testUserID,
-					time.Now().Add(-time.Millisecond), 0, captchaStages)
+					time.Now().Add(-time.Millisecond), 0, captchaStages, 0)
 				b.replyWaitLoop(testChatID, testUserID, p)
 			} else if err := b.onFail(ctx, putCaptcha(b, db, testChatID, testUserID, 77), "таймаут"); err != nil {
 				t.Fatal(err)

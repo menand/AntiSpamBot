@@ -43,7 +43,7 @@ func TestMigrationReleasesCaptchas(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			b.replies.Put(migratedOldID, 8, time.Now().Add(time.Minute), 0, 1)
+			b.replies.Put(migratedOldID, 8, time.Now().Add(time.Minute), 0, 1, 0)
 
 			if err := b.handleGroupMessage(nil, tc.message); err != nil {
 				t.Fatal(err)
@@ -325,7 +325,7 @@ func TestGreetingFailureDisarmsReplyWait(t *testing.T) {
 		GreetingEnabled:   true,
 		ReplyCheckEnabled: true,
 	}
-	p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1)
+	p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 0)
 	if err := db.PutPendingReply(ctx, storage.PendingReply{
 		ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 1,
 	}); err != nil {
@@ -333,7 +333,8 @@ func TestGreetingFailureDisarmsReplyWait(t *testing.T) {
 	}
 
 	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
-	if !b.maybeSendGreeting(ctx, s, testChatID, testUserID, 0) && s.ReplyCheckEnabled {
+	_, greetingSent := b.maybeSendGreeting(ctx, s, testChatID, testUserID, 0)
+	if !greetingSent && s.ReplyCheckEnabled {
 		if b.cancelReplyWait(testChatID, testUserID) {
 			if err := b.db.RecordEvent(ctx, testChatID, testUserID, storage.EventPass, time.Now(), ""); err != nil {
 				t.Fatal(err)

@@ -412,7 +412,7 @@ func putReplyWait(b *Bot, db *storage.DB, chatID, userID int64) *replyPending {
 	_ = db.PutPendingReply(context.Background(), storage.PendingReply{
 		ChatID: chatID, UserID: userID, ExpiresAt: expires, Stage: 1,
 	})
-	return b.replies.Put(chatID, userID, expires, 0, 1)
+	return b.replies.Put(chatID, userID, expires, 0, 1, 0)
 }
 
 func TestWaitReplyTimeoutLadder(t *testing.T) {
@@ -448,7 +448,7 @@ func TestWaitReplyTimeoutLadder(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond), 0, captchaStages)
+			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond), 0, captchaStages, 0)
 
 			b.replyWaitLoop(testChatID, testUserID, p)
 

@@ -213,9 +213,9 @@ func TestItalicInsideSurrogatePair(t *testing.T) {
 // атомарно перевзводится, устаревший указатель и уже изъятое ожидание — нет.
 func TestReplyStoreReplaceCAS(t *testing.T) {
 	s := newReplyStore()
-	p := s.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
+	p := s.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
 
-	next, ok := s.Replace(1, 2, p, time.Now().Add(2*time.Minute), 0, 2)
+	next, ok := s.Replace(1, 2, p, time.Now().Add(2*time.Minute), 0, 2, 0)
 	if !ok || next == nil || next.Stage != 2 {
 		t.Fatalf("CAS on live pending must advance (ok=%v next=%v)", ok, next)
 	}
@@ -223,14 +223,14 @@ func TestReplyStoreReplaceCAS(t *testing.T) {
 		t.Fatal("store must hold the new pending after successful Replace")
 	}
 
-	if _, ok := s.Replace(1, 2, p, time.Now(), 0, 3); ok {
+	if _, ok := s.Replace(1, 2, p, time.Now(), 0, 3, 0); ok {
 		t.Fatal("CAS against a stale pointer must lose")
 	}
 
 	if _, ok := s.Take(1, 2); !ok {
 		t.Fatal("Take after Replace must return the new pending")
 	}
-	if _, ok := s.Replace(1, 2, next, time.Now(), 0, 3); ok {
+	if _, ok := s.Replace(1, 2, next, time.Now(), 0, 3, 0); ok {
 		t.Fatal("CAS after Take must lose — ожидание уже разрешил другой")
 	}
 }
