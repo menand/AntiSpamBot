@@ -69,8 +69,8 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	}
 	// Кнопка «✅ Впустить (для админов)» — как у капчи: админ может
 	// впустить юзера вручную, если уверен что это живой человек.
-	// В эфемерном режиме кнопка не рисуется: админы сообщение не видят.
-	if s.ReplyCheckEnabled && !s.EphemeralEnabled {
+	// Приветствие всегда публичное (не эфемерное), кнопка видна админам.
+	if s.ReplyCheckEnabled {
 		kb := tu.InlineKeyboard(tu.InlineKeyboardRow(
 			tu.InlineKeyboardButton("✅ Впустить (для админов)").
 				WithCallbackData(fmt.Sprintf("rpok:%d", userID))))
