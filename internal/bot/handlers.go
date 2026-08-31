@@ -727,6 +727,77 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 	return nil
 }
 
+// handleReplyApproveCallback обрабатывает кнопку «✅ Впустить» на
+// приветствии-якоре reply-check (callback data "rpok:<userID>"). Админ чата
+// или владелец бота может впустить юзера вручную — эффект тот же, что у
+// ответа на приветствие.
+func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQuery) error {
+	if query.Message == nil {
+		return nil
+	}
+	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpok:"), 10, 64)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	chatID := query.Message.GetChat().ID
+
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	if !b.canManageChat(ctx, query.From.ID, chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Эта кнопка только для админов чата.").
+				WithShowAlert())
+		return nil
+	}
+
+	// Stale-guard: клик по кнопке на старом якоре (стадия уже перешла)
+	// не должен разрешать актуальное ожидание. GreetingMsgID == 0 после
+	// рестарта (строка не персистится) — пропускаем любой клик (fail-open
+	// для админского действия, как releaseOnAbort).
+	greetingMsgID := 0
+	if msg := query.Message.Message(); msg != nil {
+		greetingMsgID = msg.MessageID
+	}
+	p, ok := b.replies.TakeMatch(chatID, targetUserID, func(rp *replyPending) bool {
+		return rp.GreetingMsgID == 0 || rp.GreetingMsgID == greetingMsgID
+	})
+	if !ok {
+		text := "Ожидание уже не активно."
+		if _, still := b.replies.Get(chatID, targetUserID); still {
+			text = "Это сообщение устарело — дождитесь следующего."
+		}
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText(text).WithShowAlert())
+		return nil
+	}
+	p.Cancel()
+	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, targetUserID, p.Stage); err != nil {
+		b.log.Warn("delete pending reply on admin approve", "err", err,
+			"chat", chatID, "user", targetUserID)
+	}
+	b.deleteReplyAnchor(b.runCtx, chatID, targetUserID)
+	_ = b.api.AnswerCallbackQuery(ctx,
+		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
+
+	b.notifyModAction(chatID, targetUserID, storage.EventPass,
+		storage.ReasonReplyApprove+strconv.FormatInt(query.From.ID, 10))
+	b.log.Info("reply-wait approved by admin",
+		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
+
+	if err := b.db.RecordEvent(b.runCtx, chatID, targetUserID, storage.EventPass, time.Now(), ""); err != nil {
+		b.log.Warn("record pass event (reply admin approve)", "err", err)
+	}
+	return nil
+}
+
 // handleHelpCommand — /help: полный список ВСЕХ команд с пояснениями. В ЛС —
 // helpText с кнопкой «Назад» (она отредактирует сообщение в главное меню —
 // обычная editWithMenu-механика); в группе — прежняя всегда-эфемерная
@@ -1252,7 +1323,7 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 				p = p.WithMessageThreadID(threadID)
 			}
 			if ephemeral {
-				p = p.WithReceiverUserID(userID)
+				p = p.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(userID)})
 			}
 			var e error
 			msg, e = b.api.SendPhoto(ctx, p)
@@ -1267,7 +1338,7 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 			params = params.WithMessageThreadID(threadID)
 		}
 		if ephemeral {
-			params = params.WithReceiverUserID(userID)
+			params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(userID)})
 		}
 		err = retryTG(ctx, func() error {
 			var e error
@@ -1622,7 +1693,10 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	// приветствия: юзер уже может писать, и его первое сообщение должно
 	// застать ожидание активным (иначе гонка → кик написавшего).
 	if b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID) {
-		if !b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID) && s.ReplyCheckEnabled {
+		greetingID, greetingSent := b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID)
+		if greetingSent {
+			b.replies.SetGreetingMsgID(p.ChatID, p.UserID, greetingID)
+		} else if s.ReplyCheckEnabled {
 			// Приветствие-якорь с требованием не ушёл даже после ретраев
 			// (429-шторм масс-джойна, сеть): требование «напиши что-нибудь»
 			// юзер выполнить не может — он его никогда не видел. Снимаем

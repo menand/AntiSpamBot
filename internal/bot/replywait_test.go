@@ -14,7 +14,7 @@ import (
 
 func TestReplyStoreTakeSingleWinner(t *testing.T) {
 	s := newReplyStore()
-	s.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
+	s.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
 
 	// Гонка «сообщение vs таймаут vs выход»: Take выигрывает ровно один.
 	var wins int
@@ -39,8 +39,8 @@ func TestReplyStoreTakeSingleWinner(t *testing.T) {
 
 func TestReplyStorePutReplacesAndCancels(t *testing.T) {
 	s := newReplyStore()
-	old := s.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
-	s.Put(1, 2, time.Now().Add(2*time.Minute), 0, 1) // перезаход перевзводит
+	old := s.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
+	s.Put(1, 2, time.Now().Add(2*time.Minute), 0, 1, 0) // перезаход перевзводит
 
 	select {
 	case <-old.Done():
@@ -55,9 +55,9 @@ func TestReplyStorePutReplacesAndCancels(t *testing.T) {
 
 func TestReplyStoreTakeChat(t *testing.T) {
 	s := newReplyStore()
-	s.Put(1, 10, time.Now().Add(time.Minute), 0, 1)
-	s.Put(1, 11, time.Now().Add(time.Minute), 0, 1)
-	s.Put(2, 12, time.Now().Add(time.Minute), 0, 1)
+	s.Put(1, 10, time.Now().Add(time.Minute), 0, 1, 0)
+	s.Put(1, 11, time.Now().Add(time.Minute), 0, 1, 0)
+	s.Put(2, 12, time.Now().Add(time.Minute), 0, 1, 0)
 
 	got := s.TakeChat(1)
 	if len(got) != 2 {
@@ -87,7 +87,7 @@ func newTestBotWithDB(t *testing.T) (*Bot, *storage.DB) {
 func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 	ctx := context.Background()
 	b, db := newTestBotWithDB(t)
-	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
+	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
 	_ = db.PutPendingReply(ctx, storage.PendingReply{
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})
@@ -122,7 +122,7 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 func TestCancelReplyWaitSignalsCancelled(t *testing.T) {
 	ctx := context.Background()
 	b, db := newTestBotWithDB(t)
-	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1)
+	b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
 	_ = db.PutPendingReply(ctx, storage.PendingReply{
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})

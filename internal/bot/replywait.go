@@ -17,11 +17,12 @@ import (
 // Тот же паттерн гонок, что у captcha.Pending: единственный победитель
 // забирает его через Take, Cancel идемпотентен через sync.Once.
 type replyPending struct {
-	ChatID    int64
-	UserID    int64
-	ExpiresAt time.Time
-	ThreadID  int // топик форума для повторных отправок якоря; 0 = без топика
-	Stage     int // стадия серии напоминаний (1..captchaStages)
+	ChatID        int64
+	UserID        int64
+	ExpiresAt     time.Time
+	ThreadID      int // топик форума для повторных отправок якоря; 0 = без топика
+	Stage         int // стадия серии напоминаний (1..captchaStages)
+	GreetingMsgID int // message_id текущего якоря-приветствия (для stale-guard кнопки «Впустить»)
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -41,7 +42,7 @@ func newReplyStore() *replyStore {
 }
 
 // Put взводит ожидание; уже висящее для той же пары отменяется (перезаход).
-func (s *replyStore) Put(chatID, userID int64, expiresAt time.Time, threadID, stage int) *replyPending {
+func (s *replyStore) Put(chatID, userID int64, expiresAt time.Time, threadID, stage, greetingMsgID int) *replyPending {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := chatUser{chatID, userID}
@@ -52,7 +53,7 @@ func (s *replyStore) Put(chatID, userID int64, expiresAt time.Time, threadID, st
 		stage = 1
 	}
 	p := &replyPending{ChatID: chatID, UserID: userID, ExpiresAt: expiresAt,
-		ThreadID: threadID, Stage: stage,
+		ThreadID: threadID, Stage: stage, GreetingMsgID: greetingMsgID,
 		cancelCh: make(chan struct{})}
 	s.items[k] = p
 	return p
@@ -81,6 +82,17 @@ func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
 	return p, ok
 }
 
+// SetGreetingMsgID обновляет message_id текущего якоря-приветствия в
+// активном ожидании. Вызывается после sendGreetingAnchor, когда pending
+// уже взведён (arm стоит ДО отправки приветствия — см. onSuccess).
+func (s *replyStore) SetGreetingMsgID(chatID, userID int64, msgID int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p, ok := s.items[chatUser{chatID, userID}]; ok {
+		p.GreetingMsgID = msgID
+	}
+}
+
 // Replace — compare-and-swap перехода стадии: под тем же мьютексом меняет
 // старый pending на следующий ТОЛЬКО если текущий всё ещё old. Закрывает окно
 // между раздельными Take и Put: ответ юзера, проскочивший между ними, раньше
@@ -88,7 +100,7 @@ func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
 // наказывать молчанием написавшего. false = ожидание уже разрешил другой
 // (изъятие состоялось), перевзводить нечего.
 func (s *replyStore) Replace(chatID, userID int64, old *replyPending,
-	expiresAt time.Time, threadID, stage int) (*replyPending, bool) {
+	expiresAt time.Time, threadID, stage, greetingMsgID int) (*replyPending, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := chatUser{chatID, userID}
@@ -99,10 +111,25 @@ func (s *replyStore) Replace(chatID, userID int64, old *replyPending,
 		stage = 1
 	}
 	next := &replyPending{ChatID: chatID, UserID: userID, ExpiresAt: expiresAt,
-		ThreadID: threadID, Stage: stage,
+		ThreadID: threadID, Stage: stage, GreetingMsgID: greetingMsgID,
 		cancelCh: make(chan struct{})}
 	s.items[k] = next
 	return next, true
+}
+
+// TakeMatch изымает ожидание только при подтверждённой match идентичности
+// (клик по той же клавиатуре) — проверка под тем же мьютексом, что и
+// изъятие. Не совпало (или пусто) — store не трогается, ok=false.
+func (s *replyStore) TakeMatch(chatID, userID int64, match func(p *replyPending) bool) (*replyPending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := chatUser{chatID, userID}
+	p, ok := s.items[k]
+	if !ok || !match(p) {
+		return nil, false
+	}
+	delete(s.items, k)
+	return p, true
 }
 
 // TakeChat забирает все ожидания чата (бот покинул чат).
@@ -131,7 +158,7 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 	}
 	interval := b.effectiveStageInterval(s)
 	deadline := time.Now().Add(interval)
-	p := b.replies.Put(chatID, userID, deadline, threadID, 1)
+	p := b.replies.Put(chatID, userID, deadline, threadID, 1, 0)
 	if err := b.db.PutPendingReply(b.runCtx, storage.PendingReply{
 		ChatID: chatID, UserID: userID, ExpiresAt: deadline,
 		Stage: 1, ThreadID: threadID,
@@ -331,7 +358,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			return
 		}
 
-		next, advanced := b.replies.Replace(chatID, userID, p, nextExpires, p.ThreadID, p.Stage+1)
+		next, advanced := b.replies.Replace(chatID, userID, p, nextExpires, p.ThreadID, p.Stage+1, msgID)
 		if !advanced {
 			// Юзер ответил (или ожидание снято), пока напоминание уходило:
 			// пасс уже записан satisfier'ом, а только что отправленное
@@ -419,7 +446,7 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 					"chat", row.ChatID, "user", row.UserID)
 			}
 		}
-		p := b.replies.Put(row.ChatID, row.UserID, expires, row.ThreadID, stage)
+		p := b.replies.Put(row.ChatID, row.UserID, expires, row.ThreadID, stage, 0)
 		b.goSafe("replyWaitLoop", func() { b.replyWaitLoop(row.ChatID, row.UserID, p) })
 		restored++
 	}

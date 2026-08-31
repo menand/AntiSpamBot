@@ -32,13 +32,13 @@ type greetInputState struct {
 	armedAt time.Time
 }
 
-// maybeSendGreeting шлёт приветствие (первая стадия серии) и сообщает, ушло
-// ли оно. Взвод reply-ожидания — НЕ здесь: onSuccess делает это сразу после
-// release, до этого сетевого round-trip'а, иначе юзер успел бы написать в окне
-// release→arm и был бы кикнут за молчание, хотя ответил.
-func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) bool {
-	_, sent := b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
-	return sent
+// maybeSendGreeting шлёт приветствие (первая стадия серии) и возвращает
+// message_id и доставку. Взвод reply-ожидания — НЕ здесь: onSuccess делает
+// это сразу после release, до этого сетевого round-trip'а, иначе юзер успел
+// бы написать в окне release→arm и был бы кикнут за молчание, хотя ответил.
+func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) (int, bool) {
+	msgID, sent := b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
+	return msgID, sent
 }
 
 // sendGreetingAnchor шлёт якорное сообщение стадии stage серии «ответь на
@@ -66,6 +66,15 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
+	}
+	// Кнопка «✅ Впустить (для админов)» — как у капчи: админ может
+	// впустить юзера вручную, если уверен что это живой человек.
+	// В эфемерном режиме кнопка не рисуется: админы сообщение не видят.
+	if s.ReplyCheckEnabled && !s.EphemeralEnabled {
+		kb := tu.InlineKeyboard(tu.InlineKeyboardRow(
+			tu.InlineKeyboardButton("✅ Впустить (для админов)").
+				WithCallbackData(fmt.Sprintf("rpok:%d", userID))))
+		params = params.WithReplyMarkup(kb)
 	}
 	// Ретраится той же лестницей, что отправка капчи: 429 прилетает ровно во
 	// время масс-джойна, а при включённом reply-check провал здесь означает

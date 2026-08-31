@@ -283,6 +283,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
 	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
+	bh.HandleCallbackQuery(b.handleReplyApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpok:"))
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
 	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))

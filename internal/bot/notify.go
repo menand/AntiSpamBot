@@ -143,6 +143,10 @@ func humanReasonWith(reason string, nameLookup func(ids []int64) map[int64]stora
 		return "не прошёл капчу"
 	case reason == storage.ReasonNoReply:
 		return "не ответил на приветствие"
+	case strings.HasPrefix(reason, storage.ReasonReplyApprove):
+		raw := strings.TrimPrefix(reason, storage.ReasonReplyApprove)
+		adminID, _ := strconv.ParseInt(raw, 10, 64)
+		return "одобрен админом " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)
 	case reason == storage.ReasonGlobal:
 		return "в глобальной базе спамеров"
 	case strings.HasPrefix(reason, storage.ReasonModPrefix):
