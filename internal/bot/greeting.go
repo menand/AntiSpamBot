@@ -67,13 +67,15 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
 	}
-	// Кнопка «✅ Впустить (для админов)» — как у капчи: админ может
-	// впустить юзера вручную, если уверен что это живой человек.
-	// Приветствие всегда публичное (не эфемерное), кнопка видна админам.
+	// Кнопки «✅ Впустить» и «🚫 Спам» — для админов: впустить вручную
+	// или пометить как спамера (с подтверждением → бан во всех чатах).
+	// Приветствие всегда публичное (не эфемерное), кнопки видны админам.
 	if s.ReplyCheckEnabled {
 		kb := tu.InlineKeyboard(tu.InlineKeyboardRow(
 			tu.InlineKeyboardButton("✅ Впустить (для админов)").
-				WithCallbackData(fmt.Sprintf("rpok:%d", userID))))
+				WithCallbackData(fmt.Sprintf("rpok:%d", userID)),
+			tu.InlineKeyboardButton("🚫 Спам (для админов)").
+				WithCallbackData(fmt.Sprintf("rpspam:%d", userID))))
 		params = params.WithReplyMarkup(kb)
 	}
 	// Ретраится той же лестницей, что отправка капчи: 429 прилетает ровно во

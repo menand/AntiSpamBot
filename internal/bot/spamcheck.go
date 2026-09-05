@@ -421,6 +421,8 @@ func (b *Bot) notifySpamVerdict(targets []int64, v storage.SpamVote, spam, banne
 
 	var sb strings.Builder
 	switch {
+	case v.TargetMsgID == 0 && v.InitiatorID != 0 && spam:
+		sb.WriteString("🚫 Вердикт: <b>решение админа</b>")
 	case v.TargetMsgID == 0 && spam:
 		sb.WriteString("⚖️ Вердикт: <b>спам-профиль</b>")
 	case v.TargetMsgID == 0:

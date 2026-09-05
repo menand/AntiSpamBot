@@ -798,6 +798,315 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 	return nil
 }
 
+// handleReplySpamCallback обрабатывает кнопку «🚫 Спам» на
+// приветствии-якоре reply-check (callback data "rpspam:<userID>") и
+// подтверждающие/отменяющие кнопки (rpspamc: / rpspamx:).
+// Админ может пометить юзера как спамера — с подтверждением, бан во всех чатах.
+func (b *Bot) handleReplySpamCallback(ctx *th.Context, query telego.CallbackQuery) error {
+	if query.Message == nil {
+		return nil
+	}
+	data := query.Data
+	switch {
+	case strings.HasPrefix(data, "rpspamc:"):
+		return b.replySpamConfirm(ctx, query)
+	case strings.HasPrefix(data, "rpspamx:"):
+		return b.replySpamCancel(ctx, query)
+	case strings.HasPrefix(data, "rpspam:"):
+		return b.replySpamFirstClick(ctx, query)
+	}
+	return nil
+}
+
+// replySpamFirstClick — первый клик «🚫 Спам»: показать подтверждение.
+func (b *Bot) replySpamFirstClick(ctx *th.Context, query telego.CallbackQuery) error {
+	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspam:"), 10, 64)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	chatID := query.Message.GetChat().ID
+
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	if !b.isGoldenVoice(chatID, query.From.ID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Эта кнопка только для админов чата.").
+				WithShowAlert())
+		return nil
+	}
+
+	// Stale-guard: проверяем что pending ещё активен и якорь актуален.
+	// Get (без изъятия) — не мешаем replyWaitLoop.
+	msg := query.Message.Message()
+	if msg == nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	if p, ok := b.replies.Get(chatID, targetUserID); !ok ||
+		(p.GreetingMsgID != 0 && p.GreetingMsgID != msg.MessageID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+
+	// Редактируем якорь: текст — предупреждение, клавиатура — подтверждение.
+	confirmText := "⚠️ Вы уверены, что это спамер?\n\n" +
+		"Бан будет <b>глобальным</b> и затронет все чаты, где бот является админом."
+	confirmKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
+		tu.InlineKeyboardButton("🚫 Да, это спам").
+			WithCallbackData(fmt.Sprintf("rpspamc:%d", targetUserID)),
+		tu.InlineKeyboardButton("⬅️ Отмена").
+			WithCallbackData(fmt.Sprintf("rpspamx:%d", targetUserID)),
+	}}}
+	if _, err := b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
+		ChatID:      tu.ID(chatID),
+		MessageID:   msg.MessageID,
+		Text:        confirmText,
+		ParseMode:   telego.ModeHTML,
+		ReplyMarkup: confirmKB,
+	}); err != nil {
+		b.log.Debug("edit spam confirmation", "err", err, "chat", chatID)
+	}
+	return nil
+}
+
+// replySpamConfirm — подтверждение «Да, это спам»: бан юзера во всех чатах.
+// Паттерн как у execGoldenSpamReport: pending НЕ берём до executeSpamBan —
+// cancelReplyWait внутри него разберётся. При провале бана записываем
+// компенсирующий pass, иначе user застревает в «В процессе» навсегда.
+func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) error {
+	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspamc:"), 10, 64)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	chatID := query.Message.GetChat().ID
+
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	if !b.isGoldenVoice(chatID, query.From.ID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Эта кнопка только для админов чата.").
+				WithShowAlert())
+		return nil
+	}
+
+	// Stale-guard: Get (без изъятия) — pending НЕ берём до executeSpamBan.
+	msg := query.Message.Message()
+	greetingMsgID := 0
+	if msg != nil {
+		greetingMsgID = msg.MessageID
+	}
+	if p, ok := b.replies.Get(chatID, targetUserID); !ok ||
+		(p.GreetingMsgID != 0 && p.GreetingMsgID != greetingMsgID) {
+		text := "Ожидание уже не активно."
+		if _, still := b.replies.Get(chatID, targetUserID); still {
+			text = "Это сообщение устарело — дождитесь следующего."
+		}
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText(text).WithShowAlert())
+		return nil
+	}
+
+	role := "админ"
+	if b.isOwner(query.From.ID) {
+		role = "владелец"
+	}
+	why := role + " " + userLabel(query.From)
+	reason := storage.ReasonReplySpam + strconv.FormatInt(query.From.ID, 10)
+
+	b.log.Info("reply-spam confirmed by admin",
+		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
+
+	// Сингл-лайн-замок через синтетическую запись: параллельный репорт не
+	// дублирует spamban/уведомления.
+	v := storage.SpamVote{
+		ChatID:      chatID,
+		BotMsgID:    0,
+		TargetMsgID: 0,
+		AuthorID:    targetUserID,
+		InitiatorID: query.From.ID,
+		Prob:        100,
+		CreatedAt:   time.Now(),
+	}
+	inserted, err := b.db.PutSpamVoteOnce(b.runCtx, v)
+	if err != nil {
+		b.log.Warn("reply-spam: claim", "err", err, "chat", chatID, "target", targetUserID)
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		b.sendPlain(chatID, 0, 0,
+			"Не получилось сохранить решение — попробуй ещё раз.")
+		return nil
+	}
+	if !inserted {
+		b.log.Info("reply-spam lost race", "chat", chatID, "target", targetUserID)
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		if msg != nil {
+			b.sendPlain(chatID, threadOf(*msg), b.modReceiver(chatID, *msg),
+				"Этого спамера уже банят — дубль не нужен.")
+		}
+		return nil
+	}
+
+	// executeSpamBan вызовет cancelReplyWait внутри — pending будет взят
+	// и закрыт компенсирующим pass при успешном бане. При неуспешном —
+	// pending останется активным, пользователь сможет ответить.
+	banned := b.executeSpamBan(v, reason, why)
+
+	// Тост — после бана: честный по флагу banned.
+	if banned {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Пользователь забанен."))
+	} else {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Забанить не удалось — проверьте права бота.").
+				WithShowAlert())
+		// При провале бана: cancelReplyWait не нашёл pending (или не
+		// вызывался), пользователь мог остаться без active checks. Записываем
+		// компенсирующий pass и сносим якорь — иначе stats навсегда
+		// покажут «В процессе» (прецедент onSuccess/disarmed reply wait).
+		if _, ok := b.replies.Get(chatID, targetUserID); ok {
+			// Pending ещё жив (ban не дошёл до cancelReplyWait) —
+			// берём и закрываем. RecordEvent + deleteReplyAnchor —
+			// только если Take胜利: иначе replyWaitSatisfied уже
+			// записал pass и закрыл pending.
+			if taken, ok := b.replies.Take(chatID, targetUserID); ok {
+				taken.Cancel()
+				if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, targetUserID, taken.Stage); err != nil {
+					b.log.Warn("delete pending reply on ban failure", "err", err,
+						"chat", chatID, "user", targetUserID)
+				}
+				if err := b.db.RecordEvent(b.runCtx, chatID, targetUserID,
+					storage.EventPass, time.Now(), ""); err != nil {
+					b.log.Warn("record pass event (reply-spam ban failed)", "err", err)
+				}
+				b.deleteReplyAnchor(b.runCtx, chatID, targetUserID)
+			}
+		}
+	}
+
+	if _, terr := b.db.TakeSpamVote(b.runCtx, chatID, v.BotMsgID); terr != nil {
+		b.log.Warn("reply-spam: release claim", "err", terr, "chat", chatID)
+	}
+
+	targets := b.spamNotifyTargets(b.runCtx)
+	b.goSafe("replySpamFanout", func() {
+		var alsoBanned []string
+		if banned {
+			alsoBanned = b.banEverywhere(chatID, targetUserID)
+		}
+		b.notifySpamVerdict(targets, v, true, banned, why, nil, alsoBanned)
+	})
+
+	threadID := 0
+	if msg != nil {
+		threadID = threadOf(*msg)
+	}
+	text := "🚫 " + b.mentionFor(query.From.ID) + " пометил(а) как спамера — " +
+		b.mentionFor(targetUserID) + " забанен с чисткой сообщений."
+	if !banned {
+		text = "🚫 Репорт принят, но забанить не удалось — проверьте права бота."
+	}
+	var receiverID int64
+	if msg != nil {
+		receiverID = b.modReceiver(chatID, *msg)
+	}
+	b.sendHTML(chatID, threadID, receiverID, text)
+	return nil
+}
+
+// replySpamCancel — отмена: восстановить оригинальное приветствие с кнопками.
+func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error {
+	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspamx:"), 10, 64)
+	if err != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+	chatID := query.Message.GetChat().ID
+
+	if !b.chatServiceable(chatID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	if !b.isGoldenVoice(chatID, query.From.ID) {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Эта кнопка только для админов чата.").
+				WithShowAlert())
+		return nil
+	}
+
+	msg := query.Message.Message()
+	if msg == nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
+
+	// Stale-guard: если pending уже закрыт — восстанавливать нечего.
+	if _, ok := b.replies.Get(chatID, targetUserID); !ok {
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).
+				WithText("Ожидание уже не активно.").
+				WithShowAlert())
+		return nil
+	}
+
+	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+
+	// Восстанавливаем оригинальный текст и клавиатуру.
+	settings := b.chatSettings(b.runCtx, chatID)
+	infos, ierr := b.db.GetUserInfos(b.runCtx, []int64{targetUserID})
+	if ierr != nil {
+		b.log.Warn("fetch user info for greeting restore", "err", ierr)
+	}
+	mention := mentionOrID(infos, targetUserID)
+	stage := 1
+	if p, ok := b.replies.Get(chatID, targetUserID); ok {
+		stage = p.Stage
+	}
+	greetingText := renderGreeting(settings.GreetingText.String, settings.GreetingEntities.String, mention)
+	greetingText += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(settings).Minutes())))
+
+	origKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
+		tu.InlineKeyboardButton("✅ Впустить (для админов)").
+			WithCallbackData(fmt.Sprintf("rpok:%d", targetUserID)),
+		tu.InlineKeyboardButton("🚫 Спам (для админов)").
+			WithCallbackData(fmt.Sprintf("rpspam:%d", targetUserID)),
+	}}}
+	if _, err := b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
+		ChatID:      tu.ID(chatID),
+		MessageID:   msg.MessageID,
+		Text:        greetingText,
+		ParseMode:   telego.ModeHTML,
+		ReplyMarkup: origKB,
+	}); err != nil && !isNotModified(err) {
+		b.log.Debug("restore greeting after spam cancel", "err", err, "chat", chatID)
+	}
+	return nil
+}
+
 // handleHelpCommand — /help: полный список ВСЕХ команд с пояснениями. В ЛС —
 // helpText с кнопкой «Назад» (она отредактирует сообщение в главное меню —
 // обычная editWithMenu-механика); в группе — прежняя всегда-эфемерная
