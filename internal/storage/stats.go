@@ -68,6 +68,7 @@ const (
 	ReasonModPrefix    = "mod:"           // + adminID: команда /kick|/ban админа
 	ReasonVotePrefix   = "vote:"          // + id,id,...: вердикт голосования (голоса «за»)
 	ReasonReplyApprove = "reply_approve:" // + adminID: админ впустил вручную через кнопку на приветствии
+	ReasonReplySpam    = "reply_spam:"    // + adminID: админ пометил как спамера через кнопку на приветствии
 )
 
 // RecordEvent пишет событие; reason — причина для kick/ban/spamban (см.

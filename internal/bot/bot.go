@@ -284,6 +284,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
 	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
 	bh.HandleCallbackQuery(b.handleReplyApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpok:"))
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspam:"))
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamc:")) // rpspamc: ≠ rpspam:XX (prefix includes colon)
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamx:")) // rpspamx: ≠ rpspam:XX
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
 	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
 	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))

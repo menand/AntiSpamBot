@@ -147,6 +147,10 @@ func humanReasonWith(reason string, nameLookup func(ids []int64) map[int64]stora
 		raw := strings.TrimPrefix(reason, storage.ReasonReplyApprove)
 		adminID, _ := strconv.ParseInt(raw, 10, 64)
 		return "одобрен админом " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)
+	case strings.HasPrefix(reason, storage.ReasonReplySpam):
+		raw := strings.TrimPrefix(reason, storage.ReasonReplySpam)
+		adminID, _ := strconv.ParseInt(raw, 10, 64)
+		return "спам по решению админа " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)
 	case reason == storage.ReasonGlobal:
 		return "в глобальной базе спамеров"
 	case strings.HasPrefix(reason, storage.ReasonModPrefix):
@@ -180,6 +184,16 @@ func reasonUserIDs(lists ...[]storage.UserCount) []int64 {
 				}
 			case strings.HasPrefix(uc.LastReason, storage.ReasonVotePrefix):
 				out = append(out, parseVoteIDs(uc.LastReason)...)
+			case strings.HasPrefix(uc.LastReason, storage.ReasonReplyApprove):
+				raw := strings.TrimPrefix(uc.LastReason, storage.ReasonReplyApprove)
+				if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
+					out = append(out, id)
+				}
+			case strings.HasPrefix(uc.LastReason, storage.ReasonReplySpam):
+				raw := strings.TrimPrefix(uc.LastReason, storage.ReasonReplySpam)
+				if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
+					out = append(out, id)
+				}
 			}
 		}
 	}
