@@ -18,7 +18,7 @@ const goldenAdminJSON = `{"status":"administrator","user":{"id":9,"is_bot":false
 // assertGoldenBanned — общие проверки мгновенного исполнения репорта:
 // локальный banRevoke, событие spamban, глобальная база, без плашки,
 // публичное подтверждение и ни слова про гейт доверия.
-func assertGoldenBanned(t *testing.T, b *Bot, db *storage.DB, fc *fakeCaller) {
+func assertGoldenBanned(t *testing.T, b *Bot, db *storage.DB, fc *fakeCaller) { //nolint:unparam // b is kept for consistency with other assert helpers
 	t.Helper()
 	ctx := context.Background()
 

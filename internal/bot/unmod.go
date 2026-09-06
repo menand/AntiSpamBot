@@ -172,7 +172,7 @@ func unmodListView(title, action string, recent []storage.RecentUser, infos map[
 	sb.WriteString("\nВыбери кнопкой, к кому применить.")
 
 	var rows [][]telego.InlineKeyboardButton
-	var row []telego.InlineKeyboardButton
+	var row []telego.InlineKeyboardButton //nolint:prealloc // row is built incrementally with dynamic grouping
 	for i, r := range recent {
 		row = append(row, tu.InlineKeyboardButton(strconv.Itoa(i+1)).
 			WithCallbackData(fmt.Sprintf("mc:%s:%d", action, r.UserID)))

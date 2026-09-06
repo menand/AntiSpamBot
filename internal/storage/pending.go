@@ -136,7 +136,7 @@ func (d *DB) LoadAllPendingReplies(ctx context.Context) ([]PendingReply, error) 
 	if err != nil {
 		return nil, fmt.Errorf("load pending replies: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []PendingReply
 	for rows.Next() {
 		var r PendingReply
@@ -156,7 +156,7 @@ func (d *DB) LoadAllPending(ctx context.Context) ([]PendingRow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load pending: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 
 	var out []PendingRow
 	for rows.Next() {

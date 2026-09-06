@@ -35,7 +35,7 @@ func TestPunishReasonColumns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			b, db, _ := newFlowBot(t)
-			for i := 0; i < tc.preAttempts; i++ {
+			for range tc.preAttempts {
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)
 				}
@@ -601,7 +601,7 @@ func TestSpamVoteMarginResolutionHandlerLevel(t *testing.T) {
 		t.Fatal(err)
 	}
 	for voter := int64(101); voter <= 103; voter++ { // доверие: тотал > дефолтных 5
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			if _, err := db.RecordMessage(ctx, testChatID, voter, time.Now()); err != nil {
 				t.Fatal(err)
 			}

@@ -452,7 +452,7 @@ func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.Pendi
 func (b *Bot) healthbeat(ctx context.Context) {
 	path := filepath.Join(filepath.Dir(b.cfg.DBPath), ".heartbeat")
 	for {
-		if err := os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600); err != nil {
 			b.log.Warn("healthbeat write", "err", err, "path", path)
 		}
 		select {

@@ -270,7 +270,7 @@ func TestLegacyCaptchaTimeoutConverted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer db.Close()                                    //nolint:errcheck // test cleanup
 	want := map[int64]int64{-1: 1, -2: 1, -3: 2, -4: 0} // 0 = остался NULL
 	for chatID, w := range want {
 		s, err := db.GetChatSettings(ctx, chatID)
@@ -298,7 +298,7 @@ func TestLegacyCaptchaTimeoutConverted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer db.Close() //nolint:errcheck // test cleanup
 	s, _ := db.GetChatSettings(ctx, -1)
 	if !s.CaptchaIntervalMinutes.Valid || s.CaptchaIntervalMinutes.Int64 != 7 {
 		t.Errorf("re-open must not overwrite explicit interval: %+v", s.CaptchaIntervalMinutes)

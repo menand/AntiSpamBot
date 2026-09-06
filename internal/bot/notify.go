@@ -100,6 +100,9 @@ func (b *Bot) sendModCard(targets []int64, chatID, targetID int64, kind storage.
 		action, whoLabel, whyLabel = "✅ Капча пройдена", "Кто", "Ответ"
 	case storage.EventBan, storage.EventSpamBan:
 		action = "🚫 Бан"
+	case storage.EventJoin, storage.EventKick, storage.EventLeft,
+		storage.EventAbort, storage.EventMute, storage.EventSuspect:
+		// дефолтное поведение — "👢 Кик"
 	}
 	why := b.humanReason(reason)
 	if len(detail) > 0 && detail[0] != "" {

@@ -70,7 +70,7 @@ func main() {
 	log.Info("starting bot", "username", b.Username())
 	if err := b.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Error("bot run", "err", err)
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // exitAfterDefer: intentional os.Exit, defer runs on normal path
 	}
 	log.Info("bot stopped")
 }

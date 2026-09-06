@@ -89,8 +89,8 @@ func TestBuildAnnounceTextBudget(t *testing.T) {
 	}
 
 	// Огромный релиз: усечение до бюджета, хвост на месте, итог < 4096.
-	var items []string
-	for i := 0; i < 200; i++ {
+	items := make([]string, 0, 200)
+	for i := range 200 {
 		items = append(items, strings.Repeat("пункт ", 30)+strconv.Itoa(i))
 	}
 	big := []release{{Version: "v2.0.0", Items: items}}

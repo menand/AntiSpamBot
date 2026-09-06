@@ -107,7 +107,7 @@ func TestSpamVoteSweepAndReconcile(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			for i := 0; i < tc.yesBallots; i++ {
+			for i := range tc.yesBallots {
 				if _, err := db.UpsertBallot(ctx, testChatID, 7, int64(100+i), true); err != nil {
 					t.Fatal(err)
 				}
@@ -393,7 +393,7 @@ func TestSpamVoteCallbackStrictParser(t *testing.T) {
 	}
 	// Валидные payload-ы по-прежнему голосуют. Голосу даём пер-чатовый
 	// тотал выше порога доверия (default 5) — гейт бюллетеня.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if _, err := db.RecordMessage(context.Background(), testChatID, 100,
 			time.Now()); err != nil {
 			t.Fatal(err)

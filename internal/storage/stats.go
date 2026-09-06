@@ -190,10 +190,10 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 		var kind string
 		var n, modN int
 		if err := rows.Scan(&kind, &n, &modN); err != nil {
-			rows.Close()
+			rows.Close() //nolint:errcheck,sqlclosecheck // cleanup, error intentionally ignored
 			return s, fmt.Errorf("scan event: %w", err)
 		}
-		switch EventKind(kind) {
+		switch EventKind(kind) { //nolint:exhaustive // EventMute/EventSuspect не влияют на stats
 		case EventJoin:
 			s.Joined = n
 		case EventPass:
@@ -212,7 +212,7 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 			s.Aborted = n
 		}
 	}
-	rows.Close()
+	rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	if err := rows.Err(); err != nil {
 		return s, fmt.Errorf("events rows: %w", err)
 	}

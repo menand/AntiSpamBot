@@ -1,4 +1,4 @@
-.PHONY: build run test vet tidy docker-up docker-down docker-logs clean
+.PHONY: build run test vet lint vuln tidy docker-up docker-down docker-logs clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
@@ -19,6 +19,12 @@ test:
 
 vet:
 	go vet $(JSON_TAGS) ./...
+
+lint:
+	golangci-lint run $(JSON_TAGS)
+
+vuln:
+	govulncheck ./...
 
 tidy:
 	go mod tidy

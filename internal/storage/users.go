@@ -142,12 +142,12 @@ func (d *DB) GetUserInfos(ctx context.Context, userIDs []int64) (map[int64]UserI
 	for i, id := range userIDs {
 		args[i] = id
 	}
-	query := fmt.Sprintf(`SELECT user_id, first_name, last_name, username FROM user_info WHERE user_id IN (%s)`, placeholders(len(userIDs)))
+	query := fmt.Sprintf(`SELECT user_id, first_name, last_name, username FROM user_info WHERE user_id IN (%s)`, placeholders(len(userIDs))) //nolint:gosec // placeholder-based query, not user input
 	rows, err := d.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query user_info: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	for rows.Next() {
 		var info UserInfo
 		var fn, ln, un sql.NullString
@@ -194,7 +194,7 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 	if err != nil {
 		return nil, fmt.Errorf("query top failers: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	return scanUserCountsWithReason(rows)
 }
 
@@ -221,7 +221,7 @@ func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Tim
 	if err != nil {
 		return nil, fmt.Errorf("query passed users: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []UserCount
 	for rows.Next() {
 		var uc UserCount
@@ -266,7 +266,7 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 	if err != nil {
 		return nil, fmt.Errorf("query event users: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	return scanUserCountsWithReason(rows)
 }
 
@@ -286,7 +286,7 @@ func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time
 	if err != nil {
 		return nil, fmt.Errorf("query top writers: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	return scanUserCounts(rows)
 }
 
@@ -332,7 +332,7 @@ func (d *DB) RecentEventUsers(ctx context.Context, chatID int64, limit int, kind
 	if len(kinds) == 0 {
 		return nil, nil
 	}
-	q := `SELECT user_id, MAX(at) AS last FROM events WHERE chat_id = ? AND kind IN (` +
+	q := `SELECT user_id, MAX(at) AS last FROM events WHERE chat_id = ? AND kind IN (` + //nolint:gosec // placeholder-based query
 		placeholders(len(kinds)) + `)`
 	args := []any{chatID}
 	for _, k := range kinds {
@@ -351,7 +351,7 @@ func (d *DB) RecentEventUsers(ctx context.Context, chatID int64, limit int, kind
 	if err != nil {
 		return nil, fmt.Errorf("recent event users: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []RecentUser
 	for rows.Next() {
 		var u RecentUser

@@ -61,7 +61,7 @@ const (
 // текстового канала (это убивает ботов, парсящих текст), а не сопротивляться
 // vision-моделям — жёсткий шум в первую очередь бьёт по людям.
 func RenderImage(tok Token) ([]byte, error) {
-	return renderImage(tok, rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())))
+	return renderImage(tok, rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))) //nolint:gosec // captcha, not security-critical
 }
 
 func renderImage(tok Token, rng *rand.Rand) ([]byte, error) {
@@ -91,7 +91,7 @@ func drawBackground(img *image.RGBA, rng *rand.Rand) {
 	light := func() float64 { return float64(215 + rng.IntN(31)) } // 215..245
 	tr, tg, tb := light(), light(), light()
 	br, bg, bb := light(), light(), light()
-	for y := 0; y < imgH; y++ {
+	for y := range imgH {
 		t := float64(y) / float64(imgH)
 		c := color.RGBA{
 			R: uint8(tr*(1-t) + br*t),
@@ -99,14 +99,14 @@ func drawBackground(img *image.RGBA, rng *rand.Rand) {
 			B: uint8(tb*(1-t) + bb*t),
 			A: 255,
 		}
-		for x := 0; x < imgW; x++ {
+		for x := range imgW {
 			img.SetRGBA(x, y, c)
 		}
 	}
-	for i := 0; i < 3+rng.IntN(3); i++ {
+	for range 3 + rng.IntN(3) {
 		cx, cy := rng.IntN(imgW), rng.IntN(imgH)
 		r := 40 + rng.IntN(50)
-		shade := uint8(200 + rng.IntN(40))
+		shade := uint8(200 + rng.IntN(40)) //nolint:gosec // bounded: max 240 < 255
 		fillCircle(img, cx, cy, r, color.NRGBA{R: shade, G: shade, B: shade, A: 60})
 	}
 }
@@ -145,9 +145,9 @@ func applyWave(img *image.RGBA, rng *rand.Rand) *image.RGBA {
 	period := 40 + rng.Float64()*40 // 40..80 px
 	phase := rng.Float64() * 2 * math.Pi
 	out := image.NewRGBA(img.Bounds())
-	for y := 0; y < imgH; y++ {
+	for y := range imgH {
 		dx := int(math.Round(amp * math.Sin(2*math.Pi*float64(y)/period+phase)))
-		for x := 0; x < imgW; x++ {
+		for x := range imgW {
 			sx := x + dx
 			if sx < 0 {
 				sx = 0
@@ -162,14 +162,14 @@ func applyWave(img *image.RGBA, rng *rand.Rand) *image.RGBA {
 
 // drawLines перечёркивает картинку 2–4 полупрозрачными тёмными штрихами.
 func drawLines(img *image.RGBA, rng *rand.Rand) {
-	for i := 0; i < 2+rng.IntN(3); i++ {
+	for range 2 + rng.IntN(3) {
 		x1, y1 := rng.Float64()*imgW, rng.Float64()*imgH
 		x2, y2 := rng.Float64()*imgW, rng.Float64()*imgH
-		shade := uint8(60 + rng.IntN(80))
+		shade := uint8(60 + rng.IntN(80)) //nolint:gosec // bounded: max 140 < 255
 		c := color.NRGBA{R: shade, G: shade, B: shade, A: 140}
 		radius := 1 + rng.IntN(2) // толщина штриха 2..4 px
 		steps := int(math.Hypot(x2-x1, y2-y1)) + 1
-		for s := 0; s <= steps; s++ {
+		for s := range steps + 1 { //nolint:intrange // s <= steps, not s < steps
 			t := float64(s) / float64(steps)
 			fillCircle(img, int(x1+(x2-x1)*t), int(y1+(y2-y1)*t), radius, c)
 		}
@@ -178,9 +178,9 @@ func drawLines(img *image.RGBA, rng *rand.Rand) {
 
 // addNoise перекрашивает ~2% пикселей в случайные оттенки серого.
 func addNoise(img *image.RGBA, rng *rand.Rand) {
-	for i := 0; i < imgW*imgH/50; i++ {
+	for range imgW * imgH / 50 {
 		x, y := rng.IntN(imgW), rng.IntN(imgH)
-		v := uint8(rng.IntN(256))
+		v := uint8(rng.IntN(256)) //nolint:gosec // bounded: max 255
 		img.SetRGBA(x, y, color.RGBA{R: v, G: v, B: v, A: 255})
 	}
 }

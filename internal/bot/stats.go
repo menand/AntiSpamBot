@@ -173,8 +173,10 @@ func periodLabel(p statsPeriod) string {
 		return "месяц"
 	case periodAll:
 		return "всё время"
+	case periodWeek:
+		return "неделю"
 	}
-	// periodWeek — и он же для неожиданных значений: parsePeriod гарантирует,
+	// Для неожиданных значений: parsePeriod гарантирует,
 	// что сырая строка из callback data сюда не доходит.
 	return "неделю"
 }

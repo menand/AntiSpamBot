@@ -69,7 +69,7 @@ func TestTopWritersAndFailers(t *testing.T) {
 	now := time.Now()
 	for i, n := range []int{15, 10, 7, 3, 1, 1} {
 		uid := int64(100 + i)
-		for j := 0; j < n; j++ {
+		for range n {
 			_, _ = db.RecordMessage(ctx, 1, uid, now)
 		}
 	}

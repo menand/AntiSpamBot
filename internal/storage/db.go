@@ -120,7 +120,7 @@ func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, 
 	if err != nil {
 		return false, fmt.Errorf("pragma table_info(%s): %w", table, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	for rows.Next() {
 		var cid int
 		var name, typ string

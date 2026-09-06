@@ -138,7 +138,7 @@ func htmlTagFor(e telego.MessageEntity) string {
 
 func openTag(e telego.MessageEntity) string {
 	if e.Type == telego.EntityTypeTextLink {
-		return fmt.Sprintf(`<a href="%s">`, html.EscapeString(e.URL))
+		return fmt.Sprintf(`<a href="%s">`, html.EscapeString(e.URL)) //nolint:gocritic // sprintfQuotedString: building HTML, not Go format
 	}
 	return "<" + htmlTagFor(e) + ">"
 }

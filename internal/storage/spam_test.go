@@ -87,7 +87,7 @@ func TestUserMessageTotal(t *testing.T) {
 	db := openTest(t)
 
 	now := time.Now()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := db.RecordMessage(ctx, -1, 42, now.Add(time.Duration(i)*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
@@ -111,10 +111,10 @@ func TestUserMessageTotalsByChat(t *testing.T) {
 
 	now := time.Now()
 	// 3 сообщения в чате -1, 2 в чате -2 — по-чатовые суммы, не общая.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		_, _ = db.RecordMessage(ctx, -1, 42, now.Add(time.Duration(i)*time.Minute))
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		_, _ = db.RecordMessage(ctx, -2, 42, now.Add(time.Duration(i)*time.Minute))
 	}
 	_, _ = db.RecordMessage(ctx, -1, 43, now) // чужие сообщения не попадают

@@ -667,7 +667,7 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "capok:"), 10, 64)
 	if err != nil {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-		return nil
+		return nil //nolint:nilerr // intentional fail-open: invalid callback data
 	}
 	chatID := query.Message.GetChat().ID
 
@@ -738,7 +738,7 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpok:"), 10, 64)
 	if err != nil {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-		return nil
+		return nil //nolint:nilerr // intentional fail-open: invalid callback data
 	}
 	chatID := query.Message.GetChat().ID
 
@@ -823,7 +823,7 @@ func (b *Bot) replySpamFirstClick(ctx *th.Context, query telego.CallbackQuery) e
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspam:"), 10, 64)
 	if err != nil {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-		return nil
+		return nil //nolint:nilerr // intentional fail-open: invalid callback data
 	}
 	chatID := query.Message.GetChat().ID
 
@@ -890,7 +890,7 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspamc:"), 10, 64)
 	if err != nil {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-		return nil
+		return nil //nolint:nilerr // intentional fail-open: invalid callback data
 	}
 	chatID := query.Message.GetChat().ID
 
@@ -1038,7 +1038,7 @@ func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspamx:"), 10, 64)
 	if err != nil {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-		return nil
+		return nil //nolint:nilerr // intentional fail-open: invalid callback data
 	}
 	chatID := query.Message.GetChat().ID
 
@@ -1319,7 +1319,7 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 
 	chatID := message.Chat.ID
 	user := *message.From
-	when := time.Unix(int64(message.Date), 0)
+	when := time.Unix(message.Date, 0)
 
 	b.rememberChat(b.runCtx, storage.ChatInfo{
 		ChatID:   chatID,
@@ -1781,7 +1781,7 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 		// бы с юзером навсегда).
 		if p.Stage >= captchaStages {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+			defer cancel() //nolint:gocritic // deferInLoop: intentional — each iteration has its own context for cleanup
 			if err := b.onFail(cleanupCtx, p, "таймаут"); err != nil {
 				b.log.Error("on fail timeout", "err", err, "chat", chatID, "user", userID)
 				return
