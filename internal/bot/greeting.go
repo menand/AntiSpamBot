@@ -71,11 +71,13 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	// или пометить как спамера (с подтверждением → бан во всех чатах).
 	// Приветствие всегда публичное (не эфемерное), кнопки видны админам.
 	if s.ReplyCheckEnabled {
-		kb := tu.InlineKeyboard(tu.InlineKeyboardRow(
-			tu.InlineKeyboardButton("✅ Впустить (для админов)").
-				WithCallbackData(fmt.Sprintf("rpok:%d", userID)),
-			tu.InlineKeyboardButton("🚫 Спам (для админов)").
-				WithCallbackData(fmt.Sprintf("rpspam:%d", userID))))
+		kb := tu.InlineKeyboard(
+			tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("✅ Впустить (для админов)").
+					WithCallbackData(fmt.Sprintf("rpok:%d", userID))),
+			tu.InlineKeyboardRow(
+				tu.InlineKeyboardButton("🚫 Спам (для админов)").
+					WithCallbackData(fmt.Sprintf("rpspam:%d", userID))))
 		params = params.WithReplyMarkup(kb)
 	}
 	// Ретраится той же лестницей, что отправка капчи: 429 прилетает ровно во

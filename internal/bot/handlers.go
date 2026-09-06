@@ -1089,12 +1089,12 @@ func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error
 	greetingText := renderGreeting(settings.GreetingText.String, settings.GreetingEntities.String, mention)
 	greetingText += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(settings).Minutes())))
 
-	origKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
-		tu.InlineKeyboardButton("✅ Впустить (для админов)").
-			WithCallbackData(fmt.Sprintf("rpok:%d", targetUserID)),
-		tu.InlineKeyboardButton("🚫 Спам (для админов)").
-			WithCallbackData(fmt.Sprintf("rpspam:%d", targetUserID)),
-	}}}
+	origKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{
+		{tu.InlineKeyboardButton("✅ Впустить (для админов)").
+			WithCallbackData(fmt.Sprintf("rpok:%d", targetUserID))},
+		{tu.InlineKeyboardButton("🚫 Спам (для админов)").
+			WithCallbackData(fmt.Sprintf("rpspam:%d", targetUserID))},
+	}}
 	if _, err := b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
 		ChatID:      tu.ID(chatID),
 		MessageID:   msg.MessageID,
