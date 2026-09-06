@@ -138,14 +138,14 @@ func (c *Client) Classify(ctx context.Context, system, facts string) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("marshal groq request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body)) //nolint:gosec // endpoint from env var, not user input
 	if err != nil {
 		return false, fmt.Errorf("build groq request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // endpoint from env var
 	if err != nil {
 		return false, fmt.Errorf("groq request: %w", err)
 	}

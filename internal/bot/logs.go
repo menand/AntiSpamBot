@@ -37,7 +37,7 @@ func (b *Bot) handleLogsCommand(ctx *th.Context, message telego.Message) error {
 			fmt.Sprintf("Не удалось открыть лог-файл (%s): %v", b.cfg.LogFile, err)))
 		return nil
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // cleanup, error intentionally ignored
 
 	info, err := file.Stat()
 	if err != nil {

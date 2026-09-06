@@ -188,7 +188,7 @@ func (d *DB) YoungSpamVotes(ctx context.Context, cutoff time.Time) ([]SpamVote, 
 	if err != nil {
 		return nil, fmt.Errorf("young spam votes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []SpamVote
 	for rows.Next() {
 		v, err := scanSpamVote(rows)
@@ -209,7 +209,7 @@ func (d *DB) ExpiredSpamVotes(ctx context.Context, olderThan time.Time) ([]SpamV
 	if err != nil {
 		return nil, fmt.Errorf("expired spam votes: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []SpamVote
 	for rows.Next() {
 		v, err := scanSpamVote(rows)
@@ -236,7 +236,7 @@ func (d *DB) ListBallots(ctx context.Context, chatID int64, botMsgID int) ([]Bal
 	if err != nil {
 		return nil, fmt.Errorf("list ballots: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []Ballot
 	for rows.Next() {
 		var bl Ballot
@@ -318,7 +318,7 @@ func (d *DB) UserMessageTotalsByChat(ctx context.Context, userID int64) (map[int
 	if err != nil {
 		return nil, fmt.Errorf("user message totals by chat: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	out := make(map[int64]int)
 	for rows.Next() {
 		var chatID int64
@@ -355,7 +355,7 @@ func (d *DB) ownerFlagUsers(ctx context.Context, col string) ([]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s users: %w", col, err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []int64
 	for rows.Next() {
 		var id int64
@@ -473,7 +473,7 @@ func (d *DB) VersionNotifyOptOuts(ctx context.Context) ([]int64, error) {
 	if err != nil {
 		return nil, fmt.Errorf("version_notify opt-outs: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []int64
 	for rows.Next() {
 		var id int64
@@ -508,7 +508,7 @@ func (d *DB) DailyReportSubscribers(ctx context.Context) ([]ReportSub, error) {
 	if err != nil {
 		return nil, fmt.Errorf("daily report subscribers: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []ReportSub
 	for rows.Next() {
 		var s ReportSub

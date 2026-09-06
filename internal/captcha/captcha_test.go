@@ -17,7 +17,7 @@ func TestCirclesProducesAllSixDistinct(t *testing.T) {
 }
 
 func TestCirclesCorrectIdxInRange(t *testing.T) {
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		c := New(ModeCircles)
 		if c.CorrectIdx < 0 || c.CorrectIdx >= len(c.Options) {
 			t.Fatalf("CorrectIdx %d out of range (len=%d)", c.CorrectIdx, len(c.Options))
@@ -30,7 +30,7 @@ func TestCirclesCorrectIdxInRange(t *testing.T) {
 
 func TestCirclesShufflePermutesOrder(t *testing.T) {
 	var differs bool
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		c := New(ModeCircles)
 		for j, opt := range c.Options {
 			if opt.Emoji != circles[j].Emoji {
@@ -59,7 +59,7 @@ func TestEmojiPicksOneFromEachCategory(t *testing.T) {
 	// Гоняем много итераций; каждый челлендж обязан покрыть каждую категорию ровно один раз.
 	const iterations = 200
 	categoryHit := make([]int, len(emojiCategories)) // суммарные счётчики по всем прогонам
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		c := New(ModeEmoji)
 		if len(c.Options) != len(emojiCategories) {
 			t.Fatalf("iter %d: got %d options, want %d", i, len(c.Options), len(emojiCategories))
@@ -103,7 +103,7 @@ func TestEmojiShufflesCategoryOrder(t *testing.T) {
 		}
 	}
 	distinctFirstCats := make(map[int]struct{})
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c := New(ModeEmoji)
 		distinctFirstCats[emojiToCat[c.Options[0].Emoji]] = struct{}{}
 		if len(distinctFirstCats) >= 3 {

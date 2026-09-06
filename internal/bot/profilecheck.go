@@ -134,7 +134,7 @@ func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.Chat
 // пустота формулируется нейтрально, а промпт явно трактует её как слабый
 // признак. Ошибка getChat — фолбэк на кэш user_info (имя там точно есть:
 // runCaptcha сохраняет его до капчи).
-func (b *Bot) buildProfileFactsFromAPI(chatID, userID int64) string {
+func (b *Bot) buildProfileFactsFromAPI(chatID, userID int64) string { //nolint:unparam // chatID reserved for per-chat logic
 	var first, last, username, bio string
 	bioKnown := false
 	if chat, err := b.api.GetChat(b.runCtx, &telego.GetChatParams{ChatID: tu.ID(userID)}); err == nil && chat != nil {
@@ -205,7 +205,7 @@ func profileVoteKeyboard() *telego.InlineKeyboardMarkup {
 
 // notifyProfileSuspicion шлёт подписанным владельцам карточку подозрительного
 // профиля (форвардить нечего — сообщений у юзера ещё нет).
-func (b *Bot) notifyProfileSuspicion(chatID, userID int64, facts string) {
+func (b *Bot) notifyProfileSuspicion(chatID, userID int64, facts string) { //nolint:unparam // userID reserved for future per-user logic
 	targets := b.spamNotifyTargets(b.runCtx)
 	if len(targets) == 0 {
 		return

@@ -43,7 +43,7 @@ func TestLoadGlyphUnknown(t *testing.T) {
 	}
 }
 
-func testRNG() *rand.Rand { return rand.New(rand.NewPCG(1, 2)) }
+func testRNG() *rand.Rand { return rand.New(rand.NewPCG(1, 2)) } //nolint:gosec // test RNG, deterministic seed
 
 func TestRenderImageAllGlyphs(t *testing.T) {
 	for _, cat := range emojiCategories {

@@ -105,6 +105,8 @@ func New(mode Mode) Challenge {
 	switch mode {
 	case ModeEmoji, ModeImage:
 		return newEmoji()
+	case ModeCircles:
+		return newCircles()
 	default:
 		return newCircles()
 	}
@@ -113,25 +115,25 @@ func New(mode Mode) Challenge {
 func newCircles() Challenge {
 	opts := make([]Token, len(circles))
 	copy(opts, circles)
-	rand.Shuffle(len(opts), func(i, j int) {
+	rand.Shuffle(len(opts), func(i, j int) { //nolint:gosec // captcha shuffle, not security-critical
 		opts[i], opts[j] = opts[j], opts[i]
 	})
 	return Challenge{
 		Options:    opts,
-		CorrectIdx: rand.IntN(len(opts)),
+		CorrectIdx: rand.IntN(len(opts)), //nolint:gosec // captcha, not security-critical
 	}
 }
 
 func newEmoji() Challenge {
 	opts := make([]Token, 0, len(emojiCategories))
 	for _, cat := range emojiCategories {
-		opts = append(opts, cat[rand.IntN(len(cat))])
+		opts = append(opts, cat[rand.IntN(len(cat))]) //nolint:gosec // captcha, not security-critical
 	}
-	rand.Shuffle(len(opts), func(i, j int) {
+	rand.Shuffle(len(opts), func(i, j int) { //nolint:gosec // captcha, not security-critical
 		opts[i], opts[j] = opts[j], opts[i]
 	})
 	return Challenge{
 		Options:    opts,
-		CorrectIdx: rand.IntN(len(opts)),
+		CorrectIdx: rand.IntN(len(opts)), //nolint:gosec // captcha, not security-critical
 	}
 }

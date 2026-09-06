@@ -289,7 +289,7 @@ func TestSpamVoteBallotTrustGateHandlerLevel(t *testing.T) {
 
 	// (b) Три доверенных «за» добирают дефолтную маржу 3 → ровно один бан.
 	for voter := int64(101); voter <= 103; voter++ {
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			if _, err := db.RecordMessage(ctx, testChatID, voter, time.Now()); err != nil {
 				t.Fatal(err)
 			}
@@ -322,7 +322,7 @@ func TestAuthorAboveThresholdExcludedFromOwnPlashka(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 20; i++ { // автор давно выше whitelist-порога
+	for range 20 { // автор давно выше whitelist-порога
 		if _, err := db.RecordMessage(ctx, testChatID, 42, time.Now()); err != nil {
 			t.Fatal(err)
 		}

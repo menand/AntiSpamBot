@@ -135,7 +135,7 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 	if err != nil {
 		t.Fatalf("new telego bot: %v", err)
 	}
-	logOut := io.Writer(io.Discard)
+	logOut := io.Discard
 	if os.Getenv("BOT_TEST_LOG") != "" {
 		logOut = os.Stderr
 	}
@@ -176,7 +176,7 @@ func serviceableChat(t *testing.T, b *Bot, db *storage.DB, chatID int64) {
 	}
 }
 
-func statsKinds(t *testing.T, db *storage.DB, chatID, userID int64) map[storage.EventKind]int {
+func statsKinds(t *testing.T, db *storage.DB, chatID, userID int64) map[storage.EventKind]int { //nolint:unparam // test helper, keeping flexible signature
 	t.Helper()
 	s, err := db.QueryStats(context.Background(), chatID,
 		time.Unix(0, 0), time.Now().Add(time.Minute))
@@ -201,7 +201,7 @@ func pendingRows(t *testing.T, db *storage.DB) []storage.PendingRow {
 }
 
 // memberUpdate собирает chat_member-апдейт.
-func memberUpdate(chatID int64, from, user telego.User, oldStatus, newStatus string) telego.Update {
+func memberUpdate(chatID int64, from, user telego.User, oldStatus, newStatus string) telego.Update { //nolint:unparam // test helper, keeping flexible signature
 	member := func(status string) telego.ChatMember {
 		u := user
 		switch status {
@@ -228,7 +228,7 @@ var (
 )
 
 // putCaptcha заводит капчу в store и в БД.
-func putCaptcha(b *Bot, db *storage.DB, chatID, userID int64, msgID int) *captcha.Pending {
+func putCaptcha(b *Bot, db *storage.DB, chatID, userID int64, msgID int) *captcha.Pending { //nolint:unparam // test helper, keeping flexible signature
 	expires := time.Now().Add(time.Minute)
 	_ = db.PutPending(context.Background(), storage.PendingRow{
 		ChatID: chatID, UserID: userID, MessageID: msgID,
@@ -264,7 +264,7 @@ func TestOnFailLadder(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			for i := 0; i < tc.preAttempts; i++ {
+			for range tc.preAttempts {
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)
 				}
@@ -406,15 +406,6 @@ func TestCancelCaptchaSilentStopsTimeoutPunishment(t *testing.T) {
 	b.cancelCaptchaSilent(testChatID, testUserID)
 }
 
-// putReplyWait заводит ожидание ответа в store и БД (стадия 1).
-func putReplyWait(b *Bot, db *storage.DB, chatID, userID int64) *replyPending {
-	expires := time.Now().Add(time.Minute)
-	_ = db.PutPendingReply(context.Background(), storage.PendingReply{
-		ChatID: chatID, UserID: userID, ExpiresAt: expires, Stage: 1,
-	})
-	return b.replies.Put(chatID, userID, expires, 0, 1, 0)
-}
-
 func TestWaitReplyTimeoutLadder(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -430,7 +421,7 @@ func TestWaitReplyTimeoutLadder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			b, db, fc := newFlowBot(t)
-			for i := 0; i < tc.preAttempts; i++ {
+			for range tc.preAttempts {
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)
 				}

@@ -113,6 +113,8 @@ func effectiveCaptchaMode(s storage.ChatSettings) captcha.Mode {
 		return captcha.ModeEmoji
 	case captcha.ModeImage:
 		return captcha.ModeImage
+	case captcha.ModeCircles:
+		return captcha.ModeCircles
 	default:
 		return captcha.ModeCircles
 	}

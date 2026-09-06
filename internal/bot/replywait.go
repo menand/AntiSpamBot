@@ -299,7 +299,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			}
 			b.deleteReplyAnchor(ctx, chatID, userID)
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
+			defer cancel() //nolint:gocritic // deferInLoop: intentional — each iteration has its own context for cleanup
 			if err := b.punishAttempt(cleanupCtx, chatID, userID, storage.ReasonNoReply, "молчание",
 				func(event storage.EventKind, _ int) {
 					b.notifyModAction(chatID, userID, event, storage.ReasonNoReply)

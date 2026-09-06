@@ -144,7 +144,7 @@ func TestClaimChatApprovalConcurrentFirstPressWins(t *testing.T) {
 				wins      = make([]bool, racers)
 				decisions = make([]string, racers)
 			)
-			for i := 0; i < racers; i++ {
+			for i := range racers {
 				d := opposite
 				if tc.same || i%2 == 0 {
 					d = tc.first
@@ -188,7 +188,7 @@ func TestClaimChatApprovalConcurrentFirstPressWins(t *testing.T) {
 		db := openTest(t)
 		var inner sync.WaitGroup
 		results := make([]bool, 4)
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			inner.Add(1)
 			go func(i int) {
 				defer inner.Done()

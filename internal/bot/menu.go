@@ -192,7 +192,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		// Границы диапазонов здесь и ниже — защита от бессмысленных значений
 		// из подделанного callback data; штатные пресеты всегда внутри.
 		if err != nil || v < 1 || v > 100 {
-			return nil
+			return nil //nolint:nilerr // intentional: invalid preset value
 		}
 		if err := b.db.SetMaxAttempts(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set max_attempts", "err", err)
@@ -206,7 +206,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		v, err := strconv.Atoi(parts[3])
 		// < 1 мин человек не успеет физически, > 10 мин — капча теряет смысл.
 		if err != nil || v < 1 || v > 10 {
-			return nil
+			return nil //nolint:nilerr // intentional: invalid preset value
 		}
 		if err := b.db.SetCaptchaIntervalMin(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set captcha_interval_minutes", "err", err)
@@ -304,7 +304,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		v, err := strconv.Atoi(parts[3])
 		// > 1000 сообщений до доверия — это уже не «новичок», а вечная слежка.
 		if err != nil || v < 1 || v > 1000 {
-			return nil
+			return nil //nolint:nilerr // intentional: invalid preset value
 		}
 		if err := b.db.SetSpamWhitelistMsgs(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set spam_whitelist_msgs", "err", err)
@@ -318,7 +318,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		v, err := strconv.Atoi(parts[3])
 		// Перевес > 10 голосов в живом чате не собрать — вердикт бы не выносился.
 		if err != nil || v < 1 || v > 10 {
-			return nil
+			return nil //nolint:nilerr // intentional: invalid preset value
 		}
 		if err := b.db.SetSpamVoteMargin(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set spam_vote_margin", "err", err)
@@ -331,7 +331,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		}
 		v, err := strconv.Atoi(parts[3])
 		if err != nil || v < 0 || v > 23 {
-			return nil
+			return nil //nolint:nilerr // intentional: invalid preset value
 		}
 		if err := b.db.SetDailyStatsHour(b.runCtx, chatID, &v); err != nil {
 			b.log.Warn("set daily hour", "err", err)
@@ -593,7 +593,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 		if err != nil {
 			capOn = false
 		}
-		rows = append(rows, []telego.InlineKeyboardButton{
+		rows = append(rows, []telego.InlineKeyboardButton{ //nolint:gocritic // appendCombine: separate rows, readability priority
 			tu.InlineKeyboardButton(toggleLabel("🔔 Спам-уведомления в ЛС", notifyOn)).
 				WithCallbackData("menu:spamnotify"),
 		})
@@ -914,6 +914,8 @@ func captchaModeLabel(m captcha.Mode) string {
 		return "Эмодзи"
 	case captcha.ModeImage:
 		return "Картинка"
+	case captcha.ModeCircles:
+		return "Кружки"
 	default:
 		return "Кружки"
 	}

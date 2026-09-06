@@ -75,7 +75,7 @@ func TestDigestHasContent(t *testing.T) {
 // пропущенным дайджестам (SpamBanned уже однажды так потерялся).
 func TestDigestHasContentCoversAllStatsCounters(t *testing.T) {
 	typ := reflect.TypeOf(storage.Stats{})
-	for i := 0; i < typ.NumField(); i++ {
+	for i := range typ.NumField() {
 		f := typ.Field(i)
 		if f.Type.Kind() != reflect.Int {
 			continue // PeriodFrom/PeriodUntil — не счётчики

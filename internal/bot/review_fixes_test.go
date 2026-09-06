@@ -74,7 +74,7 @@ func TestAIProvidersOrder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			b, _, _ := newFlowBot(t)
 			b.cfg.AIProviderOrder = tc.order
-			var got []string
+			got := make([]string, 0, len(b.aiProviders()))
 			for _, p := range b.aiProviders() {
 				got = append(got, p.name)
 			}
@@ -208,7 +208,7 @@ func TestOnFailBrokenCounterNeverBans(t *testing.T) {
 			b, db, fc := newFlowBot(t)
 			serviceableChat(t, b, db, testChatID)
 			b.cfg.MaxAttempts = 3
-			for i := 0; i < 2; i++ { // две попытки уже были
+			for range 2 { // две попытки уже были
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)
 				}
@@ -775,7 +775,7 @@ func itoa64(v int64) string {
 }
 
 // reportCommand — /spam-команда реплаем на сообщение цели.
-func reportCommand(fromID int64, target *telego.User) telego.Message {
+func reportCommand(fromID int64, target *telego.User) telego.Message { //nolint:unparam // test helper, keeping flexible signature
 	return telego.Message{
 		MessageID: 10,
 		Chat:      telego.Chat{ID: testChatID, Type: "supergroup"},
@@ -785,17 +785,6 @@ func reportCommand(fromID int64, target *telego.User) telego.Message {
 			MessageID: 5,
 			From:      target,
 		},
-	}
-}
-
-// seedTrusted накручивает порог истории сообщений (дефолт whitelist = 5).
-func seedTrusted(t *testing.T, db *storage.DB, userID int64) {
-	t.Helper()
-	for i := 0; i < 6; i++ {
-		if _, err := db.RecordMessage(context.Background(), testChatID, userID,
-			time.Now().Add(-time.Duration(6-i)*time.Minute)); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 
@@ -974,15 +963,15 @@ func TestJoinedLinePrecedence(t *testing.T) {
 		wantNot string
 	}{
 		{"строка members главнее всего", func(db *storage.DB) {
-			db.UpsertMember(ctx, chat, user, old)
+			db.UpsertMember(ctx, chat, user, old) //nolint:errcheck // test setup
 		}, "Последний вход", "видимо"},
 		{"bot_added_at второй", func(db *storage.DB) {
-			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"})
-			db.SetChatBotAddedAtIfEmpty(ctx, chat, old)
+			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"}) //nolint:errcheck // test setup
+			db.SetChatBotAddedAtIfEmpty(ctx, chat, old)                                          //nolint:errcheck // test setup
 		}, "дата моего добавления", ""},
 		{"раннее событие третий", func(db *storage.DB) {
-			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"})
-			db.RecordEvent(ctx, chat, user, storage.EventJoin, old, "")
+			db.RememberChat(ctx, storage.ChatInfo{ChatID: chat, Title: "C", Type: "supergroup"}) //nolint:errcheck // test setup
+			db.RecordEvent(ctx, chat, user, storage.EventJoin, old, "")                          //nolint:errcheck // test setup
 		}, "самое раннее событие", ""},
 		{"ничего не известно — последний", func(*storage.DB) {}, "Вход: неизвестно", ""},
 	}

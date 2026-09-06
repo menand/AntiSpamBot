@@ -1,0 +1,73 @@
+version: "2"
+
+run:
+  build-tags:
+    - stdjson
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - fatcontext
+    - forcetypeassert
+    - godox
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - intrange
+    - misspell
+    - nilerr
+    - noctx
+    - prealloc
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+    - wastedassign
+  settings:
+    govet:
+      shadow: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+      disabled-checks:
+        - hugeParam
+    gosec:
+      excludes:
+        - G104   # unhandled errors — covered by errcheck
+
+exclusions:
+  paths:
+    - internal/captcha/assets
+  rules:
+    # exitAfterDefer in main — intentional os.Exit
+    - path: cmd/
+      linters:
+        - gocritic
+      text: "exitAfterDefer"
+    # defer Close() — cleanup, error intentionally ignored
+    - linters:
+        - errcheck
+      text: "`.*\\.Close` is not checked"
+    # Tests: relaxed rules
+    - path: _test\.go
+      linters:
+        - errcheck
+        - unconvert
+        - unparam
+        - unused
+        - prealloc

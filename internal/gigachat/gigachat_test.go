@@ -95,7 +95,7 @@ func TestIsSpamOK(t *testing.T) {
 func TestTokenCachedBetweenCalls(t *testing.T) {
 	ts := newTestServer(t)
 	c := newTestClient(ts)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := c.IsSpam(context.Background(), "x"); err != nil {
 			t.Fatal(err)
 		}

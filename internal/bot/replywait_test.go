@@ -20,7 +20,7 @@ func TestReplyStoreTakeSingleWinner(t *testing.T) {
 	var wins int
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

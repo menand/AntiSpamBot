@@ -208,7 +208,7 @@ func parseApprovalCallback(data string) (approve bool, chatID int64, ok bool) {
 
 // editApprovalMessage правит текст ЛС-вопроса после решения и снимает кнопки.
 // kb == nil означает «убрать клавиатуру» (пустой InlineKeyboard).
-func (b *Bot) editApprovalMessage(ctx *th.Context, query telego.CallbackQuery, text string, kb *telego.InlineKeyboardMarkup) {
+func (b *Bot) editApprovalMessage(ctx *th.Context, query telego.CallbackQuery, text string, kb *telego.InlineKeyboardMarkup) { //nolint:unparam // kb reserved for future use
 	if query.Message == nil {
 		return
 	}

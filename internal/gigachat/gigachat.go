@@ -96,7 +96,7 @@ func newHTTPClient() *http.Client {
 	pool.AppendCertsFromPEM(trustedRootCA)
 	// Clone, а не пустой &http.Transport{}: иначе теряются дефолты —
 	// Proxy из окружения (HTTPS_PROXY), таймауты dial/TLS-handshake, HTTP/2.
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // DefaultTransport is always *http.Transport
 	tr.TLSClientConfig = &tls.Config{RootCAs: pool}
 	return &http.Client{
 		// Страховочный транспортный таймаут на случай вызова без дедлайна в
@@ -172,7 +172,7 @@ func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
 		return c.token, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.oauthEndpoint,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.oauthEndpoint, //nolint:gosec // endpoint from env var, not user input
 		strings.NewReader(url.Values{"scope": {c.scope}}.Encode()))
 	if err != nil {
 		return "", fmt.Errorf("build gigachat oauth request: %w", err)
@@ -182,7 +182,7 @@ func (c *Client) getToken(ctx context.Context, force bool) (string, error) {
 	req.Header.Set("Authorization", "Basic "+c.authKey)
 	req.Header.Set("RqUID", rqUID())
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // endpoint from env var
 	if err != nil {
 		return "", fmt.Errorf("gigachat oauth: %w", err)
 	}
@@ -256,7 +256,7 @@ func (c *Client) chat(ctx context.Context, token, system, facts string) (string,
 	if err != nil {
 		return "", fmt.Errorf("marshal gigachat request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatEndpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.chatEndpoint, bytes.NewReader(body)) //nolint:gosec // endpoint from env var
 	if err != nil {
 		return "", fmt.Errorf("build gigachat request: %w", err)
 	}
@@ -264,7 +264,7 @@ func (c *Client) chat(ctx context.Context, token, system, facts string) (string,
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // endpoint from env var
 	if err != nil {
 		return "", fmt.Errorf("gigachat request: %w", err)
 	}

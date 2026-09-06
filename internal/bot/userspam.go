@@ -163,6 +163,11 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 		case plashkaPersistFailed:
 			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
 				"Не получилось сохранить голосование — попробуй позже.")
+		case plashkaSendFailed:
+			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
+				"Не получилось отправить сообщение — попробуй позже.")
+		case plashkaSent:
+			// unreachable: guarded by `out != plashkaSent` above
 		default:
 			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
 				"Не получилось повесить плашку — попробуй ещё раз.")

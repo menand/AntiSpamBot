@@ -62,7 +62,7 @@ func retryWith(ctx context.Context, backoffs []time.Duration, call func() error)
 			if err := sleepCtx(ctx, wait); err != nil {
 				// Сохраняем API-ошибку, из-за которой ретраили: голый
 				// «context deadline exceeded» в логе не диагностируется.
-				return fmt.Errorf("%w (last attempt error: %v)", err, lastErr)
+				return fmt.Errorf("%w (last attempt error: %v)", err, lastErr) //nolint:errorlint // intentionally wrapping err, lastErr is context only
 			}
 		}
 		if lastErr = call(); lastErr == nil {

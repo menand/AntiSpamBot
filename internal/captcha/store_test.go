@@ -52,7 +52,7 @@ func TestBeginKickoffExclusive(t *testing.T) {
 	wg.Add(workers)
 	var won int32
 	var mu sync.Mutex
-	for i := 0; i < workers; i++ {
+	for range workers {
 		go func() {
 			defer wg.Done()
 			if s.BeginKickoff(1, 2) {
@@ -123,7 +123,7 @@ func TestStoreConcurrentTake(t *testing.T) {
 	wg.Add(workers)
 	var gotCount int32
 	var mu sync.Mutex
-	for i := 0; i < workers; i++ {
+	for range workers {
 		go func() {
 			defer wg.Done()
 			if _, ok := s.Take(1, 2); ok {

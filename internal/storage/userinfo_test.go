@@ -30,7 +30,7 @@ func TestUserMessageWindowCounts(t *testing.T) {
 		{40, 5}, // только «всего»
 	}
 	for _, s := range seed {
-		for i := 0; i < s.n; i++ {
+		for range s.n {
 			if _, err := db.RecordMessage(ctx, chat, user, day(s.offset)); err != nil {
 				t.Fatalf("seed +%dd: %v", s.offset, err)
 			}

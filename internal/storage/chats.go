@@ -393,7 +393,7 @@ func (d *DB) ChatsNeedingDailyStats(ctx context.Context, currentMSKHour, default
 	if err != nil {
 		return nil, fmt.Errorf("chats needing daily: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []int64
 	for rows.Next() {
 		var id int64
@@ -412,7 +412,7 @@ func (d *DB) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list chats: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []ChatInfo
 	for rows.Next() {
 		var c ChatInfo
@@ -439,7 +439,7 @@ func (d *DB) PendingChats(ctx context.Context) ([]ChatInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list pending chats: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	var out []ChatInfo
 	for rows.Next() {
 		var c ChatInfo
