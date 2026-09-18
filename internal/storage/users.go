@@ -176,6 +176,143 @@ type UserCount struct {
 	LastReason string
 }
 
+// CountPassedUsers возвращает количество уникальных юзеров, прошедших капчу
+// в [from, until).
+func (d *DB) CountPassedUsers(ctx context.Context, chatID int64, from, until time.Time) (int, error) {
+	var n int
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT user_id) FROM events
+		WHERE chat_id = ? AND kind = 'pass' AND at >= ? AND at < ?
+	`, chatID, from.Unix(), until.Unix()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count passed users: %w", err)
+	}
+	return n, nil
+}
+
+// CountEventUsers возвращает количество уникальных юзеров с событиями
+// указанных видов в [from, until).
+func (d *DB) CountEventUsers(ctx context.Context, chatID int64, from, until time.Time, kinds ...EventKind) (int, error) {
+	if len(kinds) == 0 {
+		return 0, nil
+	}
+	ph := placeholders(len(kinds))
+	args := []any{chatID}
+	for _, k := range kinds {
+		args = append(args, string(k))
+	}
+	args = append(args, from.Unix(), until.Unix())
+	var n int
+	err := d.sql.QueryRowContext(ctx, fmt.Sprintf(`
+		SELECT COUNT(DISTINCT user_id) FROM events
+		WHERE chat_id = ? AND kind IN (%s) AND at >= ? AND at < ?
+	`, ph), args...).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count event users: %w", err)
+	}
+	return n, nil
+}
+
+// CountTopWriters возвращает количество уникальных авторов сообщений в
+// [from, until).
+func (d *DB) CountTopWriters(ctx context.Context, chatID int64, from, until time.Time) (int, error) {
+	fromDay := DayOf(from)
+	untilDay := DayOf(until)
+	var n int
+	err := d.sql.QueryRowContext(ctx, `
+		SELECT COUNT(DISTINCT user_id) FROM user_message_counts
+		WHERE chat_id = ? AND day >= ? AND day < ?
+	`, chatID, fromDay, untilDay).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count top writers: %w", err)
+	}
+	return n, nil
+}
+
+// PassedUsersPage — как PassedUsers, но с LIMIT/OFFSET для пагинации.
+func (d *DB) PassedUsersPage(ctx context.Context, chatID int64, from, until time.Time, limit, offset int) ([]UserCount, error) {
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT user_id, COUNT(*) AS n, COALESCE(MIN(dur), -1) AS secs
+		FROM (
+			SELECT p.user_id, p.at,
+			       p.at - (SELECT MAX(j.at) FROM events j
+			               WHERE j.chat_id = p.chat_id AND j.user_id = p.user_id
+			                 AND j.kind = 'join' AND j.at <= p.at) AS dur
+			FROM events p
+			WHERE p.chat_id = ? AND p.kind = 'pass' AND p.at >= ? AND p.at < ?
+		)
+		GROUP BY user_id
+		ORDER BY MIN(at) ASC, user_id ASC
+		LIMIT ? OFFSET ?
+	`, chatID, from.Unix(), until.Unix(), limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query passed users page: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+	var out []UserCount
+	for rows.Next() {
+		var uc UserCount
+		if err := rows.Scan(&uc.UserID, &uc.Count, &uc.Secs); err != nil {
+			return nil, fmt.Errorf("scan passed user page: %w", err)
+		}
+		out = append(out, uc)
+	}
+	return out, rows.Err()
+}
+
+// EventUsersPage — как EventUsers, но с LIMIT/OFFSET для пагинации.
+func (d *DB) EventUsersPage(ctx context.Context, chatID int64, from, until time.Time, limit, offset int, kinds ...EventKind) ([]UserCount, error) {
+	if len(kinds) == 0 {
+		return nil, nil
+	}
+	ph := placeholders(len(kinds))
+
+	whereArgs := func() []any {
+		a := []any{chatID}
+		for _, k := range kinds {
+			a = append(a, string(k))
+		}
+		return append(a, from.Unix(), until.Unix())
+	}
+	args := append(whereArgs(), whereArgs()...)
+	args = append(args, limit, offset)
+	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`
+		SELECT e.user_id, COUNT(*) AS n,
+		       (SELECT reason FROM events e2
+		        WHERE e2.chat_id = ? AND e2.user_id = e.user_id
+		          AND e2.kind IN (%s) AND e2.at >= ? AND e2.at < ?
+		        ORDER BY e2.at DESC LIMIT 1) AS last_reason
+		FROM events e
+		WHERE e.chat_id = ? AND e.kind IN (%s) AND e.at >= ? AND e.at < ?
+		GROUP BY e.user_id
+		ORDER BY MIN(e.at) ASC, e.user_id ASC
+		LIMIT ? OFFSET ?
+	`, ph, ph), args...)
+	if err != nil {
+		return nil, fmt.Errorf("query event users page: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+	return scanUserCountsWithReason(rows)
+}
+
+// TopWritersPage — как TopWriters, но с LIMIT/OFFSET для пагинации.
+func (d *DB) TopWritersPage(ctx context.Context, chatID int64, from, until time.Time, limit, offset int) ([]UserCount, error) {
+	fromDay := DayOf(from)
+	untilDay := DayOf(until)
+	rows, err := d.sql.QueryContext(ctx, `
+		SELECT user_id, SUM(count) AS n FROM user_message_counts
+		WHERE chat_id = ? AND day >= ? AND day < ?
+		GROUP BY user_id
+		ORDER BY n DESC, user_id ASC
+		LIMIT ? OFFSET ?
+	`, chatID, fromDay, untilDay, limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("query top writers page: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+	return scanUserCounts(rows)
+}
+
 // TopFailers возвращает юзеров с наибольшим числом событий kick+ban в
 // [from, until), по убыванию; LastReason — причина их последнего провала.
 func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {

@@ -48,6 +48,11 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return nil
 	}
 
+	// Extended stats: estats:<chatID>:<list>:<page>
+	if parts[0] == "estats" && len(parts) == 4 {
+		return b.handleExtendedStatsCallback(ctx, query, parts)
+	}
+
 	switch parts[1] {
 	case "main":
 		return b.editWithMenu(ctx, query, b.mainMenuText(query.From.ID), b.mainMenuKeyboard(query.From.ID))
@@ -762,7 +767,7 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 	text := fmt.Sprintf("<b>%s</b>\n\n%s",
 		html.EscapeString(title),
 		renderStats(p, periodLabel(p), v.s, b.cfg.NewcomerDays,
-			v.newMembers, v.topWriters, v.topFailers, v.banned, v.infos))
+			5, v.newMembers, v.topWriters, v.topFailers, v.banned, v.infos))
 
 	rows := [][]telego.InlineKeyboardButton{
 		{
@@ -775,14 +780,22 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 			periodButton(chatID, periodMonth, p, "Месяц"),
 			periodButton(chatID, periodAll, p, "Всегда"),
 		},
-		{
+	}
+	if hasMoreItems(v.newMembers, v.topWriters, v.topFailers, v.banned) {
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton("📊 Подробнее").
+				WithCallbackData(fmt.Sprintf("estats:%d:n:0", chatID)),
+		})
+	}
+	rows = append(rows,
+		[]telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton("⚙️ Настройки").
 				WithCallbackData(fmt.Sprintf("menu:settings:%d", chatID)),
 		},
-		{
+		[]telego.InlineKeyboardButton{
 			tu.InlineKeyboardButton("⬅️ К списку чатов").WithCallbackData(cbChats),
 		},
-	}
+	)
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
@@ -1056,4 +1069,170 @@ func (b *Bot) handleChatsCommand(ctx *th.Context, message telego.Message) error 
 		WithParseMode(telego.ModeHTML).
 		WithReplyMarkup(kb))
 	return nil
+}
+
+// extendedPageSize — количество элементов на странице расширенной статистики.
+const extendedPageSize = 25
+
+// handleExtendedStatsCallback обрабатывает навигацию по расширенной
+// статистике. Формат: estats:<chatID>:<list>:<page>, list ∈ {n,w,k,b}.
+func (b *Bot) handleExtendedStatsCallback(ctx *th.Context, query telego.CallbackQuery, parts []string) error {
+	chatID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || chatID == 0 {
+		return nil
+	}
+	if !b.canManageChat(ctx, query.From.ID, chatID) {
+		return nil
+	}
+	if !b.chatServiceable(chatID) {
+		return nil
+	}
+	list := parts[2]
+	page, _ := strconv.Atoi(parts[3])
+	if page < 0 {
+		page = 0
+	}
+
+	p := b.lastStatsPeriod(ctx, query.From.ID)
+	from, until := statsRange(p, time.Now())
+	offset := page * extendedPageSize
+
+	var items []storage.UserCount
+	var total int
+	var header string
+
+	switch list {
+	case "n":
+		items, err = b.db.PassedUsersPage(b.runCtx, chatID, from, until, extendedPageSize, offset)
+		if err != nil {
+			b.log.Warn("ext stats: passed users", "err", err, "chat", chatID)
+		}
+		if total, err = b.db.CountPassedUsers(b.runCtx, chatID, from, until); err != nil {
+			b.log.Warn("ext stats: count passed users", "err", err, "chat", chatID)
+		}
+		header = "👥 <b>Новые участники</b>"
+	case "w":
+		items, err = b.db.TopWritersPage(b.runCtx, chatID, from, until, extendedPageSize, offset)
+		if err != nil {
+			b.log.Warn("ext stats: top writers", "err", err, "chat", chatID)
+		}
+		if total, err = b.db.CountTopWriters(b.runCtx, chatID, from, until); err != nil {
+			b.log.Warn("ext stats: count top writers", "err", err, "chat", chatID)
+		}
+		header = "🏆 <b>Топ писателей</b>"
+	case "k":
+		items, err = b.db.EventUsersPage(b.runCtx, chatID, from, until, extendedPageSize, offset,
+			storage.EventKick, storage.EventBan)
+		if err != nil {
+			b.log.Warn("ext stats: event users (kicked)", "err", err, "chat", chatID)
+		}
+		if total, err = b.db.CountEventUsers(b.runCtx, chatID, from, until,
+			storage.EventKick, storage.EventBan); err != nil {
+			b.log.Warn("ext stats: count event users (kicked)", "err", err, "chat", chatID)
+		}
+		header = "🚫 <b>Кикнуты/забанены</b>"
+	case "b":
+		items, err = b.db.EventUsersPage(b.runCtx, chatID, from, until, extendedPageSize, offset,
+			storage.EventBan, storage.EventSpamBan)
+		if err != nil {
+			b.log.Warn("ext stats: event users (banned)", "err", err, "chat", chatID)
+		}
+		if total, err = b.db.CountEventUsers(b.runCtx, chatID, from, until,
+			storage.EventBan, storage.EventSpamBan); err != nil {
+			b.log.Warn("ext stats: count event users (banned)", "err", err, "chat", chatID)
+		}
+		header = "⛔️ <b>Забанены (вкл. ИИ-антиспам)</b>"
+	default:
+		return nil
+	}
+
+	infos, err := b.db.GetUserInfos(b.runCtx, collectUserIDs(items))
+	if err != nil {
+		b.log.Warn("ext stats: user infos", "err", err, "chat", chatID)
+		infos = map[int64]storage.UserInfo{}
+	}
+
+	var sb strings.Builder
+	title := b.chatTitle(ctx, chatID)
+	fmt.Fprintf(&sb, "<b>%s</b>\n\n%s\n\n", html.EscapeString(title), header)
+
+	if len(items) == 0 {
+		sb.WriteString("<i>Пусто за выбранный период.</i>")
+	} else {
+		for i, uc := range items {
+			renderExtendedUserLine(&sb, i, uc, list, offset, infos)
+		}
+	}
+
+	totalPages := (total + extendedPageSize - 1) / extendedPageSize
+	if totalPages > 1 {
+		fmt.Fprintf(&sb, "\n📄 Стр. %d / %d", page+1, totalPages)
+	}
+
+	kb := extendedStatsKeyboard(chatID, list, page, totalPages, p)
+	return b.editWithMenu(ctx, query, sb.String(), kb)
+}
+
+// renderExtendedUserLine рендерит одну строку расширенной статистики.
+func renderExtendedUserLine(sb *strings.Builder, i int, uc storage.UserCount, list string, offset int, infos map[int64]storage.UserInfo) {
+	num := offset + i + 1
+	switch list {
+	case "n":
+		if uc.Secs >= 0 && uc.Secs <= 86400 {
+			d := time.Duration(uc.Secs) * time.Second
+			if d < time.Minute {
+				fmt.Fprintf(sb, "%d. %s — за %d сек\n",
+					num, mentionWithUsername(infos, uc.UserID), uc.Secs)
+				return
+			}
+			fmt.Fprintf(sb, "%d. %s — за %s\n",
+				num, mentionWithUsername(infos, uc.UserID), humanDurationRU(d))
+			return
+		}
+		fmt.Fprintf(sb, "%d. %s\n", num, mentionWithUsername(infos, uc.UserID))
+	case "w":
+		fmt.Fprintf(sb, "%d. %s — %d %s\n",
+			num, mentionWithUsername(infos, uc.UserID),
+			uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
+	case "k", "b":
+		fmt.Fprintf(sb, "%d. %s — %d %s%s\n",
+			num, mentionWithUsername(infos, uc.UserID),
+			uc.Count, pluralRU(uc.Count, "раз", "раза", "раз"),
+			reasonSuffix(uc.LastReason, infos))
+	}
+}
+
+// extendedStatsKeyboard строит клавиатуру расширенной статистики:
+// табы 2×2 + пагинация + «✖️ Закрыть».
+func extendedStatsKeyboard(chatID int64, list string, page, totalPages int, p statsPeriod) *telego.InlineKeyboardMarkup {
+	tab := func(code, label string) telego.InlineKeyboardButton {
+		if code == list {
+			label = "• " + label
+		}
+		return tu.InlineKeyboardButton(label).
+			WithCallbackData(fmt.Sprintf("estats:%d:%s:0", chatID, code))
+	}
+	rows := [][]telego.InlineKeyboardButton{
+		{tab("n", "👥 Новички"), tab("w", "🏆 Топ")},
+		{tab("k", "🚫 Кикн."), tab("b", "⛔️ Баны")},
+	}
+	if totalPages > 1 {
+		var nav []telego.InlineKeyboardButton
+		if page > 0 {
+			nav = append(nav, tu.InlineKeyboardButton("◀️").
+				WithCallbackData(fmt.Sprintf("estats:%d:%s:%d", chatID, list, page-1)))
+		}
+		nav = append(nav, tu.InlineKeyboardButton(fmt.Sprintf("%d / %d", page+1, totalPages)).
+			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, p)))
+		if page < totalPages-1 {
+			nav = append(nav, tu.InlineKeyboardButton("▶️").
+				WithCallbackData(fmt.Sprintf("estats:%d:%s:%d", chatID, list, page+1)))
+		}
+		rows = append(rows, nav)
+	}
+	rows = append(rows, []telego.InlineKeyboardButton{
+		tu.InlineKeyboardButton("✖️ Закрыть").
+			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, p)),
+	})
+	return &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
