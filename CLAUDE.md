@@ -149,3 +149,4 @@ Button labels: always truncate with `truncateLabel` (rune-safe) — byte slicing
 - Messages to forum supergroups: thread the `threadID` through (see `onUserJoined` → `runCaptcha` → `Pending.ThreadID` → greeting) or the message lands in General.
 - Adding an emoji to the pool → drop its glyph PNG into `internal/captcha/assets/` (`TestAllEmojiGlyphsPresent` catches pool/assets drift).
 - `gofmt -w .` before committing — CI/tests assume formatted code.
+- Before pushing user-facing feature changes: ask the user about versioning and patch notes. Major release (new feature, UX change) → bump second number (e.g. 1.13 → 1.14). Minor release (bugfix, internal improvement) → bump third number (e.g. 1.13.1 → 1.13.2). Internal-only changes (refactors, tests, CI, docs) do NOT require a release.
