@@ -189,17 +189,23 @@ func periodLabel(p statsPeriod) string {
 const statsRuneBudget = 3600
 
 // appendUserList выводит заголовок и пронумерованный список юзеров, обрезая
-// его по statsRuneBudget: не влезшие сворачиваются в «…и ещё N человек».
-// Бюджет общий на всё сообщение и жадный — при огромных списках (рейд)
-// блоки, идущие позже, сворачиваются первыми.
+// его по statsRuneBudget или maxItems: не влезшие сворачиваются в
+// «…и ещё N человек». maxItems > 0 — лимит количества элементов (compact
+// view); maxItems == 0 — только rune budget (digest).
 func appendUserList(sb *strings.Builder, header string, list []storage.UserCount,
-	line func(i int, uc storage.UserCount) string) {
+	maxItems int, line func(i int, uc storage.UserCount) string) {
 	if len(list) == 0 {
 		return
 	}
 	sb.WriteString(header)
 	used := utf8.RuneCountInString(sb.String())
 	for i, uc := range list {
+		if maxItems > 0 && i >= maxItems {
+			rest := len(list) - i
+			fmt.Fprintf(sb, "…и ещё %d %s\n",
+				rest, pluralRU(rest, "человек", "человека", "человек"))
+			return
+		}
 		l := line(i, uc)
 		used += utf8.RuneCountInString(l)
 		if used > statsRuneBudget {
@@ -212,11 +218,23 @@ func appendUserList(sb *strings.Builder, header string, list []storage.UserCount
 	}
 }
 
+// hasMoreItems возвращает true, если хотя бы один список длиннее 5 элементов.
+func hasMoreItems(lists ...[]storage.UserCount) bool {
+	const compactLimit = 5
+	for _, l := range lists {
+		if len(l) > compactLimit {
+			return true
+		}
+	}
+	return false
+}
+
 func renderStats(
 	p statsPeriod,
 	label string,
 	s storage.Stats,
 	newcomerDays int,
+	maxItems int,
 	newMembers, topWriters, topFailers, banned []storage.UserCount,
 	infos map[int64]storage.UserInfo,
 ) string {
@@ -257,7 +275,7 @@ func renderStats(
 			s.ModKicked, s.ModBanned)
 	}
 
-	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers,
+	appendUserList(&sb, "\n🆕 <b>Новые участники:</b>\n", newMembers, maxItems,
 		func(i int, uc storage.UserCount) string {
 			// Ниже минуты — честные секунды («решил подозрительно быстро»
 			// читается именно тут), выше — человеческие минуты/часы. Secs за
@@ -282,14 +300,14 @@ func renderStats(
 		fmt.Fprintf(&sb, "• Старички: %d (%s)\n", s.MsgOldtimer, pct(s.MsgOldtimer, total))
 	}
 
-	appendUserList(&sb, "\n🔝 <b>Топ писателей:</b>\n", topWriters,
+	appendUserList(&sb, "\n🔝 <b>Топ писателей:</b>\n", topWriters, maxItems,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s — %d %s\n",
 				i+1, mentionWithUsername(infos, uc.UserID),
 				uc.Count, pluralRU(uc.Count, "сообщение", "сообщения", "сообщений"))
 		})
 
-	appendUserList(&sb, "\n🚫 <b>Кикнуты/забанены:</b>\n", topFailers,
+	appendUserList(&sb, "\n🚫 <b>Кикнуты/забанены:</b>\n", topFailers, maxItems,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s — %d %s%s\n",
 				i+1, mentionWithUsername(infos, uc.UserID),
@@ -300,7 +318,7 @@ func renderStats(
 	// Список мерджит ban+spamban (капча-баны + вердикты ИИ-антиспама) — суффикс
 	// в заголовке, чтобы числа не «расходились» с пулей воронки выше (та
 	// считает только капча-баны, и это осознанное разделение).
-	appendUserList(&sb, "\n⛔️ <b>Забанены (вкл. ИИ-антиспам):</b>\n", banned,
+	appendUserList(&sb, "\n⛔️ <b>Забанены (вкл. ИИ-антиспам):</b>\n", banned, maxItems,
 		func(i int, uc storage.UserCount) string {
 			return fmt.Sprintf("%d. %s%s\n", i+1,
 				mentionWithUsername(infos, uc.UserID),

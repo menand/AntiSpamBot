@@ -84,7 +84,7 @@ func TestRenderStatsNewMemberSeconds(t *testing.T) {
 		{UserID: 2002, Count: 1, Secs: -1},
 	}
 	out := renderStats(periodDay, "сегодня", s, 7,
-		newMembers, nil, nil, nil, map[int64]storage.UserInfo{})
+		0, newMembers, nil, nil, nil, map[int64]storage.UserInfo{})
 	// Ниже минуты рендерятся честные секунды; выше — humanDurationRU.
 	if !strings.Contains(out, "id2001</a> — за 12 сек") {
 		t.Fatalf("expected solve time for 2001:\n%s", out)
@@ -99,7 +99,7 @@ func TestRenderStatsLeft(t *testing.T) {
 	// учитывает Left (5+3+1+1=10, значит 0 в процессе).
 	s := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 1, Left: 1}
 	out := renderStats(periodDay, "сегодня", s, 7,
-		nil, nil, nil, nil, map[int64]storage.UserInfo{})
+		0, nil, nil, nil, nil, map[int64]storage.UserInfo{})
 	if !strings.Contains(out, "Вышли сами: 1 (10%)") {
 		t.Fatalf("expected «Вышли сами» line:\n%s", out)
 	}
@@ -110,7 +110,7 @@ func TestRenderStatsLeft(t *testing.T) {
 	// Left = 0 — строки нет (не шумим).
 	s2 := storage.Stats{Joined: 10, Passed: 5, Kicked: 3, Banned: 1}
 	out2 := renderStats(periodDay, "сегодня", s2, 7,
-		nil, nil, nil, nil, map[int64]storage.UserInfo{})
+		0, nil, nil, nil, nil, map[int64]storage.UserInfo{})
 	if strings.Contains(out2, "Вышли сами") {
 		t.Fatalf("no Left — no line expected:\n%s", out2)
 	}
@@ -122,7 +122,7 @@ func TestRenderStatsListsComplete(t *testing.T) {
 	failers := fakeUsers(1001, 3, 2)
 	banned := fakeUsers(3001, 2, 1)
 	out := renderStats(periodAll, "всё время", s, 7,
-		newMembers, nil, failers, banned, map[int64]storage.UserInfo{})
+		0, newMembers, nil, failers, banned, map[int64]storage.UserInfo{})
 	if strings.Contains(out, "…и ещё") {
 		t.Fatalf("short lists must not be truncated:\n%s", out)
 	}
@@ -145,6 +145,7 @@ func TestRenderStatsListsComplete(t *testing.T) {
 func TestRenderStatsTruncatedToMessageLimit(t *testing.T) {
 	s := storage.Stats{Joined: 600, Passed: 200, Kicked: 300, Banned: 100}
 	out := renderStats(periodMonth, "месяц", s, 7,
+		5,                            // compact view: 5 элементов на секцию
 		fakeUsers(100000000, 200, 1), // новые участники
 		fakeUsers(500000000, 5, 40),  // топ писателей
 		fakeUsers(200000000, 200, 2), // провалы
@@ -160,5 +161,104 @@ func TestRenderStatsTruncatedToMessageLimit(t *testing.T) {
 	}
 	if n := utf8.RuneCountInString(out); n >= 4096 {
 		t.Fatalf("rendered stats must fit a Telegram message, got %d runes", n)
+	}
+}
+
+func TestHasMoreItems(t *testing.T) {
+	if hasMoreItems(nil, nil, nil, nil) {
+		t.Fatal("empty lists must return false")
+	}
+	if hasMoreItems(fakeUsers(1, 5, 1)) {
+		t.Fatal("5 items must return false (compact limit)")
+	}
+	if !hasMoreItems(fakeUsers(1, 6, 1)) {
+		t.Fatal("6 items must return true")
+	}
+	if !hasMoreItems(nil, fakeUsers(1, 10, 1), nil, nil) {
+		t.Fatal("10 items in second list must return true")
+	}
+}
+
+func TestRenderStatsCompactView(t *testing.T) {
+	s := storage.Stats{Joined: 20, Passed: 15, Kicked: 5, Banned: 3}
+	out := renderStats(periodWeek, "неделю", s, 7,
+		5,                      // compact: 5 элементов
+		fakeUsers(1000, 15, 1), // 15 новичков
+		fakeUsers(2000, 8, 10), // 8 топ-писателей
+		fakeUsers(3000, 10, 2), // 10 фейлеров
+		fakeUsers(4000, 5, 1),  // 5 забаненных
+		map[int64]storage.UserInfo{})
+	// Новички: показаны 5, остальные10 скрыты
+	if !strings.Contains(out, "…и ещё 10 человек") {
+		t.Fatalf("newcomers must show «…и ещё 10»:\n%s", out)
+	}
+	// Топ-писатели: показаны 5, остальные3 скрыты
+	if !strings.Contains(out, "…и ещё 3 человек") {
+		t.Fatalf("top writers must show «…и ещё 3»:\n%s", out)
+	}
+	// Фейлеры: показаны 5, остальные5 скрыты
+	if !strings.Contains(out, "…и ещё 5 человек") {
+		t.Fatalf("failers must show «…и ещё 5»:\n%s", out)
+	}
+	// Забаненные: ровно 5 — без «…и ещё»
+	if strings.Contains(out, "…и ещё") && strings.Contains(out, "Забанены") {
+		// Проверяем что «…и ещё» после «Забанены» нет
+		bannedIdx := strings.Index(out, "⛔️")
+		if bannedIdx > 0 {
+			tail := out[bannedIdx:]
+			if strings.Contains(tail, "…и ещё") {
+				t.Fatalf("banned list (5 items) must not truncate:\n%s", out)
+			}
+		}
+	}
+	if n := utf8.RuneCountInString(out); n >= 4096 {
+		t.Fatalf("compact view must fit Telegram message, got %d runes", n)
+	}
+}
+
+func TestExtendedStatsKeyboard(t *testing.T) {
+	kb := extendedStatsKeyboard(-100123, "n", 0, 3, periodWeek)
+	if len(kb.InlineKeyboard) != 4 {
+		t.Fatalf("expected 4 rows, got %d", len(kb.InlineKeyboard))
+	}
+	// Row 0: tabs
+	row0 := kb.InlineKeyboard[0]
+	if len(row0) != 2 {
+		t.Fatalf("tab row must have 2 buttons, got %d", len(row0))
+	}
+	// Active tab "Новички" must have • prefix
+	if !strings.Contains(row0[0].Text, "•") {
+		t.Fatalf("active tab must have • prefix, got %q", row0[0].Text)
+	}
+	// Callback data format
+	if !strings.HasPrefix(row0[0].CallbackData, "estats:") {
+		t.Fatalf("tab callback must start with estats:, got %q", row0[0].CallbackData)
+	}
+	// Row 2: pagination (3 pages → has navigation)
+	row2 := kb.InlineKeyboard[2]
+	if len(row2) != 2 { // [1/3, ▶️] — page 0, no ◀️
+		t.Fatalf("pagination row must have 2 buttons on page 0, got %d", len(row2))
+	}
+	// Row 3: close button
+	row3 := kb.InlineKeyboard[3]
+	if !strings.Contains(row3[0].Text, "Закрыть") {
+		t.Fatalf("last row must be close button, got %q", row3[0].Text)
+	}
+	if !strings.HasPrefix(row3[0].CallbackData, "menu:stats:") {
+		t.Fatalf("close callback must go back to stats, got %q", row3[0].CallbackData)
+	}
+
+	// Middle page: both ◀️ and ▶️
+	kb2 := extendedStatsKeyboard(-100123, "w", 1, 3, periodMonth)
+	row2b := kb2.InlineKeyboard[2]
+	if len(row2b) != 3 { // [◀️, 2/3, ▶️]
+		t.Fatalf("middle page must have 3 nav buttons, got %d", len(row2b))
+	}
+
+	// Last page: only ◀️
+	kb3 := extendedStatsKeyboard(-100123, "k", 2, 3, periodAll)
+	row2c := kb3.InlineKeyboard[2]
+	if len(row2c) != 2 { // [◀️, 3/3]
+		t.Fatalf("last page must have 2 nav buttons, got %d", len(row2c))
 	}
 }
