@@ -82,6 +82,18 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		}
 	}
 
+	// Промоушен снимает карантин: серверный текст-рестрикт для админов
+	// Telegram поднимает сам, а оставлять продвигаемого в зеркале цензора и
+	// БД нельзя — цензор продолжил бы чистить его сообщения. release() здесь
+	// не навредит: вернуть дефолтные права чата свежеиспечённому админу так же
+	// безопасно, как их не трогать. Стоит ПОСЛЕ хука прощения: промоушен
+	// разбаненного спамера (kicked → administrator) должен успеть и простить
+	// глобальный флаг, и снять карантин.
+	if newStatus == "administrator" {
+		b.releaseQuarantineUser(upd.Chat.ID, user.ID)
+		return nil
+	}
+
 	joined := (oldStatus == "left" || oldStatus == "kicked") &&
 		(newStatus == "member" || newStatus == "restricted")
 	if joined {
@@ -298,6 +310,11 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	// золотой голос в уже не обслуживаемом чате выдал бы глобальный бан.
 	if err := b.db.DeleteChatSpamVotes(ctx, chatID); err != nil {
 		b.log.Warn("delete chat spam votes", "err", err, "chat", chatID)
+	}
+	// Карантины чата: бота в чате больше нет, кормить цензор нечем.
+	b.quar.RemoveChat(chatID)
+	if err := b.db.DeleteChatQuarantine(ctx, chatID); err != nil {
+		b.log.Warn("delete chat quarantine", "err", err, "chat", chatID)
 	}
 	if err := b.db.DeleteChat(ctx, chatID); err != nil {
 		b.log.Warn("delete chat", "err", err, "chat", chatID)
@@ -986,7 +1003,7 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 		if _, ok := b.replies.Get(chatID, targetUserID); ok {
 			// Pending ещё жив (ban не дошёл до cancelReplyWait) —
 			// берём и закрываем. RecordEvent + deleteReplyAnchor —
-			// только если Take胜利: иначе replyWaitSatisfied уже
+			// только если Take выиграл: иначе replyWaitSatisfied уже
 			// записал pass и закрыл pending.
 			if taken, ok := b.replies.Take(chatID, targetUserID); ok {
 				taken.Cancel()
@@ -1204,9 +1221,20 @@ func (b *Bot) migrateChatState(oldID, newID int64) {
 		// releaseMigratedCaptchas всё равно: таймеры капч целятся в мёртвый
 		// старый chat_id, и после неудавшейся миграции они обязаны разрядиться
 		// тихо, а не стрелять kick/noreply в несуществующий чат.
-	} else if hasAdded {
-		if err := b.db.SetChatBotAddedAtIfEmpty(b.runCtx, newID, addedAt); err != nil {
-			b.log.Warn("carry bot_added_at: write", "err", err, "new", newID)
+	} else {
+		if hasAdded {
+			if err := b.db.SetChatBotAddedAtIfEmpty(b.runCtx, newID, addedAt); err != nil {
+				b.log.Warn("carry bot_added_at: write", "err", err, "new", newID)
+			}
+		}
+		// Карантинное зеркало переезжает ТОЛЬКО при успешной миграции строк:
+		// Telegram перенёс участника вместе с рестриктом в новый chat_id, и
+		// цензор обязан смотреть туда же — иначе карантинный юзер обходил бы
+		// цензор до рестарта (а при неудавшейся миграции строки остались под
+		// старым id, переезд зеркала рассинхронил бы их с БД).
+		if n := b.quar.Rekey(oldID, newID); n > 0 {
+			b.log.Info("quarantine mirror re-keyed across migration",
+				"old", oldID, "new", newID, "users", n)
 		}
 	}
 	b.releaseMigratedCaptchas(oldID, newID)
@@ -1385,6 +1413,27 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 				"err", err, "chat", message.Chat.ID, "user", message.From.ID)
 		}
 		return nil
+	}
+	// Правки карантинного юзера: ссылка могла прийти именно правкой
+	// («невинный текст → правка в спам» — тот же обход, что лечит ИИ-чек).
+	// Удаляем через тот же цензор, что и обычные сообщения (первое нарушение
+	// = эфемерное пояснение, дальше тихо). Админ/владелец карантину не цель —
+	// та же льгота, что в цензор-middleware бота.
+	if e, ok := b.quar.Get(message.Chat.ID, message.From.ID); ok {
+		if b.isOwner(message.From.ID) {
+			return nil
+		}
+		isAdmin, sure := b.isChatAdminVerified(ctx, message.Chat.ID, message.From.ID)
+		// !sure (API-ошибка) карантину не наследует: удалять сообщение «на
+		// всякий случай» по одному 429 нечестно к админу — ошибка никогда не
+		// отбирает льготу (тот же трейд-офф, что у punishNonAdmin).
+		if isAdmin || !sure {
+			return nil
+		}
+		if quarantineViolates(&message) {
+			b.goSafe("quarantineCensorEdited", func() { b.censorQuarantineMessage(&message, e) })
+			return nil
+		}
 	}
 	// Бюджет-предохранитель: правки не растят счётчик сообщений, поэтому
 	// новичок (total ≤ whitelist) мог бы бесконечными правками одного
@@ -1954,8 +2003,10 @@ func (b *Bot) recordAbortDetached(chatID, userID int64, why string) {
 }
 
 // onSuccess завершает капчу победой. answer — «выбрал N-й (эмодзи)» с кнопки,
-// которую нажал юзер; пустая строка на admin-approve пути (выбора не было —
-// уведомление владельцам пропускается, лог-поле answer остаётся пустым).
+// которую нажал юзер; на admin-approve пути пустой (выбора не было). Уходит
+// только в лог: уведомление о КАЖДОМ пройденном пассе владельцам не шлётся
+// (слишком шумно) — под mod_notify теперь ходят только события 2-го уровня
+// (ответ на приветствие с форвардом, кик за молчание) — см. notifyReplyAnswered.
 func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) error {
 	if err := b.db.ResetAttempts(ctx, p.ChatID, p.UserID); err != nil {
 		// Потерянный сброс = следующий провал посчитает попытки с прошлого
@@ -1977,19 +2028,48 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 		}
 	}
 	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID, "answer", answer)
-	if answer != "" {
-		b.notifyModAction(p.ChatID, p.UserID, storage.EventPass, "", answer)
-	}
 	if err := b.deleteBotMessage(ctx, p.ChatID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
 		b.log.Warn("delete captcha on pass",
 			"err", err, "chat", p.ChatID, "msg", p.MessageID)
 	}
-	if err := b.release(ctx, p.ChatID, p.UserID); err != nil {
-		// Проверённого юзера нельзя оставлять за бессрочным капча-мьютом:
-		// pending уже удалён (или удаляется вызывающим после успеха), и
-		// повторной капчи не будет. Догоняем на detached-бюджете — как
-		// releaseOnAbort на shutdown: 15 c покрывают обе лестницы release
-		// (getChat + restrict). Провал и его — только Error в логе.
+	// Размьют после прохода: обычный release (дефолтные права чата) или, при
+	// включённом карантине, рестрикт «только текст» на срок карантина.
+	// Проверенного юзера нельзя оставлять за бессрочным капча-мьютом, поэтому
+	// карантинный рестрикт при провале откатывается на release (fail-open:
+	// сетевой чих не должен ограничить новичка сверх карантина, но и не должен
+	// оставить его замьюченным), а общий провал — как раньше — добивается на
+	// detached-бюджете (15 c покрывают обе retryTG-лестницы: getChat + restrict).
+	post := func(c context.Context) error {
+		if s.QuarantineEnabled {
+			d := b.effectiveQuarantineDuration(s)
+			if err := b.quarantineRestrict(c, p.ChatID, p.UserID, d); err != nil {
+				b.log.Warn("quarantine restrict failed, falling back to release",
+					"err", err, "chat", p.ChatID, "user", p.UserID)
+			} else {
+				// Тоггл могли выключить, ПОКА шёл рестрикт (сам рестрикт —
+				// секунды ретраев под 429). Арм в чате с выключенной фичей
+				// оставил бы строку-призрака до reconcile-свипа: карантин
+				// отключён, но серверный text-only держится — отпускаем здесь,
+				// до арма. Гонка сводится к микросообщению «re-check до
+				// коммита тоггла», и его добивает итеративный отпуск
+				// quarantineReleaseChat.
+				if !b.chatSettings(c, p.ChatID).QuarantineEnabled {
+					b.log.Info("quarantine disabled mid-restrict, releasing",
+						"chat", p.ChatID, "user", p.UserID)
+					return b.release(c, p.ChatID, p.UserID)
+				}
+				b.armQuarantine(c, p.ChatID, p.UserID, time.Now().Add(d))
+				return nil
+			}
+		}
+		return b.release(c, p.ChatID, p.UserID)
+	}
+	// Ошибка post — ВСЕГДА от b.release: карантинная ветка провал рестрикта
+	// гасит логом и каскадом падает в release, armQuarantine ошибок не несёт,
+	// а mid-restrict тоггл выходит тем же release. Повторять весь post незачем
+	// — на detached-бюджете ретраится только сам release (15 c покрывают обе
+	// retryTG-лестницы: getChat + restrict).
+	if err := post(ctx); err != nil {
 		b.log.Error("release after captcha — retrying detached",
 			"err", err, "chat", p.ChatID, "user", p.UserID)
 		rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)

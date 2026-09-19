@@ -77,6 +77,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"chats", "bot_added_at", `ALTER TABLE chats ADD COLUMN bot_added_at INTEGER`},
 		{"spam_votes", "initiator_id", `ALTER TABLE spam_votes ADD COLUMN initiator_id INTEGER NOT NULL DEFAULT 0`},
 		{"chat_settings", "captcha_interval_minutes", `ALTER TABLE chat_settings ADD COLUMN captcha_interval_minutes INTEGER`},
+		{"chat_settings", "quarantine_enabled", `ALTER TABLE chat_settings ADD COLUMN quarantine_enabled INTEGER NOT NULL DEFAULT 0`},
+		{"chat_settings", "quarantine_hours", `ALTER TABLE chat_settings ADD COLUMN quarantine_hours INTEGER`},
 		{"pending_captchas", "stage", `ALTER TABLE pending_captchas ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "stage", `ALTER TABLE pending_replies ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "thread_id", `ALTER TABLE pending_replies ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`},

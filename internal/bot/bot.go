@@ -51,6 +51,10 @@ type Bot struct {
 	// Активные ожидания «ответь на приветствие» (режим reply_check).
 	replies *replyStore
 
+	// Активные карантины новичков (зеркало chat_quarantine) — горячий путь
+	// цензора: каждое сообщение ограниченного юзера проверяется из памяти.
+	quar *quarantineStore
+
 	// Write-through-кэши над chats/user_info: пропускаем запись в БД, когда
 	// значение не изменилось. Экономят 2 из 4 SQLite-записей на групповое
 	// сообщение.
@@ -138,6 +142,7 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		cfg:            cfg,
 		store:          captcha.NewStore(),
 		replies:        newReplyStore(),
+		quar:           newQuarantineStore(),
 		log:            log,
 		version:        version,
 		chatCache:      make(map[int64]storage.ChatInfo),
@@ -188,6 +193,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	if _, err := b.restorePendingReplies(ctx); err != nil {
 		b.log.Error("restore pending replies", "err", err)
 	}
+	b.restoreQuarantine(ctx)
 
 	b.goSafe("attemptsSweepLoop", func() { b.attemptsSweepLoop(ctx) })
 	b.goSafe("dailyDigestLoop", func() { b.dailyDigestLoop(ctx) })
@@ -198,6 +204,11 @@ func (b *Bot) Run(ctx context.Context) error {
 		// выиграл бы гонку и исполнил вердикт мёртвого чата.
 		b.reconcileChats(ctx)
 		b.reconcileSpamVotes(ctx)
+		// Карантин-реконсиляция — здесь же, в стартовой горутине: крэш между
+		// выключением тоггла и отпуском юзеров не должен пережить рестарт
+		// (restoreQuarantine уже отфильтровал такие чаты, но страховой свип
+		// ловит и БД-правки мимо кода).
+		b.reconcileQuarantines(ctx)
 		// Стартовый свип истёкших голосований — здесь же, последним:
 		// spamVoteSweepLoop начинает только с часового тика, и без этого
 		// вызова голосования, проспавшие дедлайн за время простоя, висели
@@ -257,6 +268,45 @@ func (b *Bot) Run(ctx context.Context) error {
 		return nil
 	}))
 
+	// Цензор карантина — ДО reply-wait middleware: сообщение новичка, ещё
+	// находящегося в карантине (рестрикт «только текст» применён при проходе
+	// капчи), проверяется на форварды и ссылки — серверная грануляция прав их
+	// не перекрывает. Нарушение удаляется; возврат без ctx.Next глотает апдейт:
+	// сообщение не попадает в счётчики, не жечёт LLM-квоту и НЕ снимает
+	// reply-wait (спам-ссылка не может быть «ответом на приветствие»).
+	bh.Use(func(ctx *th.Context, update telego.Update) error {
+		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot {
+			if m.Chat.Type == "group" || m.Chat.Type == "supergroup" {
+				// Тот же гейт, что у handleGroupMessage: pending/rejected и
+				// чужие чаты полностью инертны, цензор там не работает.
+				if !b.chatServiceable(m.Chat.ID) {
+					return ctx.Next(update)
+				}
+				if e, ok := b.quar.Get(m.Chat.ID, m.From.ID); ok {
+					// Админ/владелец карантину не цель: серверный рестрикт с
+					// промоушена поднимает сам Telegram, и проверяется он
+					// только для КАРАНТИННОГО юзера. Проверка живая на
+					// промахе кэша (on forfeit можно), но НЕ карательная:
+					// !sure (API-ошибка) трактуется «не цензурим» — удалять
+					// сообщения «на всякий случай» по одному 429 нечестно
+					// к админу (тот же трейд-офф, что у punishNonAdmin).
+					if b.isOwner(m.From.ID) {
+						return ctx.Next(update)
+					}
+					isAdmin, sure := b.isChatAdminVerified(ctx, m.Chat.ID, m.From.ID)
+					if isAdmin || !sure {
+						return ctx.Next(update)
+					}
+					if quarantineViolates(m) {
+						b.goSafe("quarantineCensor", func() { b.censorQuarantineMessage(m, e) })
+						return nil
+					}
+				}
+			}
+		}
+		return ctx.Next(update)
+	})
+
 	// Снятие ожидания «ответь на приветствие» — в middleware, ДО маршрутизации:
 	// иначе команда (/start и т.п.) первым сообщением новичка ушла бы в свой
 	// хендлер мимо handleGroupMessage, и юзера кикнуло бы за молчание, хотя он
@@ -267,7 +317,12 @@ func (b *Bot) Run(ctx context.Context) error {
 		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot {
 			if (m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
 				messageHasUserContent(m) {
-				b.replyWaitSatisfied(m.Chat.ID, m.From.ID)
+				// не-nil — юзер реально прошёл 2-й уровень (ответил на
+				// приветствие): подписчикам mod_notify уходит форвард его
+				// сообщения + карточка (goSafe — не тормозим хендлер)
+				if p := b.replyWaitSatisfied(m.Chat.ID, m.From.ID); p != nil {
+					b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(m, p) })
+				}
 			}
 			// ЛС-команда перехватывается своим хендлером мимо handlePrivateText
 			// — разряжаем взведённый ввод приветствия здесь, до маршрутизации,
@@ -307,6 +362,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleFullunbanCommand, th.CommandEqual("fullunban"))
 	bh.HandleMessage(b.handleUnmuteCommand, th.CommandEqual("unmute"))
 	bh.HandleMessage(b.handleWhitelistCommand, th.CommandEqual("whitelist"))
+	bh.HandleMessage(b.handleTrustCommand, th.CommandEqual("trust"))
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatsnew"))
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatnew"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
@@ -513,6 +569,15 @@ func (b *Bot) attemptsSweepLoop(ctx context.Context) {
 				time.Now().AddDate(0, 0, -eventRetentionDays), eventPruneBatch); err != nil {
 				b.log.Warn("prune events", "err", err)
 			}
+			// И истёкшие карантины: срок кончился, рестрикт снял Telegram,
+			// столбик не должен расти вечно. Зеркало чистится лениво при чтении.
+			if err := b.db.PruneQuarantines(ctx, time.Now().Unix()); err != nil {
+				b.log.Warn("prune quarantines", "err", err)
+			}
+			// Там же — страхующий свип карантинов выключенных чатов (живой
+			// путь отпуска при тоггл-выключении есть в menu.go; здесь —
+			// истории незавершённых отпусков).
+			b.reconcileQuarantines(ctx)
 		}
 	}
 }

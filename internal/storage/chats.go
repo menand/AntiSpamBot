@@ -198,6 +198,8 @@ type ChatSettings struct {
 	SpamVoteMargin         sql.NullInt64  // NULL = 3 голоса перевеса
 	ReplyCheckEnabled      bool           // режим «требовать ответа»; по умолчанию false
 	EphemeralEnabled       bool           // служебные сообщения эфемерно; по умолчанию false
+	QuarantineEnabled      bool           // карантин новичков; по умолчанию false
+	QuarantineHours        sql.NullInt64  // NULL = 1 час; длительность карантина
 }
 
 // defaultChatSettings — строка настроек для чата без сохранённой строки —
@@ -212,14 +214,14 @@ func defaultChatSettings(chatID int64) ChatSettings {
 func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, error) {
 	s := defaultChatSettings(chatID)
 
-	var greetingInt, dailyInt, silentInt, spamInt, replyInt, ephInt int
+	var greetingInt, dailyInt, silentInt, spamInt, replyInt, ephInt, qrInt int
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_interval_minutes,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
 		       captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
 		       spam_vote_margin, reply_check_enabled,
-		       ephemeral_enabled
+		       ephemeral_enabled, quarantine_enabled, quarantine_hours
 		FROM chat_settings WHERE chat_id = ?
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaIntervalMinutes,
@@ -227,7 +229,7 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities, &silentInt,
 		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
 		&s.SpamVoteMargin, &replyInt,
-		&ephInt)
+		&ephInt, &qrInt, &s.QuarantineHours)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -241,6 +243,7 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	s.SpamCheckEnabled = spamInt != 0
 	s.ReplyCheckEnabled = replyInt != 0
 	s.EphemeralEnabled = ephInt != 0
+	s.QuarantineEnabled = qrInt != 0
 	return s, nil
 }
 
@@ -276,6 +279,17 @@ func (d *DB) SetEphemeralEnabled(ctx context.Context, chatID int64, enabled bool
 // SetReplyCheckEnabled тогглит режим «требовать ответа на приветствие».
 func (d *DB) SetReplyCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	return d.setChatSetting(ctx, chatID, "reply_check_enabled", boolToInt(enabled))
+}
+
+// SetQuarantineEnabled включает/выключает карантин новичков для чата.
+func (d *DB) SetQuarantineEnabled(ctx context.Context, chatID int64, enabled bool) error {
+	return d.setChatSetting(ctx, chatID, "quarantine_enabled", boolToInt(enabled))
+}
+
+// SetQuarantineHours переопределяет длительность карантина (в часах) для
+// чата. nil снимает переопределение (дефолт 1 час).
+func (d *DB) SetQuarantineHours(ctx context.Context, chatID int64, hours *int) error {
+	return d.setChatSetting(ctx, chatID, "quarantine_hours", nullableInt(hours))
 }
 
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {

@@ -102,6 +102,16 @@ func (b *Bot) effectiveDailyHour(s storage.ChatSettings) int {
 	return b.cfg.DailyStatsUTCHour
 }
 
+// effectiveQuarantineDuration резолвит длительность карантина: пер-чатовый
+// override (часы), иначе дефолт 1 час.
+func (b *Bot) effectiveQuarantineDuration(s storage.ChatSettings) time.Duration {
+	h := int64(1)
+	if s.QuarantineHours.Valid && s.QuarantineHours.Int64 > 0 {
+		h = s.QuarantineHours.Int64
+	}
+	return time.Duration(h) * time.Hour
+}
+
 // effectiveCaptchaMode резолвит вид капчи. Неизвестные значения из БД
 // (будущие / битые) откатываются к ModeCircles.
 func effectiveCaptchaMode(s storage.ChatSettings) captcha.Mode {

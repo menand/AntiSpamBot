@@ -14,7 +14,7 @@ import (
 )
 
 // modNotifyTargets — владельцы, включившие ЛС-уведомления о киках/банах и
-// проходах капчи.
+// событиях 2-го уровня (ответ на приветствие, кик за молчание).
 // Пересечение с OWNER_IDS отсеивает строки бывших владельцев (как у спама).
 func (b *Bot) modNotifyTargets(ctx context.Context) []int64 {
 	ids, err := b.db.ModNotifyOwners(ctx)
@@ -49,13 +49,16 @@ func (b *Bot) captchaNotifyTargets(ctx context.Context) []int64 {
 }
 
 // notifyModAction шлёт подписчикам mod_notify карточку кика/бана (а для
-// EventPass — прохода капчи): чат, цель, действие, человекочитаемая причина.
-// Провалы капчи сюда НЕ ходят — у них свой notifyCaptchaFail (отдельная
-// подписка + порог попыток). Vote-вердикты тоже НЕ идут — они уже покрыты
-// spam_notify (notifySpamVerdict); reason им передаётся только для events, а
+// EventPass — ручного «Впустить» на 2-м уровне): чат, цель, действие,
+// человекочитаемая причина. Пассов капчи здесь НЕТ: уведомление о каждом
+// пройденном пассе снято (шум), а успех 2-го уровня (ответ на приветствие)
+// уходит отдельно с форвардом сообщения — notifyReplyAnswered. Провалы капчи
+// сюда НЕ ходят — у них свой notifyCaptchaFail (отдельная подписка + порог
+// попыток). Vote-вердикты тоже НЕ идут — они уже покрыты spam_notify
+// (notifySpamVerdict); reason им передаётся только для events, а
 // дубль-уведомление было бы шумом.
-// detail — необязательное уточнение к причине (для pass — «выбрал 2-й (🟢)»);
-// в events не пишется, живёт только здесь.
+// detail — необязательное уточнение к причине; в events не пишется, живёт
+// только здесь.
 // Уведомление уходит в горутине (как spamVerdictFanout): вызывающие стоят на
 // карательном пути (onFail/replyWaitLoop и captchaStageLoop с 10-секундным cleanup-ctx), и
 // зависший SendMessage не должен съедать бюджет kick/ban.
@@ -63,6 +66,57 @@ func (b *Bot) notifyModAction(chatID, targetID int64, kind storage.EventKind, re
 	b.goSafe("notifyModAction", func() {
 		b.sendModCard(b.modNotifyTargets(b.runCtx), chatID, targetID, kind, reason, detail...)
 	})
+}
+
+// notifyReplyAnswered — успех 2-го уровня (require-reply): юзер ответил на
+// приветствие. Подписчикам mod_notify уходит форвард его первого сообщения
+// + карточка (чат, кто, стадия). Самый первый осмысленный факт о новичке для
+// владельца — именно поэтому форвардим, а не пересказываем. Best effort, в
+// горутине: вызывается из middleware (бот.go), блокировать цепочку хендлеров
+// нельзя. Форвард может упасть на protected content — карточка всё равно
+// уходит. Nil-guard на всякий случай: контракт «m.From заполнен» сейчас
+// держит только call-site, самостоятельный вызов будущего кода паниковать
+// не должен (m.Chat — value-тип, nil не бывает).
+func (b *Bot) notifyReplyAnswered(m *telego.Message, p *replyPending) {
+	if m == nil || m.From == nil {
+		return
+	}
+	targets := b.modNotifyTargets(b.runCtx)
+	if len(targets) == 0 {
+		return
+	}
+	infos, _ := b.db.GetUserInfos(b.runCtx, []int64{m.From.ID})
+	card := replyAnsweredCard(storage.ChatInfo{
+		ChatID:   m.Chat.ID,
+		Title:    m.Chat.Title,
+		Username: m.Chat.Username,
+	}, mentionWithUsername(infos, m.From.ID), p.Stage)
+	for _, ownerID := range targets {
+		if _, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
+			ChatID:     tu.ID(ownerID),
+			FromChatID: tu.ID(m.Chat.ID),
+			MessageID:  m.MessageID,
+		}); err != nil {
+			b.log.Warn("forward reply-answered message", "err", err, "owner", ownerID)
+		}
+		b.sendNotificationHTML([]int64{ownerID}, card, "notify reply-answered")
+	}
+}
+
+// replyAnsweredCard — текст карточки успеха 2-го уровня. Чистая функция для
+// табличных тестов. who — HTML-безопасное имя/упоминание (mentionWithUsername).
+// Стадия известна точно (последняя — запинание с опозданием на финальное
+// предупреждение — отчётливо честнее «после напоминания»).
+func replyAnsweredCard(chat storage.ChatInfo, who string, stage int) string {
+	card := fmt.Sprintf("💬 Прошёл 2-й уровень защиты в %s\nКто: %s",
+		chatLinkHTML(chat), who)
+	switch {
+	case stage >= captchaStages:
+		card += "\nОтветил после последнего предупреждения."
+	case stage >= 2:
+		card += "\nОтветил только после напоминания."
+	}
+	return card
 }
 
 // notifyCaptchaFail — провал капчи: подписчикам captcha_notify (все провалы)
@@ -97,7 +151,9 @@ func (b *Bot) sendModCard(targets []int64, chatID, targetID int64, kind storage.
 	action, whoLabel, whyLabel := "👢 Кик", "Кого", "Причина"
 	switch kind {
 	case storage.EventPass:
-		action, whoLabel, whyLabel = "✅ Капча пройдена", "Кто", "Ответ"
+		// остался единственный потребитель — ручное «✅ Впустить» на 2-м уровне
+		// (rpok); автоматических пассов капчи здесь больше нет
+		action, whoLabel, whyLabel = "✅ Пропущен вручную", "Кто", "Причина"
 	case storage.EventBan, storage.EventSpamBan:
 		action = "🚫 Бан"
 	case storage.EventJoin, storage.EventKick, storage.EventLeft,
@@ -117,11 +173,18 @@ func (b *Bot) sendModCard(targets []int64, chatID, targetID int64, kind storage.
 	text := fmt.Sprintf("%s в %s\n%s: %s\n%s: %s",
 		action, b.chatLink(b.runCtx, chatID),
 		whoLabel, mentionWithUsername(infos, targetID), whyLabel, why)
+	b.sendNotificationHTML(targets, text, "notify mod action")
+}
+
+// sendNotificationHTML рассылает HTML-сообщение без превью ссылок списку
+// получателей. Best effort: ошибки только Warn. Общий хвост sendModCard и
+// notifyReplyAnswered.
+func (b *Bot) sendNotificationHTML(targets []int64, text, logKey string) {
 	for _, ownerID := range targets {
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
 			WithParseMode(telego.ModeHTML).
 			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
-			b.log.Warn("notify mod action", "err", err, "owner", ownerID)
+			b.log.Warn(logKey, "err", err, "owner", ownerID)
 		}
 	}
 }
@@ -156,6 +219,8 @@ func humanReasonWith(reason string, nameLookup func(ids []int64) map[int64]stora
 		return "спам по решению админа " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)
 	case reason == storage.ReasonGlobal:
 		return "в глобальной базе спамеров"
+	case reason == storage.ReasonQuarantine:
+		return "флуд ссылками/пересылками (карантин)"
 	case strings.HasPrefix(reason, storage.ReasonModPrefix):
 		adminID, _ := parseModID(reason)
 		return "команда админа " + mentionWithUsername(nameLookup([]int64{adminID}), adminID)

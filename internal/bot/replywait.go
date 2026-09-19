@@ -198,10 +198,13 @@ func messageHasUserContent(m *telego.Message) bool {
 // replyWaitSatisfied снимает ожидание, когда юзер написал сообщение.
 // Вызывается из middleware (bot.go) на каждое групповое сообщение с контентом,
 // ДО маршрутизации — быстрый in-memory промах для всех, у кого ожидания нет.
-func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
+// Возвращает изъятое ожидание (nil, если его не было / не наш — обычный юзер
+// без reply-check): middleware использует не-nil как признак «прошёл 2-й
+// уровень» и шлёт владельцам форвард ответа (notifyReplyAnswered).
+func (b *Bot) replyWaitSatisfied(chatID, userID int64) *replyPending {
 	p, ok := b.replies.Take(chatID, userID)
 	if !ok {
-		return
+		return nil
 	}
 	p.Cancel()
 	// Строку гасим ДО записи пасса: окно между ними микросекундное, но
@@ -240,6 +243,7 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) {
 		b.log.Warn("record pass event (reply)", "err", err)
 	}
 	b.log.Info("reply check passed", "chat", chatID, "user", userID, "stage", p.Stage)
+	return p
 }
 
 // cancelReplyWait тихо снимает ожидание (юзер вышел/кикнут/забанен/замьючен) —
