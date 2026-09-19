@@ -336,17 +336,17 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	bh.Handle(b.handleChatMember, th.AnyChatMember())
 	bh.Handle(b.handleMyChatMember, th.AnyMyChatMember())
-	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))
-	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))
-	bh.HandleCallbackQuery(b.handleReplyApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpok:"))
-	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspam:"))
-	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamc:")) // rpspamc: ≠ rpspam:XX (prefix includes colon)
-	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamx:")) // rpspamx: ≠ rpspam:XX
-	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))
-	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))
-	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))
-	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))
-	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:"))
+	bh.HandleCallbackQuery(b.handleCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("cap:"))              // cap:<userID>:<optIdx>
+	bh.HandleCallbackQuery(b.handleApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("capok:"))     // capok:<userID>
+	bh.HandleCallbackQuery(b.handleReplyApproveCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpok:")) // rpok:<userID>
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspam:"))  // rpspam:<userID> (first click)
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamc:")) // rpspamc:<userID> (confirm)
+	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamx:")) // rpspamx:<userID> (cancel)
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))         // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|gr|daily|sil|spam|rpl|eph|qr|max|tmo|hour|swl|svm|qper|cmode|grtxt|leave|leavec:<chatID>:<val>
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))       // estats:<chatID>:<period>
+	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))       // sv:1|0 (vote)
+	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))      // mc:<u|f|m|w>:<userID>|x
+	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:"))     // appr:y|n:<chatID>
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))

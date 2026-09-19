@@ -263,6 +263,15 @@ func TestSpamVoteBallotTrustGateHandlerLevel(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// isGoldenVoice для каждого голосующего вызывает getChatMember -> вернуть member
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":201,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":202,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":203,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":101,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":102,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":103,"is_bot":false,"first_name":"Голосующий"}}`,
+	}
 	ballots := func() int {
 		t.Helper()
 		yes, no, err := db.CountBallots(ctx, testChatID, 7)

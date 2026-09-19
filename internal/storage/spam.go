@@ -332,9 +332,25 @@ func (d *DB) UserMessageTotalsByChat(ctx context.Context, userID int64) (map[int
 }
 
 // ownerFlagEnabled читает булев флаг owner_settings; нет строки — false.
-// col здесь и в хелперах ниже — всегда константа вызывающего, не
-// пользовательский ввод.
+// col валидируется через allowlist — защита от SQL-инъекции на уровне кода.
+var ownerCols = map[string]struct{}{
+	"spam_notify":       {},
+	"mod_notify":        {},
+	"captcha_notify":    {},
+	"version_notify":    {},
+	"daily_report":      {},
+	"last_stats_period": {},
+	"last_report_day":   {},
+}
+
+func (d *DB) validateOwnerCol(col string) {
+	if _, ok := ownerCols[col]; !ok {
+		panic("invalid owner_settings column: " + col)
+	}
+}
+
 func (d *DB) ownerFlagEnabled(ctx context.Context, ownerID int64, col string) (bool, error) {
+	d.validateOwnerCol(col)
 	var on int
 	err := d.sql.QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT %s FROM owner_settings WHERE owner_id = ?`, col), ownerID).Scan(&on)
@@ -350,6 +366,7 @@ func (d *DB) ownerFlagEnabled(ctx context.Context, ownerID int64, col string) (b
 // ownerFlagUsers — все юзеры со взведённым флагом одним запросом (вместо
 // точечного SELECT на каждого при каждом событии).
 func (d *DB) ownerFlagUsers(ctx context.Context, col string) ([]int64, error) {
+	d.validateOwnerCol(col)
 	rows, err := d.sql.QueryContext(ctx,
 		fmt.Sprintf(`SELECT owner_id FROM owner_settings WHERE %s != 0`, col))
 	if err != nil {
@@ -370,6 +387,7 @@ func (d *DB) ownerFlagUsers(ctx context.Context, col string) ([]int64, error) {
 // setOwnerCol апсертит одну колонку owner_settings — общее тело Set*-тогглов
 // и маркера отправки сводки.
 func (d *DB) setOwnerCol(ctx context.Context, ownerID int64, col string, v any) error {
+	d.validateOwnerCol(col)
 	_, err := d.sql.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO owner_settings (owner_id, %[1]s) VALUES (?, ?)
 		ON CONFLICT(owner_id) DO UPDATE SET %[1]s = excluded.%[1]s

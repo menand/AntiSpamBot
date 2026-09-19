@@ -372,7 +372,7 @@ func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 		return
 	}
 	chatID := message.Chat.ID
-	info := fmt.Sprintf("🚨 %s — подозрение на спам в %s\nАвтор: %s",
+	baseInfo := fmt.Sprintf("🚨 %s — подозрение на спам в %s\nАвтор: %s",
 		html.EscapeString(source),
 		chatLinkHTML(storage.ChatInfo{
 			ChatID:   chatID,
@@ -380,15 +380,29 @@ func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 			Username: message.Chat.Username,
 		}),
 		html.EscapeString(userLabel(*message.From)))
+
+	// Текст сообщения для фоллбека, если форвард запрещён
+	msgText := message.Text
+	if msgText == "" {
+		msgText = message.Caption
+	}
+
 	for _, ownerID := range targets {
-		if _, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
+		_, forwardErr := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
 			ChatID:     tu.ID(ownerID),
 			FromChatID: tu.ID(chatID),
 			MessageID:  message.MessageID,
-		}); err != nil {
-			// Форвард может быть запрещён (protected content) — карточка ниже
-			// всё равно уйдёт, но без текста сообщения было бы слепо: дошлём.
-			b.log.Warn("forward spam suspicion", "err", err, "owner", ownerID)
+		})
+		info := baseInfo
+		if forwardErr != nil {
+			// Форвард может быть запрещён (protected content)
+			b.log.Warn("forward spam suspicion", "err", forwardErr, "owner", ownerID)
+			if msgText != "" {
+				info += fmt.Sprintf("\n\n🔒 <b>Защищённый контент</b> (форвард запрещён):\n%s",
+					html.EscapeString(msgText))
+			} else {
+				info += "\n\n🔒 <b>Защищённый контент</b> (форвард запрещён, текста нет)"
+			}
 		}
 		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
 			WithParseMode(telego.ModeHTML).

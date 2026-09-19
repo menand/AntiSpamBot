@@ -201,6 +201,12 @@ func (b *Bot) modPrologue(ctx *th.Context, message telego.Message) (int64, bool)
 	if !b.commandForUs(message.Text) {
 		return 0, false
 	}
+	// Бот должен иметь право «Блокировка пользователей» — иначе модерация
+	// не работает (кик/бан/мьют требуют restrict). Проверяем ДО всего остального.
+	if !b.botCanRestrict(ctx, chatID) {
+		b.refuseAndDelete(ctx, message, "⚠️ У бота нет права «Блокировка пользователей» — модерация недоступна. Выдай админку с нужными тумблерами.")
+		return 0, false
+	}
 	// Анонимный админ пишет от имени самого чата (sender_chat == чат) —
 	// getChatMember его не различает, но право модерации у него есть. Ветвь
 	// ДО бот-фильтров: его From — как раз бот (GroupAnonymousBot).
