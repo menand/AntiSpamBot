@@ -265,7 +265,11 @@ func TestModProloguePunishRequiresFreshNegative(t *testing.T) {
 	t.Run("свежий негатив — наказание", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
-		fc.resp["getChatMember"] = memberJSON
+		// 1-й вызов: бот (user_id=42) — админ с restrict; 2-й: юзер (9) — member
+		fc.respSeq["getChatMember"] = []string{
+			`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+			memberJSON,
+		}
 		if _, ok := b.modPrologue(nil, cmd()); ok {
 			t.Fatal("non-admin must be rejected")
 		}
@@ -278,7 +282,10 @@ func TestModProloguePunishRequiresFreshNegative(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		seedAdminCache(b, testChatID, 9, false) // устаревший негатив (10 мин TTL)
-		fc.resp["getChatMember"] = adminJSON
+		fc.respSeq["getChatMember"] = []string{
+			`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+			adminJSON,
+		}
 		if _, ok := b.modPrologue(nil, cmd()); !ok {
 			t.Fatal("freshly promoted admin must pass despite cached negative")
 		}
@@ -291,7 +298,17 @@ func TestModProloguePunishRequiresFreshNegative(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		seedAdminCache(b, testChatID, 9, true)
-		fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 429, Description: "Too Many Requests"}
+		fc.respSeq["getChatMember"] = []string{
+			`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+			adminJSON,
+		}
+		// Ошибка только на втором вызове (user_id=9), первый (бот=42) проходит
+		fc.errWhen = func(method string, data *telegoapi.RequestData) bool {
+			if method != "getChatMember" || data == nil || data.BodyRaw == nil {
+				return false
+			}
+			return strings.Contains(string(data.BodyRaw), `"user_id":9`)
+		}
 		if _, ok := b.modPrologue(nil, cmd()); !ok {
 			t.Fatal("cached admin must pass on live-check error")
 		}
@@ -303,6 +320,10 @@ func TestModProloguePunishRequiresFreshNegative(t *testing.T) {
 	t.Run("ошибка живой проверки без кэша — молча игнор", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
+		fc.respSeq["getChatMember"] = []string{
+			`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+			"",
+		}
 		fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 429, Description: "Too Many Requests"}
 		if _, ok := b.modPrologue(nil, cmd()); ok {
 			t.Fatal("unknown status must not pass")
@@ -363,12 +384,17 @@ func TestGreetingFailureDisarmsReplyWait(t *testing.T) {
 
 // TestSpamVoteCallbackStrictParser — чужой/битый payload не голосует.
 func TestSpamVoteCallbackStrictParser(t *testing.T) {
-	b, db, _ := newFlowBot(t)
+	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
 	if err := db.PutSpamVote(context.Background(), storage.SpamVote{
 		ChatID: testChatID, BotMsgID: 7, AuthorID: 42, Prob: 100, CreatedAt: time.Now(),
 	}); err != nil {
 		t.Fatal(err)
+	}
+	// isGoldenVoice для voter=100 вызывает isChatAdminFresh -> getChatMember для user_id=100
+	// Нужно вернуть "member", чтобы не сработал золотой голос
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":100,"is_bot":false,"first_name":"Голосующий"}}`,
 	}
 	for _, data := range []string{"sv:2", "sv:", "sv:0x", "sv:01", "SV:1"} {
 		query := telego.CallbackQuery{

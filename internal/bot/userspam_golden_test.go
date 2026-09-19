@@ -53,6 +53,10 @@ func TestSpamReportGoldenOwner(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
 	b.cfg.OwnerIDs = map[int64]struct{}{9: {}}
+	// guardModTarget: canManageChat -> isChatAdminFresh для цели (777)
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":777,"is_bot":false,"first_name":"Спамер"}}`,
+	}
 
 	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 777, FirstName: "Спамер"})); err != nil {
 		t.Fatal(err)
@@ -117,6 +121,10 @@ func TestSpamReportGoldenTakesPendingVote(t *testing.T) {
 		CreatedAt:   time.Now(),
 	}); err != nil {
 		t.Fatal(err)
+	}
+	// guardModTarget: canManageChat -> isChatAdminFresh для цели (777)
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":777,"is_bot":false,"first_name":"Спамер"}}`,
 	}
 
 	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 777, FirstName: "Спамер"})); err != nil {

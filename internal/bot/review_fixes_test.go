@@ -820,6 +820,12 @@ func TestSpamReportTrustGateFailClosed(t *testing.T) {
 func TestSpamReportBelowTrustRefused(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
+	// handleSpamCommand: isGoldenVoice для репортера (9) -> getChatMember для 9
+	// guardModTarget: canManageChat -> isChatAdminFresh для цели (777)
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":9,"is_bot":false,"first_name":"Репортёр"}}`,
+		`{"status":"member","user":{"id":777,"is_bot":false,"first_name":"Цель"}}`,
+	}
 	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 777})); err != nil {
 		t.Fatal(err)
 	}

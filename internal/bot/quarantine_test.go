@@ -495,6 +495,17 @@ func TestTrustCommandReleasesQuarantine(t *testing.T) {
 	// отрицательно (guardModTarget не должен принять админа за цель).
 	seedAdminCache(b, testChatID, 9, true)
 	seedAdminCache(b, testChatID, testUserID, false)
+	// modPrologue: botCanRestrict (бот 42) + isChatAdminFresh (юзер 9)
+	// guardModTarget: canManageChat -> isChatAdminFresh (цель testUserID=7)
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+		`{"status":"administrator","user":{"id":9,"is_bot":false,"first_name":"Аня"}}`,
+		`{"status":"member","user":{"id":7,"is_bot":false,"first_name":"Новичок"}}`,
+		// 2-й вызов handleTrustCommand: botCanRestrict + isChatAdminFresh + canManageChat
+		`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
+		`{"status":"administrator","user":{"id":9,"is_bot":false,"first_name":"Аня"}}`,
+		`{"status":"member","user":{"id":7,"is_bot":false,"first_name":"Новичок"}}`,
+	}
 
 	trust := func() telego.Message {
 		return telego.Message{

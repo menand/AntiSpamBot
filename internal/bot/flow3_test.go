@@ -607,6 +607,12 @@ func TestSpamVoteMarginResolutionHandlerLevel(t *testing.T) {
 			}
 		}
 	}
+	// isGoldenVoice для каждого голосующего вызывает getChatMember -> вернуть member
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":101,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":102,"is_bot":false,"first_name":"Голосующий"}}`,
+		`{"status":"member","user":{"id":103,"is_bot":false,"first_name":"Голосующий"}}`,
+	}
 	press := func(voter int64) { pressSpamVote(t, b, 7, voter) }
 
 	press(101)

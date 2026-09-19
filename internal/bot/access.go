@@ -6,6 +6,8 @@ import (
 
 	"github.com/menand/AntiSpamBot/internal/captcha"
 	"github.com/menand/AntiSpamBot/internal/storage"
+	"github.com/mymmrac/telego"
+	tu "github.com/mymmrac/telego/telegoutil"
 )
 
 // userChats возвращает подмножество известных чатов, которыми юзер может
@@ -71,6 +73,28 @@ func (b *Bot) chatSettings(ctx context.Context, chatID int64) storage.ChatSettin
 		b.log.Warn("get chat settings", "err", err, "chat", chatID)
 	}
 	return s
+}
+
+// botCanRestrict проверяет, есть ли у бота права «Блокировка пользователей»
+// в чате. Кэш не используется — проверка живая (бот не получает chat_member
+// о себе). Ошибка API = false (fail-closed: без прав модерация не работает).
+func (b *Bot) botCanRestrict(ctx context.Context, chatID int64) bool {
+	if b.me == nil {
+		return false
+	}
+	m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
+		ChatID: tu.ID(chatID),
+		UserID: b.me.ID,
+	})
+	if err != nil {
+		b.log.Debug("botCanRestrict: getChatMember", "err", err, "chat", chatID)
+		return false
+	}
+	admin, ok := m.(*telego.ChatMemberAdministrator)
+	if !ok {
+		return false
+	}
+	return admin.CanRestrictMembers
 }
 
 // effectiveMaxAttempts резолвит число попыток: пер-чатовый override, если

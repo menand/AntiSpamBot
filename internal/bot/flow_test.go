@@ -127,6 +127,7 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 			"getMe":   `{"id":42,"is_bot":true,"first_name":"Test","username":"antispam_bot"}`,
 			"sendMessage": `{"message_id":555,"date":1700000000,
 				"chat":{"id":-100100,"type":"supergroup"}}`,
+			"getChatMember": `{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
 		},
 		respSeq: map[string][]string{},
 		err:     map[string]*telegoapi.Error{},
