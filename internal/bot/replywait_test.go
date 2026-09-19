@@ -92,7 +92,9 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})
 
-	b.replyWaitSatisfied(1, 2)
+	if p := b.replyWaitSatisfied(1, 2); p == nil {
+		t.Fatal("replyWaitSatisfied must return the taken pending")
+	}
 
 	// Ожидание снято и «прошёл» записан ровно один раз.
 	if _, ok := b.replies.Take(1, 2); ok {
@@ -111,8 +113,10 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 		t.Fatalf("passes = %d, want 1", s.Passed)
 	}
 
-	// Повторный вызов (ожидания уже нет) пасс не дублирует.
-	b.replyWaitSatisfied(1, 2)
+	// Повторный вызов (ожидания уже нет) пасс не дублирует и возвращает nil.
+	if p := b.replyWaitSatisfied(1, 2); p != nil {
+		t.Fatal("replyWaitSatisfied on an idle wait must return nil")
+	}
 	s, _ = db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
 	if s.Passed != 1 {
 		t.Fatalf("passes after duplicate = %d, want 1", s.Passed)

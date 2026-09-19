@@ -85,7 +85,9 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return b.toggleOwnerSetting(ctx, query, b.db.SpamNotifyEnabled, b.db.SetSpamNotify, "spam_notify")
 	case "modnotify":
 		// Глобальный тумблер владельца: слать ли ему в ЛС кики/баны
-		// (капча, молчание, /kick, /ban, глобальная база) и проходы капчи.
+		// (капча, молчание, /kick, /ban, глобальная база) и события 2-го
+		// уровня (форвард ответа на приветствие, кик за молчание). Пассов
+		// капчи здесь нет — их убрали как шум.
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
@@ -259,6 +261,39 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 				tu.CallbackQuery(query.ID).WithText(alert))
 		}
 		return err
+	case "qr":
+		// Тоггл карантина новичков («только текст, без ссылок и пересылок»).
+		// Выключение отпускает всех активных карантинных юзеров: Telegram
+		// держит рестрикт до старого until_date, и иначе лимит пережил бы
+		// выключение до конца срока.
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
+			return nil
+		}
+		return b.toggleChatSetting(ctx, query, chatID,
+			func(s storage.ChatSettings) bool { return s.QuarantineEnabled },
+			b.db.SetQuarantineEnabled, "quarantine_enabled",
+			func(prev bool) {
+				if prev {
+					b.goSafe("quarantineReleaseChat", func() { b.quarantineReleaseChat(chatID) })
+				}
+			})
+	case "qper":
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
+			return nil
+		}
+		v, err := strconv.Atoi(parts[3])
+		// Допустимы только штатные пресеты длительности карантина
+		// (час/день/неделя) — подделанный callback не должен записать
+		// произвольное число часов.
+		if err != nil || (v != 1 && v != 24 && v != 168) {
+			return nil //nolint:nilerr // intentional: invalid preset value
+		}
+		if err := b.db.SetQuarantineHours(b.runCtx, chatID, &v); err != nil {
+			b.log.Warn("set quarantine_hours", "err", err)
+		}
+		return b.renderChatSettings(ctx, query, chatID)
 	case "sil":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
@@ -526,10 +561,14 @@ func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, cha
 	prev := get(s)
 	if err := set(b.runCtx, chatID, !prev); err != nil {
 		b.log.Warn("set "+what, "err", err, "chat", chatID)
+		b.toggleMu.Unlock()
+		return b.renderChatSettings(ctx, query, chatID)
 	}
 	b.toggleMu.Unlock()
 	// Колбэкам отдаём значение ДО инверсии — уже после успешной записи и
 	// снятия замка (например, «это было первое включение?» для алертов).
+	// ТОЛЬКО на успехе: afterSet может дорого стоить (release всех карантинов
+	// при выключении) и не должен срабатывать по несосоявшейся записи.
 	for _, cb := range afterSet {
 		cb(prev)
 	}
@@ -603,7 +642,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 				WithCallbackData("menu:spamnotify"),
 		})
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и капча в ЛС", modOn)).
+			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и ответы на приветствие в ЛС", modOn)).
 				WithCallbackData("menu:modnotify"),
 		})
 		rows = append(rows, []telego.InlineKeyboardButton{
@@ -810,6 +849,7 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	intervalMin := int(b.effectiveStageInterval(s).Minutes())
 	digestHourUTC := b.effectiveDailyHour(s)
 	captchaMode := effectiveCaptchaMode(s)
+	qrHours := int(b.effectiveQuarantineDuration(s).Hours())
 
 	greetingText := "стандартный"
 	if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
@@ -834,7 +874,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
 			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)\n"+
-			"👻 Эфемерные сообщения (капча и мод-ответы видны только адресату): <b>%s</b>",
+			"👻 Эфемерные сообщения (капча и мод-ответы видны только адресату): <b>%s</b>\n"+
+			"🧫 Карантин новичков (только текст, без ссылок и пересылок): <b>%s</b> (длительность: <b>%s</b>)",
 		html.EscapeString(title),
 		captchaModeLabel(captchaMode),
 		maxAttempts, intervalMin,
@@ -845,6 +886,8 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		onOffLabel(s.SilentAnnounceEnabled),
 		spamLabel, spamWhitelist, spamMargin,
 		onOffLabel(s.EphemeralEnabled),
+		onOffLabel(s.QuarantineEnabled),
+		quarantineDurationLabel(qrHours),
 	)
 
 	rows := [][]telego.InlineKeyboardButton{
@@ -874,6 +917,16 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("👻 Эфемерно", s.EphemeralEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
 		},
+		{
+			tu.InlineKeyboardButton(toggleLabel("🧫 Карантин новичков", s.QuarantineEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:qr:%d", chatID)),
+		},
+	}
+	// Пресеты длительности — только при включённой фиче (сценарий тот же, что
+	// у пресетов антиспама: выключенную фичу настраивать нечего, экран и так
+	// плотный).
+	if s.QuarantineEnabled {
+		rows = append(rows, quarantineHoursRow(chatID, qrHours))
 	}
 	// Пресеты секунд ожидания убраны вместе с reply_check_seconds: серия
 	// напоминаний живёт на общем с капчей интервале («tmo» выше).
@@ -978,6 +1031,43 @@ func onOffLabel(on bool) string {
 		return "✅"
 	}
 	return "❌"
+}
+
+// quarantineDurationLabel — человекочитаемая длительность карантина в настройках.
+func quarantineDurationLabel(hours int) string {
+	switch hours {
+	case 1:
+		return "1 час"
+	case 24:
+		return "1 день"
+	case 168:
+		return "1 неделя"
+	default:
+		return fmt.Sprintf("%d ч", hours)
+	}
+}
+
+// quarantineHoursRow — ряд пресетов длительности карантина: час/день/неделя.
+func quarantineHoursRow(chatID int64, current int) []telego.InlineKeyboardButton {
+	opts := []struct {
+		hours int
+		label string
+	}{
+		{1, "1 час"},
+		{24, "1 день"},
+		{168, "1 неделя"},
+	}
+	row := make([]telego.InlineKeyboardButton, 0, len(opts))
+	for _, o := range opts {
+		label := o.label
+		if o.hours == current {
+			label = "• " + label
+		}
+		row = append(row,
+			tu.InlineKeyboardButton(label).
+				WithCallbackData(fmt.Sprintf("menu:qper:%d:%d", chatID, o.hours)))
+	}
+	return row
 }
 
 // toggleLabel — статус ✅/❌ ПЕРВЫМ: на узких экранах Telegram обрезает конец

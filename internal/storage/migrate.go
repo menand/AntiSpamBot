@@ -57,6 +57,21 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("drop old trusted_users: %w", err)
 	}
 
+	// chat_quarantine — PK (chat_id, user_id). Ограничение Telegram при апгрейде
+	// basic group → supergroup переносится автоматически, остаётся перенести
+	// наши строки. При конфликте остаётся строка нового чата.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_quarantine (chat_id, user_id, until_at, warned)
+		SELECT ?, user_id, until_at, warned FROM chat_quarantine WHERE chat_id = ?
+		ON CONFLICT(chat_id, user_id) DO NOTHING
+	`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate chat_quarantine: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM chat_quarantine WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old chat_quarantine: %w", err)
+	}
+
 	// message_counts — PK (chat_id, day). Счётчики суммируем.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO message_counts (chat_id, day, newcomer_count, oldtimer_count)
@@ -120,12 +135,14 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, reply_check_seconds, ephemeral_enabled)
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled,
+			quarantine_enabled, quarantine_hours)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
 			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
-			reply_check_enabled, reply_check_seconds, ephemeral_enabled
+			reply_check_enabled, reply_check_seconds, ephemeral_enabled,
+			quarantine_enabled, quarantine_hours
 		FROM chat_settings WHERE chat_id = ?
 		ON CONFLICT(chat_id) DO NOTHING
 	`, newID, oldID); err != nil {

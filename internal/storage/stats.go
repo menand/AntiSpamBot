@@ -69,6 +69,7 @@ const (
 	ReasonVotePrefix   = "vote:"          // + id,id,...: вердикт голосования (голоса «за»)
 	ReasonReplyApprove = "reply_approve:" // + adminID: админ впустил вручную через кнопку на приветствии
 	ReasonReplySpam    = "reply_spam:"    // + adminID: админ пометил как спамера через кнопку на приветствии
+	ReasonQuarantine   = "quarantine"     // карантин-эскалация: авто-мьют за флуд ссылками/форвардами
 )
 
 // RecordEvent пишет событие; reason — причина для kick/ban/spamban (см.

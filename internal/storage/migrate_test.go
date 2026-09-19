@@ -49,6 +49,10 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	// интервале): колонка переносится, но в Go-структуре её больше нет.
 	_, _ = db.sql.ExecContext(ctx, `UPDATE chat_settings SET reply_check_seconds = ? WHERE chat_id = ?`, rpls, old)
 	_ = db.SetEphemeralEnabled(ctx, old, true)
+	qh := 24
+	_ = db.SetQuarantineEnabled(ctx, old, true)
+	_ = db.SetQuarantineHours(ctx, old, &qh)
+	_ = db.PutQuarantine(ctx, old, 1, now.Add(time.Hour), true)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
 	_ = db.AddTrusted(ctx, old, 1, now)
 
@@ -138,6 +142,19 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.EphemeralEnabled {
 		t.Error("ephemeral_enabled did not migrate")
+	}
+	if !ms.QuarantineEnabled {
+		t.Error("quarantine_enabled did not migrate")
+	}
+	if !ms.QuarantineHours.Valid || ms.QuarantineHours.Int64 != 24 {
+		t.Errorf("quarantine_hours did not migrate: %+v", ms.QuarantineHours)
+	}
+	// Активная карантинная строка переносится, как trusted_users.
+	if ok, _ := db.HasQuarantine(ctx, neu, 1, 0); !ok {
+		t.Error("quarantine row not migrated to new chat")
+	}
+	if ok, _ := db.HasQuarantine(ctx, old, 1, 0); ok {
+		t.Error("quarantine row still on old chat")
 	}
 	// greetings старого чата чистятся: message id мертвы вместе с чатом.
 	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {

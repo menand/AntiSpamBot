@@ -59,3 +59,57 @@ func TestParseVoteIDs(t *testing.T) {
 		t.Errorf("empty vote must give nil, got %v", ids)
 	}
 }
+
+func TestReplyAnsweredCard(t *testing.T) {
+	tests := []struct {
+		name  string
+		chat  storage.ChatInfo
+		who   string
+		stage int
+		want  string
+	}{
+		{
+			name: "публичный чат, стадия 1",
+			chat: storage.ChatInfo{ChatID: -1001, Title: "Чат", Username: "mysuperchat"},
+			who:  `<a href="tg://user?id=7">Вася</a> - @vasya`,
+			want: `💬 Прошёл 2-й уровень защиты в <a href="https://t.me/mysuperchat">«Чат»</a>` +
+				"\nКто: <a href=\"tg://user?id=7\">Вася</a> - @vasya",
+		},
+		{
+			name: "приватная супергруппа рендерится ссылкой t.me/c",
+			chat: storage.ChatInfo{ChatID: -1002147483648, Title: "Закрытый"},
+			who:  `<a href="tg://user?id=7">Вася</a>`,
+			want: "💬 Прошёл 2-й уровень защиты в " +
+				`<a href="https://t.me/c/2147483648/999999999">«Закрытый»</a>` +
+				"\nКто: <a href=\"tg://user?id=7\">Вася</a>",
+		},
+		{
+			name:  "поздний ответ (стадия 2) — с пометкой",
+			chat:  storage.ChatInfo{ChatID: -1001, Title: "Чат"},
+			who:   "Вася",
+			stage: 2,
+			want:  "💬 Прошёл 2-й уровень защиты в «Чат»\nКто: Вася\nОтветил только после напоминания.",
+		},
+		{
+			name:  "ответ после последнего предупреждения (стадия 3) — отдельная формулировка",
+			chat:  storage.ChatInfo{ChatID: -1001, Title: "Чат"},
+			who:   "Вася",
+			stage: 3,
+			want:  "💬 Прошёл 2-й уровень защиты в «Чат»\nКто: Вася\nОтветил после последнего предупреждения.",
+		},
+		{
+			name:  "имя с HTML-спецсимволами уже экранировано у вызывающего",
+			chat:  storage.ChatInfo{ChatID: -1001, Title: "Чат"},
+			who:   `A&lt;B &gt; C`,
+			stage: 1,
+			want:  "💬 Прошёл 2-й уровень защиты в «Чат»\nКто: A&lt;B &gt; C",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := replyAnsweredCard(tc.chat, tc.who, tc.stage); got != tc.want {
+				t.Errorf("replyAnsweredCard() =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}

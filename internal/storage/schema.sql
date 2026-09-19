@@ -134,7 +134,9 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     spam_vote_margin        INTEGER, -- NULL = 3; перевес голосов для вердикта
     reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- режим «требовать ответа»
     reply_check_seconds     INTEGER, -- легаси (серия напоминаний живёт на captcha_interval_minutes); не читается
-    ephemeral_enabled       INTEGER NOT NULL DEFAULT 0  -- служебные сообщения эфемерно (Bot API 10.2)
+    ephemeral_enabled       INTEGER NOT NULL DEFAULT 0, -- служебные сообщения эфемерно (Bot API 10.2)
+    quarantine_enabled      INTEGER NOT NULL DEFAULT 0, -- карантин новичков: только текст без ссылок/пересылок
+    quarantine_hours        INTEGER  -- NULL = 1 час; длительность карантина
 );
 
 -- Приветствия бота по (chat, user): помним message_id, чтобы при спам-бане
@@ -210,6 +212,18 @@ CREATE TABLE IF NOT EXISTS trusted_users (
     chat_id INTEGER NOT NULL,
     user_id INTEGER NOT NULL,
     at      INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+-- Активный карантин новичков по (chat, user): рестрикт «только текст» уже
+-- применён серверно (until_date), эта таблица держит рестарт-безопасность
+-- бот-сайд цензора (удаление ссылок и текстовых форвардов), флаг разового
+-- эфемерного пояснения и список для отпуска при выключении карантина.
+CREATE TABLE IF NOT EXISTS chat_quarantine (
+    chat_id  INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    until_at INTEGER NOT NULL, -- Telegram снимет рестрикт сам, серверно
+    warned   INTEGER NOT NULL DEFAULT 0, -- эфемерное пояснение уже показано
     PRIMARY KEY (chat_id, user_id)
 );
 

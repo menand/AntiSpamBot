@@ -113,6 +113,46 @@ func (b *Bot) mute(ctx context.Context, chatID, userID int64, d time.Duration) e
 	return nil
 }
 
+// textOnlyPermissions — «карантин»: новичок может только писать текст.
+// Гранулярные флаги задаём ЯВНО все: опущенный наследуется от дефолтных прав
+// чата (а те почти всегда разрешают медиа), а не «ложится рядом». deprecated
+// can_send_media_messages не трогаем — при нём гранулярные права игнорируются.
+// CanSendOtherMessages=false душит стикеры/игры/инлайн-ботов,
+// CanAddWebPagePreviews=false — превью ссылок, CanInviteUsers=false — инвайт-спам.
+func textOnlyPermissions() telego.ChatPermissions {
+	yes, no := true, false
+	return telego.ChatPermissions{
+		CanSendMessages:       &yes,
+		CanSendAudios:         &no,
+		CanSendDocuments:      &no,
+		CanSendPhotos:         &no,
+		CanSendVideos:         &no,
+		CanSendVideoNotes:     &no,
+		CanSendVoiceNotes:     &no,
+		CanSendPolls:          &no,
+		CanSendOtherMessages:  &no,
+		CanAddWebPagePreviews: &no,
+		CanInviteUsers:        &no,
+	}
+}
+
+// quarantineRestrict применяет «только текст» на срок d. Тот же паттерн, что у
+// restrictFor: retryTG + пересчёт until на КАЖДОЙ попытке (429-очередь не
+// должна уронить дневной карантин под 30-секундный пол «навсегда»).
+func (b *Bot) quarantineRestrict(ctx context.Context, chatID, userID int64, d time.Duration) error {
+	if err := retryTG(ctx, func() error {
+		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
+			ChatID:      tu.ID(chatID),
+			UserID:      userID,
+			Permissions: textOnlyPermissions(),
+			UntilDate:   time.Now().Add(d).Unix(),
+		})
+	}); err != nil {
+		return fmt.Errorf("quarantine restrict after retries: %w", err)
+	}
+	return nil
+}
+
 // restrictFor — общее ядро restrict/mute: d == 0 — бессрочно (капча), d > 0 —
 // until_date. until вычисляется в момент КАЖДОЙ попытки: retryTG честно ждёт
 // весь retry_after на 429 (бывают минуты), и посчитанный заранее until мог бы

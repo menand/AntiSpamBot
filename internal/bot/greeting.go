@@ -62,6 +62,13 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	if s.ReplyCheckEnabled {
 		text += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(s).Minutes())))
 	}
+	// Карантин объявляем прямо в приветствии: новичок сразу знает, что после
+	// капчи он ограничен «только текстом», а не узнаёт это первым удалённым
+	// сообщением. Строка идёт в тело якоря, поэтому повторяется и на
+	// напоминаниях — консистентно со стадией серии.
+	if s.QuarantineEnabled {
+		text += "\n🧫 Карантин новичка: пока можно писать только текст — без ссылок и пересылок."
+	}
 
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {

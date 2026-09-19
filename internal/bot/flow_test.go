@@ -148,6 +148,7 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		me:      &telego.User{ID: 42, IsBot: true, Username: "antispam_bot"},
 		runCtx:  context.Background(),
 		replies: newReplyStore(),
+		quar:    newQuarantineStore(),
 
 		// Пустые ключи = провайдеры выключены (как без env в проде);
 		// тесты ИИ-цепочки подменяют поля фейками llmClassifier.
@@ -211,6 +212,8 @@ func memberUpdate(chatID int64, from, user telego.User, oldStatus, newStatus str
 			return &telego.ChatMemberRestricted{User: u, IsMember: true}
 		case "kicked":
 			return &telego.ChatMemberBanned{User: u}
+		case "administrator":
+			return &telego.ChatMemberAdministrator{User: u}
 		default:
 			return &telego.ChatMemberLeft{User: u}
 		}
