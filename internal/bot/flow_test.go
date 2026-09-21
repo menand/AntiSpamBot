@@ -162,6 +162,9 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		adminCache:    map[chatUser]adminCacheEntry{},
 		approvalCache: map[int64]bool{},
 		spamGateCache: map[int64]bool{},
+		editChecked:   map[chatUser]time.Time{},
+		spamInflight:  map[chatUser]struct{}{},
+		leaveInflight: map[int64]bool{},
 	}
 	return b, db, fc
 }
