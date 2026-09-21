@@ -995,3 +995,124 @@ func TestJoinedLinePrecedence(t *testing.T) {
 		})
 	}
 }
+
+func TestNotifyCaptchaFail(t *testing.T) {
+	t.Run("captcha_notify only count=1", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		ctx := context.Background()
+		chatID := int64(testChatID)
+		serviceableChat(t, b, db, chatID)
+		b.cfg.OwnerIDs = map[int64]struct{}{10: {}, 20: {}}
+
+		// Owner 10 has captcha_notify only.
+		_ = db.SetCaptchaNotify(ctx, 10, true)
+		// Owner 20 has mod_notify only.
+		_ = db.SetModNotify(ctx, 20, true)
+
+		b.notifyCaptchaFail(chatID, 999, storage.EventKick, "не прошёл капчу", 1)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for fc.callCount("sendMessage") == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		// count=1: only captcha_notify subscriber (owner 10), NOT mod_notify (owner 20).
+		sends := sendsTo(fc)
+		if len(sends) != 1 {
+			t.Fatalf("count=1: expected 1 sendMessage, got %d", len(sends))
+		}
+		if !sendsToUser(sends, 10) {
+			t.Fatal("count=1: must notify captcha_notify subscriber (owner 10)")
+		}
+	})
+
+	t.Run("count>=2 merges captcha_notify + mod_notify", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		ctx := context.Background()
+		chatID := int64(testChatID)
+		serviceableChat(t, b, db, chatID)
+		b.cfg.OwnerIDs = map[int64]struct{}{10: {}, 20: {}, 30: {}}
+
+		// Owner 10: captcha_notify only.
+		_ = db.SetCaptchaNotify(ctx, 10, true)
+		// Owner 20: mod_notify only.
+		_ = db.SetModNotify(ctx, 20, true)
+		// Owner 30: both.
+		_ = db.SetCaptchaNotify(ctx, 30, true)
+		_ = db.SetModNotify(ctx, 30, true)
+
+		b.notifyCaptchaFail(chatID, 999, storage.EventKick, "не прошёл капчу", 2)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for fc.callCount("sendMessage") == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+
+		// count=2: captcha_notify (10, 30) + mod_notify (20) — 30 deduped.
+		sends := sendsTo(fc)
+		if len(sends) != 3 {
+			t.Fatalf("count=2: expected 3 sendMessage calls, got %d", len(sends))
+		}
+		for _, id := range []int64{10, 20, 30} {
+			if !sendsToUser(sends, id) {
+				t.Errorf("count=2: must notify owner %d", id)
+			}
+		}
+	})
+
+	t.Run("no subscribers sends nothing", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		chatID := int64(testChatID)
+		serviceableChat(t, b, db, chatID)
+		b.cfg.OwnerIDs = map[int64]struct{}{10: {}}
+		// No notify settings for owner 10.
+
+		b.notifyCaptchaFail(chatID, 999, storage.EventKick, "не прошёл капчу", 1)
+
+		deadline := time.Now().Add(3 * time.Second)
+		for fc.callCount("sendMessage") == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if n := fc.callCount("sendMessage"); n != 0 {
+			t.Fatalf("no subscribers: expected 0 sendMessage, got %d", n)
+		}
+	})
+}
+
+// sendsTo extracts the chat_id from sendMessage call bodies.
+func sendsTo(fc *fakeCaller) []int64 {
+	fc.mu.Lock()
+	defer fc.mu.Unlock()
+	var ids []int64
+	for i, method := range fc.calls {
+		if method != "sendMessage" {
+			continue
+		}
+		body := fc.bodies[i]
+		// Parse chat_id from {"chat_id":<id>,...}
+		idx := strings.Index(body, `"chat_id":`)
+		if idx < 0 {
+			continue
+		}
+		body = body[idx+len(`"chat_id":`):]
+		// Read the number.
+		end := 0
+		for end < len(body) && (body[end] >= '0' && body[end] <= '9' || body[end] == '-') {
+			end++
+		}
+		if end > 0 {
+			id, _ := strconv.ParseInt(body[:end], 10, 64)
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func sendsToUser(sends []int64, userID int64) bool {
+	for _, id := range sends {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}

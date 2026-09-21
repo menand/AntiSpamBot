@@ -262,55 +262,27 @@ func (d *DB) PassedUsersPage(ctx context.Context, chatID int64, from, until time
 
 // EventUsersPage — как EventUsers, но с LIMIT/OFFSET для пагинации.
 func (d *DB) EventUsersPage(ctx context.Context, chatID int64, from, until time.Time, limit, offset int, kinds ...EventKind) ([]UserCount, error) {
-	if len(kinds) == 0 {
-		return nil, nil
-	}
-	ph := placeholders(len(kinds))
+	return d.eventUsersQuery(ctx, chatID, from, until, limit, offset, kinds...)
+}
 
-	whereArgs := func() []any {
-		a := []any{chatID}
-		for _, k := range kinds {
-			a = append(a, string(k))
-		}
-		return append(a, from.Unix(), until.Unix())
+// eventArgs собирает два одинаковых набора аргументов для коррелированного
+// подзапроса last_reason и основного WHERE. Возвращает объединённый срез
+// [subArgs... whereArgs...].
+func eventArgs(chatID int64, from, until time.Time, kinds []EventKind) []any {
+	sub := make([]any, 0, 2+len(kinds))
+	sub = append(sub, chatID)
+	for _, k := range kinds {
+		sub = append(sub, string(k))
 	}
-	args := append(whereArgs(), whereArgs()...)
-	args = append(args, limit, offset)
-	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`
-		SELECT e.user_id, COUNT(*) AS n,
-		       (SELECT reason FROM events e2
-		        WHERE e2.chat_id = ? AND e2.user_id = e.user_id
-		          AND e2.kind IN (%s) AND e2.at >= ? AND e2.at < ?
-		        ORDER BY e2.at DESC LIMIT 1) AS last_reason
-		FROM events e
-		WHERE e.chat_id = ? AND e.kind IN (%s) AND e.at >= ? AND e.at < ?
-		GROUP BY e.user_id
-		ORDER BY MIN(e.at) ASC, e.user_id ASC
-		LIMIT ? OFFSET ?
-	`, ph, ph), args...)
-	if err != nil {
-		return nil, fmt.Errorf("query event users page: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
-	return scanUserCountsWithReason(rows)
+	sub = append(sub, from.Unix(), until.Unix())
+	where := make([]any, len(sub))
+	copy(where, sub)
+	return append(sub, where...)
 }
 
 // TopWritersPage — как TopWriters, но с LIMIT/OFFSET для пагинации.
 func (d *DB) TopWritersPage(ctx context.Context, chatID int64, from, until time.Time, limit, offset int) ([]UserCount, error) {
-	fromDay := DayOf(from)
-	untilDay := DayOf(until)
-	rows, err := d.sql.QueryContext(ctx, `
-		SELECT user_id, SUM(count) AS n FROM user_message_counts
-		WHERE chat_id = ? AND day >= ? AND day < ?
-		GROUP BY user_id
-		ORDER BY n DESC, user_id ASC
-		LIMIT ? OFFSET ?
-	`, chatID, fromDay, untilDay, limit, offset)
-	if err != nil {
-		return nil, fmt.Errorf("query top writers page: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
-	return scanUserCounts(rows)
+	return d.topWritersQuery(ctx, chatID, from, until, limit, offset)
 }
 
 // TopFailers возвращает юзеров с наибольшим числом событий kick+ban в
@@ -342,6 +314,41 @@ func (d *DB) TopFailers(ctx context.Context, chatID int64, from, until time.Time
 // прошёл в 00:00). Secs = -1, когда join не записан (старые данные).
 // Без лимита — список обрезает renderStats.
 func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Time) ([]UserCount, error) {
+	return d.passedUsersQuery(ctx, chatID, from, until, 0, 0)
+}
+
+// passedUsersQuery — общий запрос для PassedUsers и PassedUsersPage.
+// limit=0 означает «без лимита».
+func (d *DB) passedUsersQuery(ctx context.Context, chatID int64, from, until time.Time, limit, offset int) ([]UserCount, error) {
+	if limit > 0 {
+		rows, err := d.sql.QueryContext(ctx, `
+			SELECT user_id, COUNT(*) AS n, COALESCE(MIN(dur), -1) AS secs
+			FROM (
+				SELECT p.user_id, p.at,
+				       p.at - (SELECT MAX(j.at) FROM events j
+				               WHERE j.chat_id = p.chat_id AND j.user_id = p.user_id
+				                 AND j.kind = 'join' AND j.at <= p.at) AS dur
+				FROM events p
+				WHERE p.chat_id = ? AND p.kind = 'pass' AND p.at >= ? AND p.at < ?
+			)
+			GROUP BY user_id
+			ORDER BY MIN(at) ASC, user_id ASC
+			LIMIT ? OFFSET ?
+		`, chatID, from.Unix(), until.Unix(), limit, offset)
+		if err != nil {
+			return nil, fmt.Errorf("query passed users: %w", err)
+		}
+		defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+		var out []UserCount
+		for rows.Next() {
+			var uc UserCount
+			if err := rows.Scan(&uc.UserID, &uc.Count, &uc.Secs); err != nil {
+				return nil, fmt.Errorf("scan passed user: %w", err)
+			}
+			out = append(out, uc)
+		}
+		return out, rows.Err()
+	}
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, COUNT(*) AS n, COALESCE(MIN(dur), -1) AS secs
 		FROM (
@@ -374,22 +381,21 @@ func (d *DB) PassedUsers(ctx context.Context, chatID int64, from, until time.Tim
 // видов в [from, until), в порядке первого события. Без лимита — вызывающий
 // (renderStats) обрезает список под допустимую длину сообщения Telegram.
 func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time, kinds ...EventKind) ([]UserCount, error) {
+	return d.eventUsersQuery(ctx, chatID, from, until, 0, 0, kinds...)
+}
+
+// eventUsersQuery — общий запрос для EventUsers и EventUsersPage.
+// limit=0 означает «без лимита».
+func (d *DB) eventUsersQuery(ctx context.Context, chatID int64, from, until time.Time, limit, offset int, kinds ...EventKind) ([]UserCount, error) {
 	if len(kinds) == 0 {
 		return nil, nil
 	}
 	ph := placeholders(len(kinds))
-
-	// Один и тот же набор параметров нужен дважды: сперва для коррелированного
-	// подзапроса last_reason, затем для основного WHERE.
-	whereArgs := func() []any {
-		a := []any{chatID}
-		for _, k := range kinds {
-			a = append(a, string(k))
-		}
-		return append(a, from.Unix(), until.Unix())
+	args := eventArgs(chatID, from, until, kinds)
+	if limit > 0 {
+		args = append(args, limit, offset)
 	}
-	args := append(whereArgs(), whereArgs()...)
-	rows, err := d.sql.QueryContext(ctx, fmt.Sprintf(`
+	q := fmt.Sprintf(`
 		SELECT e.user_id, COUNT(*) AS n,
 		       (SELECT reason FROM events e2
 		        WHERE e2.chat_id = ? AND e2.user_id = e.user_id
@@ -398,8 +404,11 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 		FROM events e
 		WHERE e.chat_id = ? AND e.kind IN (%s) AND e.at >= ? AND e.at < ?
 		GROUP BY e.user_id
-		ORDER BY MIN(e.at) ASC, e.user_id ASC
-	`, ph, ph), args...)
+		ORDER BY MIN(e.at) ASC, e.user_id ASC`, ph, ph)
+	if limit > 0 {
+		q += "\n\tLIMIT ? OFFSET ?"
+	}
+	rows, err := d.sql.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query event users: %w", err)
 	}
@@ -411,15 +420,34 @@ func (d *DB) EventUsers(ctx context.Context, chatID int64, from, until time.Time
 // (по дням, верхняя граница исключается — семантика та же, что у QueryStats),
 // по убыванию.
 func (d *DB) TopWriters(ctx context.Context, chatID int64, from, until time.Time, limit int) ([]UserCount, error) {
+	return d.topWritersQuery(ctx, chatID, from, until, limit, 0)
+}
+
+// topWritersQuery — общий запрос для TopWriters и TopWritersPage.
+// limit=0 означает «без лимита».
+func (d *DB) topWritersQuery(ctx context.Context, chatID int64, from, until time.Time, limit, offset int) ([]UserCount, error) {
 	fromDay := DayOf(from)
 	untilDay := DayOf(until)
+	if limit > 0 {
+		rows, err := d.sql.QueryContext(ctx, `
+			SELECT user_id, SUM(count) AS n FROM user_message_counts
+			WHERE chat_id = ? AND day >= ? AND day < ?
+			GROUP BY user_id
+			ORDER BY n DESC, user_id ASC
+			LIMIT ? OFFSET ?
+		`, chatID, fromDay, untilDay, limit, offset)
+		if err != nil {
+			return nil, fmt.Errorf("query top writers: %w", err)
+		}
+		defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+		return scanUserCounts(rows)
+	}
 	rows, err := d.sql.QueryContext(ctx, `
 		SELECT user_id, SUM(count) AS n FROM user_message_counts
 		WHERE chat_id = ? AND day >= ? AND day < ?
 		GROUP BY user_id
 		ORDER BY n DESC, user_id ASC
-		LIMIT ?
-	`, chatID, fromDay, untilDay, limit)
+	`, chatID, fromDay, untilDay)
 	if err != nil {
 		return nil, fmt.Errorf("query top writers: %w", err)
 	}

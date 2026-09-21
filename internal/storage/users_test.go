@@ -313,3 +313,119 @@ func TestUserIDByUsernameLatestWins(t *testing.T) {
 		t.Fatal("unknown username must miss")
 	}
 }
+
+func TestEventUsersPage(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	base := time.Now().Add(-time.Hour)
+	for i := range 5 {
+		_ = db.RecordEvent(ctx, 1, int64(100+i), EventPass, base.Add(time.Duration(i)*time.Minute), "")
+	}
+
+	// LIMIT 2, OFFSET 0 — первые двое по хронологии.
+	page1, err := db.EventUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 0, EventPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page1: got %d, want 2", len(page1))
+	}
+	if page1[0].UserID != 100 || page1[1].UserID != 101 {
+		t.Fatalf("page1 order: %+v", page1)
+	}
+
+	// LIMIT 2, OFFSET 2 — следующие двое.
+	page2, err := db.EventUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 2, EventPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("page2: got %d, want 2", len(page2))
+	}
+	if page2[0].UserID != 102 || page2[1].UserID != 103 {
+		t.Fatalf("page2 order: %+v", page2)
+	}
+
+	// LIMIT 2, OFFSET 4 — последний.
+	page3, err := db.EventUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 4, EventPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page3) != 1 || page3[0].UserID != 104 {
+		t.Fatalf("page3: got %+v, want [104]", page3)
+	}
+
+	// Пустые kinds — nil.
+	empty, err := db.EventUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 0)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty kinds: %v %v", empty, err)
+	}
+}
+
+func TestTopWritersPage(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	now := time.Now()
+	for i, n := range []int{15, 10, 7} {
+		uid := int64(100 + i)
+		for range n {
+			_, _ = db.RecordMessage(ctx, 1, uid, now)
+		}
+	}
+
+	// LIMIT 2 — двое первых.
+	page1, err := db.TopWritersPage(ctx, 1, now.Add(-time.Hour), now.AddDate(0, 0, 1), 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 2 || page1[0].UserID != 100 || page1[1].UserID != 101 {
+		t.Fatalf("page1: %+v", page1)
+	}
+
+	// LIMIT 2, OFFSET 2 — третий.
+	page2, err := db.TopWritersPage(ctx, 1, now.Add(-time.Hour), now.AddDate(0, 0, 1), 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 1 || page2[0].UserID != 102 || page2[0].Count != 7 {
+		t.Fatalf("page2: %+v", page2)
+	}
+}
+
+func TestPassedUsersPage(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	base := time.Now().Add(-time.Hour).Truncate(time.Second)
+	_ = db.RecordEvent(ctx, 1, 300, EventJoin, base, "")
+	_ = db.RecordEvent(ctx, 1, 300, EventPass, base.Add(12*time.Second), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventJoin, base.Add(time.Minute), "")
+	_ = db.RecordEvent(ctx, 1, 100, EventPass, base.Add(time.Minute+8*time.Second), "")
+	_ = db.RecordEvent(ctx, 1, 200, EventPass, base.Add(3*time.Minute), "")
+
+	// LIMIT 2, OFFSET 0 — первые двое.
+	page1, err := db.PassedUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("page1: got %d, want 2", len(page1))
+	}
+	if page1[0].UserID != 300 || page1[1].UserID != 100 {
+		t.Fatalf("page1 order: %+v", page1)
+	}
+	if page1[0].Secs != 12 || page1[1].Secs != 8 {
+		t.Fatalf("page1 secs: %+v", page1)
+	}
+
+	// LIMIT 2, OFFSET 2 — третий.
+	page2, err := db.PassedUsersPage(ctx, 1, base.Add(-time.Minute), time.Now(), 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 1 || page2[0].UserID != 200 || page2[0].Secs != -1 {
+		t.Fatalf("page2: %+v", page2)
+	}
+}

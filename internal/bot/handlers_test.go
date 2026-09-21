@@ -1,8 +1,11 @@
 package bot
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/mymmrac/telego"
 
@@ -119,4 +122,164 @@ func TestStaleCaptchaClick(t *testing.T) {
 	if staleCaptchaClick(live, nil) || staleCaptchaClick(nil, &telego.Message{}) {
 		t.Fatal("nil inputs must not be treated as stale")
 	}
+}
+
+func TestReconcileChats(t *testing.T) {
+	t.Run("orphan drop on 403", func(t *testing.T) {
+		ctx := context.Background()
+		b, db, fc := newFlowBot(t)
+		aliveChat := int64(-100100)
+		orphanChat := int64(-100200)
+		serviceableChat(t, b, db, aliveChat)
+		serviceableChat(t, b, db, orphanChat)
+
+		fc.errWhen = func(method string, data *telegoapi.RequestData) bool {
+			if method != "getChatMember" {
+				return false
+			}
+			body := string(data.BodyRaw)
+			return strings.Contains(body, `"chat_id":-100200`)
+		}
+		fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 403, Description: "Forbidden: bot was kicked"}
+
+		b.reconcileChats(ctx)
+
+		chats, _ := db.ListChats(ctx)
+		for _, c := range chats {
+			if c.ChatID == orphanChat {
+				t.Fatal("orphan chat must be dropped by reconcileChats")
+			}
+		}
+	})
+
+	t.Run("transient error keeps chat", func(t *testing.T) {
+		ctx := context.Background()
+		b, db, fc := newFlowBot(t)
+		chatID := int64(-100100)
+		serviceableChat(t, b, db, chatID)
+
+		fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 429, Description: "Too Many Requests"}
+
+		b.reconcileChats(ctx)
+
+		chats, _ := db.ListChats(ctx)
+		found := false
+		for _, c := range chats {
+			if c.ChatID == chatID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("transient error must not drop the chat")
+		}
+	})
+
+	t.Run("not in ALLOWED_CHATS drops chat", func(t *testing.T) {
+		ctx := context.Background()
+		b, db, _ := newFlowBot(t)
+		chatID := int64(-100100)
+		serviceableChat(t, b, db, chatID)
+		b.cfg.AllowedChats = map[int64]struct{}{-999: {}}
+
+		b.reconcileChats(ctx)
+
+		chats, _ := db.ListChats(ctx)
+		for _, c := range chats {
+			if c.ChatID == chatID {
+				t.Fatal("chat outside ALLOWED_CHATS must be dropped")
+			}
+		}
+	})
+}
+
+func TestEditedGroupMessage(t *testing.T) {
+	t.Run("spam edit triggers check", func(t *testing.T) {
+		b, db, _ := newFlowBot(t)
+		serviceableChat(t, b, db, testChatID)
+		_ = db.SetSpamCheckEnabled(context.Background(), testChatID, true)
+		zero := 0
+		_ = db.SetSpamWhitelistMsgs(context.Background(), testChatID, &zero)
+		b.spamGateCache[testChatID] = true
+		llm := &fakeLLM{enabled: true, spam: false}
+		b.groqc = llm
+		// Mark user 999 as non-admin to avoid skip in spamGatesPass.
+		b.adminCache[chatUser{testChatID, 999}] = adminCacheEntry{isAdmin: false, until: time.Now().Add(time.Hour)}
+
+		msg := telego.Message{
+			MessageID: 100, Chat: telego.Chat{ID: testChatID, Type: "supergroup"},
+			From: &telego.User{ID: 999}, Text: "edited spam http://evil.com",
+		}
+		if err := b.handleEditedGroupMessage(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+		// maybeSpamCheck is async — wait for the goroutine to complete.
+		deadline := time.Now().Add(3 * time.Second)
+		for llm.callCount() == 0 && time.Now().Before(deadline) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if llm.callCount() == 0 {
+			t.Fatal("edited message must trigger LLM check")
+		}
+	})
+
+	t.Run("mid-captcha edit is deleted", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		serviceableChat(t, b, db, testChatID)
+		putCaptcha(b, db, testChatID, 999, 200)
+
+		msg := telego.Message{
+			MessageID: 300, Chat: telego.Chat{ID: testChatID, Type: "supergroup"},
+			From: &telego.User{ID: 999}, Text: "sneaky edit",
+		}
+		if err := b.handleEditedGroupMessage(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+		if n := fc.callCount("deleteMessage"); n != 1 {
+			t.Fatalf("mid-captcha edit must be deleted, deleteMessage calls = %d", n)
+		}
+	})
+
+	t.Run("location edit skips", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		serviceableChat(t, b, db, testChatID)
+
+		msg := telego.Message{
+			MessageID: 400, Chat: telego.Chat{ID: testChatID, Type: "supergroup"},
+			From:     &telego.User{ID: 999},
+			Location: &telego.Location{Latitude: 55.75, Longitude: 37.62},
+		}
+		if err := b.handleEditedGroupMessage(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+		if n := fc.callCount("deleteMessage") + fc.callCount("sendMessage"); n != 0 {
+			t.Fatalf("location edit must be skipped entirely, API calls = %d", n)
+		}
+	})
+
+	t.Run("cooldown skips re-check", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		serviceableChat(t, b, db, testChatID)
+		_ = db.SetSpamCheckEnabled(context.Background(), testChatID, true)
+		b.spamGateCache[testChatID] = true
+		llm := &fakeLLM{enabled: true, spam: false}
+		b.groqc = llm
+
+		msg := telego.Message{
+			MessageID: 500, Chat: telego.Chat{ID: testChatID, Type: "supergroup"},
+			From: &telego.User{ID: 888}, Text: "first edit",
+		}
+		if err := b.handleEditedGroupMessage(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+		first := llm.callCount()
+
+		msg.Text = "second edit within cooldown"
+		if err := b.handleEditedGroupMessage(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+		if llm.callCount() != first {
+			t.Fatal("second edit within cooldown must not trigger another LLM check")
+		}
+		_ = fc
+	})
 }
