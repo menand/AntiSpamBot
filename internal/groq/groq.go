@@ -42,8 +42,9 @@ SPAM if the message contains any of:
 5. Illegal goods/services (counterfeit money, fake documents)
 6. Filter evasion via character substitution — Latin letters inside Russian words (пpивeт, зapaбoтoк), lookalike symbols (α, ο) — combined with promotional content
 7. Vague job ad: no company, no role, only income promise ("need a phone + 2 hrs/day")
+8. Viral clickbait / engagement bait: ALL CAPS text, sensational claims ("leaked video", "they leaked"), VPN/porn/crypto/onlyfans ads, designed to drive clicks or forwards — especially from new accounts
 
-OK for normal messages: questions, discussion, personal chat, links, work talk — even if they mention money, crypto, or jobs neutrally ("сколько стоит биткоин?", "ищу работу джуном").
+OK for normal messages: questions, discussion, personal chat, links, work talk — even if they mention money, crypto, or jobs neutrally ("сколько стоит биткоин?", "ищу работу джуном"). If the reply context shows a normal conversation, treat the message as OK even if it looks like clickbait.
 
 Topic alone (crypto/jobs/money) ≠ spam. Spam = promotional/recruiting content with the signs above. If unsure and no clear signs — OK.
 

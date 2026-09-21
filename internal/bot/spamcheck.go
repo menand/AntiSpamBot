@@ -37,6 +37,11 @@ const (
 	// длиннее не делают вердикт лучше, а токены жгут.
 	spamFactsTextLimit = 1500
 
+	// spamFactsQuoteLimit — сколько рун текста цитаты (reply-to) уходит в LLM.
+	// Цитата — контекст, а не основной сигнал, поэтому лимит меньше
+	// основного spamFactsTextLimit.
+	spamFactsQuoteLimit = 1000
+
 	// editCheckCooldown — минимальный интервал между спам-проверками ПРАВОК
 	// одного (chat, user): правки не растят счётчик сообщений, без кулдауна
 	// новичок жёг бы LLM-квоту бесконечными правками одного сообщения.
@@ -600,6 +605,36 @@ func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
 		}
 	}
 
+	if m.ReplyToMessage != nil {
+		r := m.ReplyToMessage
+		quoteText := r.Text
+		if quoteText == "" {
+			quoteText = r.Caption
+		}
+		if r.From != nil {
+			name := strings.TrimSpace(r.From.FirstName + " " + r.From.LastName)
+			if r.From.Username != "" {
+				name += " (@" + r.From.Username + ")"
+			}
+			fmt.Fprintf(&sb, "Цитата от %s", name)
+		} else {
+			sb.WriteString("Цитата")
+		}
+		if r.ForwardOrigin != nil {
+			switch fo := r.ForwardOrigin.(type) {
+			case *telego.MessageOriginChannel:
+				fmt.Fprintf(&sb, ", переслано из канала «%s»", fo.Chat.Title)
+			case *telego.MessageOriginChat:
+				fmt.Fprintf(&sb, ", переслано из чата «%s»", fo.SenderChat.Title)
+			}
+		}
+		if quoteText != "" {
+			fmt.Fprintf(&sb, ":\n%s\n", truncateLabel(quoteText, spamFactsQuoteLimit))
+		} else {
+			sb.WriteString(".\n")
+		}
+	}
+
 	text := m.Text
 	if text == "" {
 		text = m.Caption
@@ -613,6 +648,60 @@ func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
 	}
 	if text != "" {
 		fmt.Fprintf(&sb, "Текст сообщения:\n%s", truncateLabel(text, spamFactsTextLimit))
+	}
+	return sb.String()
+}
+
+// spamTargetContext собирает краткий контекст сообщения-цели для логов:
+// автор, текст, цитата, тип вложения. Используется в handleSpamCommand и
+// execGoldenSpamReport, чтобы потом можно было переотправить сообщение в LLM
+// для ретеста промта.
+func spamTargetContext(m telego.Message) string {
+	var sb strings.Builder
+	if m.From != nil {
+		name := strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
+		if name == "" {
+			name = "(без имени)"
+		}
+		fmt.Fprintf(&sb, "author:%s", name)
+		if m.From.Username != "" {
+			fmt.Fprintf(&sb, "(@%s)", m.From.Username)
+		}
+		fmt.Fprintf(&sb, "(id%d)", m.From.ID)
+	}
+	if m.ForwardOrigin != nil {
+		switch fo := m.ForwardOrigin.(type) {
+		case *telego.MessageOriginChannel:
+			fmt.Fprintf(&sb, " fwd:channel:%s", fo.Chat.Title)
+		case *telego.MessageOriginChat:
+			fmt.Fprintf(&sb, " fwd:chat:%s", fo.SenderChat.Title)
+		default:
+			sb.WriteString(" fwd:other")
+		}
+	}
+	text := m.Text
+	if text == "" {
+		text = m.Caption
+	}
+	if kind := attachmentKindRU(m); kind != "" {
+		fmt.Fprintf(&sb, " media:%s", kind)
+	}
+	if text != "" {
+		fmt.Fprintf(&sb, " text:%q", truncateLabel(text, 1000))
+	}
+	if m.ReplyToMessage != nil {
+		r := m.ReplyToMessage
+		quoteText := r.Text
+		if quoteText == "" {
+			quoteText = r.Caption
+		}
+		if r.From != nil {
+			name := strings.TrimSpace(r.From.FirstName + " " + r.From.LastName)
+			fmt.Fprintf(&sb, " quote_from:%s", name)
+		}
+		if quoteText != "" {
+			fmt.Fprintf(&sb, " quote:%q", truncateLabel(quoteText, 1000))
+		}
 	}
 	return sb.String()
 }

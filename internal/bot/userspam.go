@@ -183,7 +183,8 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From))
 
 	b.log.Info("spam report", "chat", chatID, "target", targetID,
-		"by", message.From.ID, "bot_msg", msgID)
+		"by", message.From.ID, "bot_msg", msgID,
+		"target_ctx", spamTargetContext(*r))
 	return nil
 }
 
@@ -279,7 +280,8 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 	}
 
 	b.log.Info("golden spam report", "chat", chatID, "target", targetID,
-		"by", message.From.ID, "banned", banned)
+		"by", message.From.ID, "banned", banned,
+		"target_ctx", spamTargetContext(*r))
 
 	// Кросс-бан и уведомления — в горутине: обход всех чатов не должен
 	// держать хендлер (локальный бан уже исполнен). Кросс-бан гейтится тем
