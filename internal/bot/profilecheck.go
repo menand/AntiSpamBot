@@ -80,7 +80,7 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.ChatSettings) {
 	facts := b.buildProfileFactsFromAPI(chatID, userID)
 
-	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(b.runCtx, 60*time.Second)
 	defer cancel()
 	spam, provider, err := b.classifyVerdict(ctx, groq.ProfileSystemPrompt, facts, chatID, userID)
 	if err != nil {
