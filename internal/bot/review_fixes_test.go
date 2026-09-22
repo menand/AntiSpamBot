@@ -116,7 +116,7 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("суб-бюджет только первичному при двух включённых", func(t *testing.T) {
+	t.Run("каждый провайдер получает суб-бюджет", func(t *testing.T) {
 		b, _, _ := newFlowBot(t)
 		primary := &fakeLLM{enabled: true, err: errors.New("slow")}
 		fallback := &fakeLLM{enabled: true}
@@ -127,16 +127,39 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		primary.mu.Lock()
 		defer primary.mu.Unlock()
 		if len(primary.deadlinesSet) != 1 || !primary.deadlinesSet[0] {
-			t.Fatalf("primary must run under a sub-budget deadline, got %v", primary.deadlinesSet)
+			t.Fatalf("primary must run under sub-budget, got %v", primary.deadlinesSet)
 		}
 		fallback.mu.Lock()
 		defer fallback.mu.Unlock()
-		if len(fallback.deadlinesSet) != 1 || fallback.deadlinesSet[0] {
-			t.Fatalf("fallback must inherit the full check ctx, got %v", fallback.deadlinesSet)
+		if len(fallback.deadlinesSet) != 1 || !fallback.deadlinesSet[0] {
+			t.Fatalf("fallback must also run under sub-budget, got %v", fallback.deadlinesSet)
 		}
 	})
 
-	t.Run("один провайдер — полный бюджет", func(t *testing.T) {
+	t.Run("все упали в быстром — медленный круг с15с", func(t *testing.T) {
+		b, _, _ := newFlowBot(t)
+		primary := &fakeLLM{enabled: true, err: errors.New("slow")}
+		fallback := &fakeLLM{enabled: true, err: errors.New("also slow")}
+		b.groqc = primary
+		b.gemic = fallback
+
+		_, _, err := b.classifyVerdict(context.Background(), "sys", "facts", testChatID, testUserID)
+		if err == nil {
+			t.Fatal("want error when all fail in both rounds")
+		}
+		primary.mu.Lock()
+		defer primary.mu.Unlock()
+		if len(primary.deadlinesSet) != 2 || !primary.deadlinesSet[0] || !primary.deadlinesSet[1] {
+			t.Fatalf("primary must be called in both rounds, got %v", primary.deadlinesSet)
+		}
+		fallback.mu.Lock()
+		defer fallback.mu.Unlock()
+		if len(fallback.deadlinesSet) != 2 || !fallback.deadlinesSet[0] || !fallback.deadlinesSet[1] {
+			t.Fatalf("fallback must be called in both rounds, got %v", fallback.deadlinesSet)
+		}
+	})
+
+	t.Run("один провайдер — суб-бюджет", func(t *testing.T) {
 		b, _, _ := newFlowBot(t)
 		solo := &fakeLLM{enabled: true}
 		b.groqc = solo
@@ -144,8 +167,8 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		_, _, _ = b.classifyVerdict(context.Background(), "sys", "facts", testChatID, testUserID)
 		solo.mu.Lock()
 		defer solo.mu.Unlock()
-		if len(solo.deadlinesSet) != 1 || solo.deadlinesSet[0] {
-			t.Fatalf("solo provider must get the full ctx, got %v", solo.deadlinesSet)
+		if len(solo.deadlinesSet) != 1 || !solo.deadlinesSet[0] {
+			t.Fatalf("solo provider must get sub-budget, got %v", solo.deadlinesSet)
 		}
 	})
 }

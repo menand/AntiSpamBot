@@ -308,9 +308,9 @@ func (b *Bot) runSpamCheck(message telego.Message, s storage.ChatSettings, msgTo
 	}
 	facts := buildSpamFacts(message, memberFor, msgTotal)
 
-	// Бюджет на всю цепочку провайдеров; первичный внутри ограничен отдельно,
-	// чтобы его зависший вызов не съел время фолбека.
-	ctx, cancel := context.WithTimeout(b.runCtx, 30*time.Second)
+	// Бюджет на всю цепочку провайдеров (два круга: 3 с + 15 с на провайдер,
+	// 3 провайдера = 54 с худший случай; берём с запасом).
+	ctx, cancel := context.WithTimeout(b.runCtx, 60*time.Second)
 	defer cancel()
 	spam, provider, err := b.classifySpam(ctx, chatID, user.ID, facts)
 	if err != nil {
@@ -532,13 +532,14 @@ func (b *Bot) aiProviders() []aiProvider {
 // classifyVerdict гоняет факты по цепочке провайдеров в порядке
 // cfg.AIProviderOrder (по умолчанию groq → gemini → gigachat) с заданным
 // системным промптом (спам-чек сообщений и профиль-чек различаются только
-// им). Первый включённый провайдер — первичный: быстрее всех отвечает и
-// получает суб-бюджет (12 с), чтобы зависший запрос оставил время фолбекам;
-// без фолбеков первичный получает весь бюджет проверки. Каждый следующий
-// включённый подхватывает при ЛЮБОЙ ошибке предыдущего — чаще всего это
-// минутный rate-limit (суточный запас ещё есть, но ждать минуту нельзя).
-// Ошибка возвращается только когда упали все включённые провайдеры.
-// chatID/userID — только для логов.
+// им). Двухкруговая стратегия:
+//  1. Быстрый круг: каждый провайдер получает 3 с — ловит мгновенные ответы
+//     ( Groq ~0.8 с, Gemini ~1-2 с) и rate-limit ошибки.
+//  2. Медленный круг: каждый провайдер получает 15 с — подхватывает зависимости
+//     от внешних сервисов (GigaChat OAuth, Gemini under load).
+//
+// Ошибка возвращается только когда упали все включённые провайдеры на обоих
+// кругах. chatID/userID — только для логов.
 func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID, userID int64) (spam bool, provider string, err error) {
 	providers := b.aiProviders()
 	var enabled []aiProvider
@@ -552,26 +553,26 @@ func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID,
 		// будущих прямых вызовов.
 		return false, "none", errors.New("no spam providers enabled")
 	}
-	for i, p := range enabled {
-		// Попытка — в замыкании: cancel скоупится на одну итерацию, а не до
-		// выхода из classifyVerdict (defer-in-loop).
-		spam, err = func() (bool, error) {
-			pctx := ctx
-			if i == 0 && len(enabled) > 1 {
-				// Суб-бюджет только первичному: чтобы зависший запрос
-				// оставил время остальным фолбекам.
-				var cancel context.CancelFunc
-				pctx, cancel = context.WithTimeout(ctx, 12*time.Second)
+
+	const fastTimeout = 3 * time.Second  // быстрый круг
+	const slowTimeout = 15 * time.Second // медленный круг
+
+	// Два круга: сначала быстрый (3 с на провайдер), потом медленный (15 с).
+	for _, timeout := range []time.Duration{fastTimeout, slowTimeout} {
+		for _, p := range enabled {
+			// Попытка — в замыкании: cancel скоупится на одну итерацию, а не до
+			// выхода из classifyVerdict (defer-in-loop).
+			spam, err = func() (bool, error) {
+				pctx, cancel := context.WithTimeout(ctx, timeout)
 				defer cancel()
+				return p.c.Classify(pctx, system, facts)
+			}()
+			if err == nil {
+				return spam, p.name, nil
 			}
-			return p.c.Classify(pctx, system, facts)
-		}()
-		if err == nil {
-			return spam, p.name, nil
-		}
-		if i < len(enabled)-1 {
-			b.log.Warn(p.name+" check failed, falling back",
-				"err", err, "chat", chatID, "user", userID)
+			b.log.Warn(p.name+" check failed",
+				"err", err, "timeout", timeout,
+				"chat", chatID, "user", userID)
 		}
 	}
 	return false, enabled[len(enabled)-1].name, err
