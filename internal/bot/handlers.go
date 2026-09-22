@@ -1790,6 +1790,24 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 	return p
 }
 
+// sendNextCaptchaStage отправляет следующую стадию серии под замком kickoff
+// (дубль-доставка входа не запустит вторую серию в окне между Take и Put).
+// Замок снимается defer'ом: паника в sendCaptchaStage восстановится goSafe'ом
+// на уровне captchaStageLoop и не дошла бы до ручного FinishKickoff — а
+// навсегда застрявший inflight запретил бы будущие BeginKickoff и через
+// IsCaptchaActive стирал все сообщения юзера до рестарта (см. defer-guard в
+// banKnownSpammer). nil = дубль проигран (замок занят) либо серия оборвалась
+// — обе ветки вызывающий закрывает одинаковым message-id guard'ом.
+func (b *Bot) sendNextCaptchaStage(ctx context.Context, settings storage.ChatSettings,
+	chatID, userID int64, p *captcha.Pending,
+) *captcha.Pending {
+	if !b.store.BeginKickoff(chatID, userID) {
+		return nil
+	}
+	defer b.store.FinishKickoff(chatID, userID)
+	return b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
+}
+
 // captchaStageLoop ведёт серию капчи: ждёт дедлайн текущей стадии, а по его
 // истечении либо показывает следующую стадию (удалив предыдущее сообщение),
 // либо — после последнего предупреждения — исполняет штатную лестницу
@@ -1872,26 +1890,20 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 		}
 		// Замок kickoff на время отправки: между Take и следующим Put в store
 		// окно, куда дубль-доставка входа (chat_member + new_chat_members)
-		// запустила бы вторую серию с дублем сообщения капчи.
-		if !b.store.BeginKickoff(chatID, userID) {
-			// Дубль-доставка успела раньше — её серия подхватит юзера. Но
-			// pre-persist выше уже мог записать следующую стадию под СТАРЫМ
-			// message_id: если дубль-серия оборвётся до своего persist,
-			// рестарт поднял бы призрачную капчу с грейс-киком. Гасим по
-			// guard'у; для строки, перезаписанной дублем, это no-op.
-			if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
-				b.log.Warn("delete orphaned stage transition (kickoff lost)",
-					"err", err, "chat", chatID, "user", userID)
-			}
-			return
-		}
-		next := b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
-		b.store.FinishKickoff(chatID, userID)
+		// запустила бы вторую серию с дублем сообщения капчи. Замок снимается
+		// defer'ом ВНУТРИ sendNextCaptchaStage: паника в send (восстановится
+		// goSafe) не должна оставить inflight навсегда — иначе BeginKickoff
+		// всегда false (этот юзер больше не получит ни капчи, ни insta-ban),
+		// а IsCaptchaActive по одним inflight стирал бы все его сообщения до
+		// рестарта (анти-паттерн defer-guard'а в banKnownSpammer).
+		next := b.sendNextCaptchaStage(ctx, settings, chatID, userID, p)
 		if next == nil {
-			// Серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
-			// Страховка от осиротевшего перехода: pre-persist выше мог успеть
-			// записать следующую стадию под СТАРЫМ message_id — гасим её по
-			// этому guard'у, иначе рестарт поднял бы призрачную капчу.
+			// Дубль-доставка успела раньше (её серия подхватит юзера) ИЛИ
+			// серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
+			// В обоих случаях pre-persist выше мог записать следующую стадию
+			// под СТАРЫМ message_id — гасим по guard'у, иначе рестарт поднял
+			// бы призрачную капчу с грейс-киком; для строки, перезаписанной
+			// дублем, это no-op.
 			if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
 				b.log.Warn("delete orphaned stage transition",
 					"err", err, "chat", chatID, "user", userID)
@@ -1955,11 +1967,15 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 // cancelCaptchaSilent тихо гасит активную капчу юзера после успешного
 // наказания инициатором (/kick, /ban, спам-вердикт): таймаут серии иначе
 // записал бы СВОЙ kick/ban поверх уже учтённого события инициатора, задваивая
-// воронку статистики. Без событий — их пишет инициатор.
-func (b *Bot) cancelCaptchaSilent(chatID, userID int64) {
+// воронку статистики. Без событий — их пишет инициатор. Возвращает, была ли
+// капча активна: вызывающим, которые НЕ пишут своё закрывающее событие
+// (execUnmod, /mute), это нужно, чтобы снять капча-мьют и закрыть воронку
+// пассом. Сама функция мьют не снимает (иначе /mute потерял бы свежий
+// рестрикт) и событий не пишет.
+func (b *Bot) cancelCaptchaSilent(chatID, userID int64) bool {
 	p, ok := b.store.Take(chatID, userID)
 	if !ok {
-		return
+		return false
 	}
 	p.Cancel()
 	if err := b.db.DeletePending(b.runCtx, chatID, userID); err != nil {
@@ -1968,6 +1984,7 @@ func (b *Bot) cancelCaptchaSilent(chatID, userID int64) {
 	if err := b.deleteBotMessage(b.runCtx, chatID, p.MessageID, p.EphemeralID, userID); err != nil {
 		b.log.Debug("delete captcha of punished user (already gone?)", "err", err, "chat", chatID)
 	}
+	return true
 }
 
 // recordLeftEvent — терминальное «вышли сами»: юзер действительно ушёл до
@@ -2259,7 +2276,7 @@ func parseCallback(data string) (userID int64, optIdx int, ok bool) {
 		return 0, 0, false
 	}
 	idx, err := strconv.Atoi(parts[2])
-	if err != nil {
+	if err != nil || idx < 0 {
 		return 0, 0, false
 	}
 	return uid, idx, true

@@ -933,6 +933,8 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	v, found, err := b.db.GetSpamVote(b.runCtx, chatID, botMsgID)
 	if err != nil {
 		b.log.Warn("get spam vote", "err", err, "chat", chatID)
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Не получилось — попробуй ещё раз."))
 		return nil
 	}
 	if !found {
@@ -1011,6 +1013,8 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	ok, err := b.db.UpsertBallot(b.runCtx, chatID, botMsgID, voter, isSpamVote)
 	if err != nil {
 		b.log.Warn("upsert ballot", "err", err, "chat", chatID)
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Не получилось — попробуй ещё раз."))
 		return nil
 	}
 	if !ok {
@@ -1022,7 +1026,10 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	}
 	yes, no, err := b.db.CountBallots(b.runCtx, chatID, botMsgID)
 	if err != nil {
+		// Бюллетень уже записан (UpsertBallot выше) — голос УЧТЁН, просто
+		// не перерисовалась плашка; честный ack вместо спиннера.
 		b.log.Warn("count ballots", "err", err, "chat", chatID)
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).WithText("Голос учтён."))
 		return nil
 	}
 	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).WithText("Голос учтён."))

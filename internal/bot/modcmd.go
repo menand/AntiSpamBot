@@ -164,6 +164,16 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	// Снимаем состояние целиком БЕЗ серверного release: возврат дефолтных
 	// прав чата отменил бы только что наложенный мьют.
 	b.dropQuarantineState(chatID, targetID)
+	// Капча ещё идёт: рестрикт мьют Telegram заменяет целиком, поэтому
+	// release НЕ делаем (он бы отменил свежий мьют — та же дисциплина, что
+	// у dropQuarantineState). Саму капчу гасим: её таймаут иначе добавил бы
+	// kick поверх мьюта, а верный ответ через onSuccess снёс бы мьют админа.
+	// Воронку закрываем пассом — пройти проверку замьюченный не может.
+	if b.cancelCaptchaSilent(chatID, targetID) {
+		if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (muted mid-captcha)", "err", err)
+		}
+	}
 	// Замьюченный физически не может выполнить «напиши что-нибудь» — снимаем
 	// ожидание реплая тихо, иначе таймер кикнул бы его за молчание. Если
 	// ожидание было активным (reply-check), «прошёл» ещё не записан —

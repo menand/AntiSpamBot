@@ -240,6 +240,9 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		// Тоггл эфемерных служебных сообщений (капча и ответы мод-команд).
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
+			// Entry-answer для этого префикса пропущен (см. шапку хендлера) —
+			// без явного ack'а у не-админа/битой кнопки останется спиннер.
+			_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 			return nil
 		}
 		// Предыдущее состояние снимается ПОД мьютексом тоггла (после
