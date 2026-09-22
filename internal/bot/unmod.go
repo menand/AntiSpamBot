@@ -194,12 +194,31 @@ func unmodListView(title, action string, recent []storage.RecentUser, infos map[
 func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 	mention := b.mentionFor(targetID)
 
-	// Та же дисциплина, что у /kick|/ban (cleanupTargetTraces): восстанавли-
-	// вающая команда гасит активные проверки цели — иначе таймаут капчи
+	// Та же дисциплина, что у /kick|/ban (cleanupTargetTraces): восстанав-
+	// ливающая команда гасит активные проверки цели — иначе таймаут капчи
 	// кикнул бы только что размученного/доверенного юзера, а reply-wait дал
-	// бы фантомный noreply поверх решения админа. Событий не пишет.
-	b.cancelCaptchaSilent(chatID, targetID)
-	b.cancelReplyWait(chatID, targetID)
+	// бы фантомный noreply поверх решения админа.
+	captchaLive := b.cancelCaptchaSilent(chatID, targetID)
+	replyLive := b.cancelReplyWait(chatID, targetID)
+	if captchaLive {
+		// Гашение капчи само по себе капча-мьют НЕ снимает — без release
+		// юзер, сидевший за пристом, остался бы замьюченным навсегда
+		// (доверенность и unban рестрикт не трогают). Release идемпотентен:
+		// ветка «m» ниже при необходимости отпустит права ещё раз.
+		if err := b.release(b.runCtx, chatID, targetID); err != nil {
+			b.log.Warn("unmod: release captcha mute", "err", err, "chat", chatID, "target", targetID)
+		}
+	}
+	// Закрывающий pass — только если сняли именно живую проверку (иначе
+	// join без терминального события навсегда остался бы в «В процессе»):
+	// пройти проверку юзер уже не может — прецедент /mute и
+	// releaseMigratedCaptchas. Капча и reply-wait одновременно активны не
+	// бывают, pass пишется максимум один.
+	if captchaLive || replyLive {
+		if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (unmod)", "err", err)
+		}
+	}
 	switch action {
 	case "u":
 		if err := b.unban(b.runCtx, chatID, targetID); err != nil {

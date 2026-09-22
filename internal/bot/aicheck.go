@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"strings"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -79,9 +80,13 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 // режется: тела ответов API бывают длинными и содержат разметку.
 func formatProviderCheck(name, model string, spam bool, elapsed time.Duration, err error) string {
 	if err != nil {
+		tail := html.EscapeString(truncateLabel(err.Error(), 200))
+		if ru := friendlyProviderErr(err); ru != "" {
+			return fmt.Sprintf("❌ %s (%s) — ошибка за %.1f с: %s — <code>%s</code>",
+				name, model, elapsed.Seconds(), ru, tail)
+		}
 		return fmt.Sprintf("❌ %s (%s) — ошибка за %.1f с: <code>%s</code>",
-			name, model, elapsed.Seconds(),
-			html.EscapeString(truncateLabel(err.Error(), 200)))
+			name, model, elapsed.Seconds(), tail)
 	}
 	verdict := "не спам"
 	if spam {
@@ -89,4 +94,24 @@ func formatProviderCheck(name, model string, spam bool, elapsed time.Duration, e
 	}
 	return fmt.Sprintf("✅ %s (%s) — коннект есть: %.1f с, вердикт: %s",
 		name, model, elapsed.Seconds(), verdict)
+}
+
+// friendlyProviderErr — короткая русская категория типовой сетевой/HTTP-ошибки
+// для карточки menu:aicheck (пользовательский текст должен быть на русском);
+// непонятное возвращаем пустым — теххвост <code>…</code> остаётся как есть.
+func friendlyProviderErr(err error) string {
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "deadline exceeded"), strings.Contains(s, "timeout"):
+		return "таймаут"
+	case strings.Contains(s, "connection refused"), strings.Contains(s, "no such host"),
+		strings.Contains(s, "dial tcp"):
+		return "нет соединения"
+	case strings.Contains(s, "401"), strings.Contains(s, "403"):
+		return "ключ отклонён"
+	case strings.Contains(s, "429"):
+		return "лимит запросов"
+	default:
+		return ""
+	}
 }

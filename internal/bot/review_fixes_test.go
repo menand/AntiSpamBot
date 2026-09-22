@@ -38,7 +38,7 @@ type fakeLLM struct {
 
 	calls        int32 // atomic
 	mu           sync.Mutex
-	deadlinesSet []bool // был ли у ctx вызова дедлайн (для суб-бюджета первичного)
+	deadlinesSet []bool // был ли у ctx вызова дедлайн (бюджет круга classifyVerdict)
 }
 
 func (f *fakeLLM) Enabled() bool { return f.enabled }
@@ -86,8 +86,7 @@ func TestAIProvidersOrder(t *testing.T) {
 }
 
 // TestClassifyVerdictFallback — первый упавший провайдер передаёт ход второму,
-// все упавшие дают ошибку; суб-бюджет получает только первичный при ≥2
-// включённых.
+// все упавшие дают ошибку; каждый вызов идёт под дедлайном своего круга.
 func TestClassifyVerdictFallback(t *testing.T) {
 	t.Run("первичный упал — фолбек ответил", func(t *testing.T) {
 		b, _, _ := newFlowBot(t)
@@ -116,7 +115,7 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("каждый провайдер получает суб-бюджет", func(t *testing.T) {
+	t.Run("каждый провайдер получает дедлайн круга", func(t *testing.T) {
 		b, _, _ := newFlowBot(t)
 		primary := &fakeLLM{enabled: true, err: errors.New("slow")}
 		fallback := &fakeLLM{enabled: true}
@@ -127,12 +126,12 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		primary.mu.Lock()
 		defer primary.mu.Unlock()
 		if len(primary.deadlinesSet) != 1 || !primary.deadlinesSet[0] {
-			t.Fatalf("primary must run under sub-budget, got %v", primary.deadlinesSet)
+			t.Fatalf("primary must run under a round deadline, got %v", primary.deadlinesSet)
 		}
 		fallback.mu.Lock()
 		defer fallback.mu.Unlock()
 		if len(fallback.deadlinesSet) != 1 || !fallback.deadlinesSet[0] {
-			t.Fatalf("fallback must also run under sub-budget, got %v", fallback.deadlinesSet)
+			t.Fatalf("fallback must also run under a round deadline, got %v", fallback.deadlinesSet)
 		}
 	})
 
@@ -159,7 +158,7 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		}
 	})
 
-	t.Run("один провайдер — суб-бюджет", func(t *testing.T) {
+	t.Run("один провайдер — дедлайн круга", func(t *testing.T) {
 		b, _, _ := newFlowBot(t)
 		solo := &fakeLLM{enabled: true}
 		b.groqc = solo
@@ -168,7 +167,7 @@ func TestClassifyVerdictFallback(t *testing.T) {
 		solo.mu.Lock()
 		defer solo.mu.Unlock()
 		if len(solo.deadlinesSet) != 1 || !solo.deadlinesSet[0] {
-			t.Fatalf("solo provider must get sub-budget, got %v", solo.deadlinesSet)
+			t.Fatalf("solo provider must get a round deadline, got %v", solo.deadlinesSet)
 		}
 	})
 }

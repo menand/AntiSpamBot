@@ -433,8 +433,7 @@ func (d *DB) SetSpamNotify(ctx context.Context, ownerID int64, on bool) error {
 	return d.setOwnerCol(ctx, ownerID, "spam_notify", boolToInt(on))
 }
 
-// ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах
-// и проходах капчи.
+// ModNotifyEnabled — включены ли у владельца ЛС-уведомления о киках/банах.
 func (d *DB) ModNotifyEnabled(ctx context.Context, ownerID int64) (bool, error) {
 	return d.ownerFlagEnabled(ctx, ownerID, "mod_notify")
 }

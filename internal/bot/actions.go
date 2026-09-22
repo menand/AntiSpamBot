@@ -215,6 +215,11 @@ func (b *Bot) chatDefaultPermissions(ctx context.Context, chatID int64) telego.C
 	if err != nil {
 		b.log.Warn("get chat permissions, falling back to all-true",
 			"err", err, "chat", chatID)
+	} else {
+		// GetChat прошёл, но Permissions не вернул — тоже fallback, логируем
+		// честно (иначе молчаливый all-true выглядел бы только как retry-exhaust).
+		b.log.Warn("get chat permissions returned no permissions, falling back to all-true",
+			"chat", chatID)
 	}
 	yes := true
 	return telego.ChatPermissions{
