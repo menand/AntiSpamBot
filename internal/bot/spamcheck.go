@@ -578,32 +578,133 @@ func (b *Bot) classifyVerdict(ctx context.Context, system, facts string, chatID,
 	return false, enabled[len(enabled)-1].name, err
 }
 
-// buildSpamFacts собирает то, что уходит в LLM: контекст автора, факт
-// вложения (сам файл — никогда), пометка о форварде и текст/подпись.
-func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
-	var sb strings.Builder
-	name := strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
+// externalContext — извлечённые внешние поля одного сообщения
+// (forward_origin, external_reply, quote). Один парсер — два потребителя:
+// buildSpamFacts (промпт LLM) и spamTargetContext (лог /spam), чтобы
+// оба вида логов показывали одинаковый контекст.
+type externalContext struct {
+	ForwardLabel  string // «канал «X»» / «чат «Y»» / «Имя (@nick)» / имя скрытого юзера
+	ExternalSrc   string // источник external_reply (канал/чат/юзер), без ID
+	ExternalQuote string // текст quote (m.Quote), только без ReplyToMessage — до spamFactsQuoteLimit
+	ExternalMedia string // тип вложения оригинала external_reply
+}
+
+// originLabel — человекочитаемый label origin-пользователя без ID.
+func originLabel(u telego.User) string {
+	name := strings.TrimSpace(u.FirstName + " " + u.LastName)
 	if name == "" {
 		name = "(без имени)"
 	}
-	fmt.Fprintf(&sb, "Автор: %s", name)
-	if m.From.Username != "" {
-		fmt.Fprintf(&sb, " (@%s)", m.From.Username)
+	if u.Username != "" {
+		name += " (@" + u.Username + ")"
 	}
-	if memberFor != "" {
-		fmt.Fprintf(&sb, ", в чате %s", memberFor)
-	}
-	fmt.Fprintf(&sb, ", всего сообщений: %d.\n", msgTotal)
+	return name
+}
+
+// extractExternalContext собирает forward_origin + external_reply + quote.
+// Не выводит ID чатов и entities (bold/italic) — LLM они не помогают.
+func extractExternalContext(m telego.Message) externalContext {
+	var c externalContext
 
 	if m.ForwardOrigin != nil {
 		switch fo := m.ForwardOrigin.(type) {
 		case *telego.MessageOriginChannel:
-			fmt.Fprintf(&sb, "Переслано из канала «%s».\n", fo.Chat.Title)
+			c.ForwardLabel = fmt.Sprintf("канал «%s»", fo.Chat.Title)
 		case *telego.MessageOriginChat:
-			fmt.Fprintf(&sb, "Переслано из чата «%s».\n", fo.SenderChat.Title)
+			c.ForwardLabel = fmt.Sprintf("чат «%s»", fo.SenderChat.Title)
+		case *telego.MessageOriginHiddenUser:
+			c.ForwardLabel = fo.SenderUserName
+		case *telego.MessageOriginUser:
+			c.ForwardLabel = originLabel(fo.SenderUser)
 		default:
-			sb.WriteString("Переслано из другого источника.\n")
+			c.ForwardLabel = "другой источник"
 		}
+	}
+
+	if m.ExternalReply != nil {
+		er := m.ExternalReply
+		if er.Origin != nil {
+			switch o := er.Origin.(type) {
+			case *telego.MessageOriginChannel:
+				if o.Chat.Username != "" {
+					c.ExternalSrc = fmt.Sprintf("канал «%s» (@%s)", o.Chat.Title, o.Chat.Username)
+				} else {
+					c.ExternalSrc = fmt.Sprintf("канал «%s»", o.Chat.Title)
+				}
+			case *telego.MessageOriginChat:
+				c.ExternalSrc = fmt.Sprintf("чат «%s»", o.SenderChat.Title)
+			case *telego.MessageOriginHiddenUser:
+				c.ExternalSrc = o.SenderUserName
+			case *telego.MessageOriginUser:
+				c.ExternalSrc = originLabel(o.SenderUser)
+			}
+		}
+		// Фолбэк: origin отсутствует, но chat заполнен.
+		if c.ExternalSrc == "" && er.Chat != nil && er.Chat.Title != "" {
+			if er.Chat.Username != "" {
+				c.ExternalSrc = fmt.Sprintf("«%s» (@%s)", er.Chat.Title, er.Chat.Username)
+			} else {
+				c.ExternalSrc = fmt.Sprintf("«%s»", er.Chat.Title)
+			}
+		}
+		c.ExternalMedia = externalReplyKindRU(er)
+	}
+
+	// m.Quote приходит и у обычного in-chat quote-reply: с ReplyToMessage
+	// он лишь дублирует «Цитата от …» — печатаем только без него.
+	if m.Quote != nil && m.Quote.Text != "" && m.ReplyToMessage == nil {
+		c.ExternalQuote = truncateLabel(m.Quote.Text, spamFactsQuoteLimit)
+	}
+
+	return c
+}
+
+// externalReplyKindRU — тип вложения оригинала внешнего реплая; "" = нет.
+// Маппинг полей в attachmentKindRU: метки/порядок живут в одном месте.
+func externalReplyKindRU(e *telego.ExternalReplyInfo) string {
+	return attachmentKindRU(telego.Message{
+		Animation: e.Animation,
+		Photo:     e.Photo,
+		Video:     e.Video,
+		VideoNote: e.VideoNote,
+		Voice:     e.Voice,
+		Sticker:   e.Sticker,
+		Audio:     e.Audio,
+		Document:  e.Document,
+		Poll:      e.Poll,
+		Contact:   e.Contact,
+		Location:  e.Location,
+		Venue:     e.Venue,
+		Dice:      e.Dice,
+		Story:     e.Story,
+	})
+}
+
+// buildSpamFacts собирает то, что уходит в LLM: контекст автора, факт
+// вложения (сам файл — никогда), пометка о форварде, external_reply и текст.
+func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
+	var sb strings.Builder
+	if m.From != nil {
+		name := originLabel(*m.From)
+		fmt.Fprintf(&sb, "Автор: %s", name)
+		if memberFor != "" {
+			fmt.Fprintf(&sb, ", в чате %s", memberFor)
+		}
+		fmt.Fprintf(&sb, ", всего сообщений: %d.\n", msgTotal)
+	}
+
+	ec := extractExternalContext(m)
+	if ec.ForwardLabel != "" {
+		fmt.Fprintf(&sb, "Переслано: %s.\n", ec.ForwardLabel)
+	}
+	if ec.ExternalSrc != "" {
+		fmt.Fprintf(&sb, "Реплай на сообщение из: %s.\n", ec.ExternalSrc)
+	}
+	if ec.ExternalQuote != "" {
+		fmt.Fprintf(&sb, "Цитата:\n%s\n", ec.ExternalQuote)
+	}
+	if ec.ExternalMedia != "" {
+		fmt.Fprintf(&sb, "Вложение оригинала: %s.\n", ec.ExternalMedia)
 	}
 
 	if m.ReplyToMessage != nil {
@@ -613,21 +714,12 @@ func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
 			quoteText = r.Caption
 		}
 		if r.From != nil {
-			name := strings.TrimSpace(r.From.FirstName + " " + r.From.LastName)
-			if r.From.Username != "" {
-				name += " (@" + r.From.Username + ")"
-			}
-			fmt.Fprintf(&sb, "Цитата от %s", name)
+			fmt.Fprintf(&sb, "Цитата от %s", originLabel(*r.From))
 		} else {
 			sb.WriteString("Цитата")
 		}
-		if r.ForwardOrigin != nil {
-			switch fo := r.ForwardOrigin.(type) {
-			case *telego.MessageOriginChannel:
-				fmt.Fprintf(&sb, ", переслано из канала «%s»", fo.Chat.Title)
-			case *telego.MessageOriginChat:
-				fmt.Fprintf(&sb, ", переслано из чата «%s»", fo.SenderChat.Title)
-			}
+		if rf := extractExternalContext(*r).ForwardLabel; rf != "" {
+			fmt.Fprintf(&sb, ", переслано: %s", rf)
 		}
 		if quoteText != "" {
 			fmt.Fprintf(&sb, ":\n%s\n", truncateLabel(quoteText, spamFactsQuoteLimit))
@@ -660,25 +752,21 @@ func buildSpamFacts(m telego.Message, memberFor string, msgTotal int) string {
 func spamTargetContext(m telego.Message) string {
 	var sb strings.Builder
 	if m.From != nil {
-		name := strings.TrimSpace(m.From.FirstName + " " + m.From.LastName)
-		if name == "" {
-			name = "(без имени)"
-		}
-		fmt.Fprintf(&sb, "author:%s", name)
-		if m.From.Username != "" {
-			fmt.Fprintf(&sb, "(@%s)", m.From.Username)
-		}
+		fmt.Fprintf(&sb, "author:%s", originLabel(*m.From))
 		fmt.Fprintf(&sb, "(id%d)", m.From.ID)
 	}
-	if m.ForwardOrigin != nil {
-		switch fo := m.ForwardOrigin.(type) {
-		case *telego.MessageOriginChannel:
-			fmt.Fprintf(&sb, " fwd:channel:%s", fo.Chat.Title)
-		case *telego.MessageOriginChat:
-			fmt.Fprintf(&sb, " fwd:chat:%s", fo.SenderChat.Title)
-		default:
-			sb.WriteString(" fwd:other")
-		}
+	ec := extractExternalContext(m)
+	if ec.ForwardLabel != "" {
+		fmt.Fprintf(&sb, " fwd:%s", ec.ForwardLabel)
+	}
+	if ec.ExternalSrc != "" {
+		fmt.Fprintf(&sb, " ext_src:%s", ec.ExternalSrc)
+	}
+	if ec.ExternalMedia != "" {
+		fmt.Fprintf(&sb, " ext_media:%s", ec.ExternalMedia)
+	}
+	if ec.ExternalQuote != "" {
+		fmt.Fprintf(&sb, " ext_quote:%q", ec.ExternalQuote)
 	}
 	text := m.Text
 	if text == "" {
@@ -688,7 +776,7 @@ func spamTargetContext(m telego.Message) string {
 		fmt.Fprintf(&sb, " media:%s", kind)
 	}
 	if text != "" {
-		fmt.Fprintf(&sb, " text:%q", truncateLabel(text, 1000))
+		fmt.Fprintf(&sb, " text:%q", truncateLabel(text, spamFactsTextLimit))
 	}
 	if m.ReplyToMessage != nil {
 		r := m.ReplyToMessage
@@ -701,7 +789,7 @@ func spamTargetContext(m telego.Message) string {
 			fmt.Fprintf(&sb, " quote_from:%s", name)
 		}
 		if quoteText != "" {
-			fmt.Fprintf(&sb, " quote:%q", truncateLabel(quoteText, 1000))
+			fmt.Fprintf(&sb, " quote:%q", truncateLabel(quoteText, spamFactsQuoteLimit))
 		}
 	}
 	return sb.String()
