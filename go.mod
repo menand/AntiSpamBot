@@ -5,9 +5,9 @@ go 1.26.7
 require (
 	github.com/joho/godotenv v1.5.1
 	github.com/mymmrac/telego v1.12.1
-	golang.org/x/image v0.46.0
+	golang.org/x/image v0.47.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-	modernc.org/sqlite v1.59.0
+	modernc.org/sqlite v1.60.1
 )
 
 require (
@@ -29,8 +29,8 @@ require (
 	github.com/valyala/fasthttp v1.73.0 // indirect
 	github.com/valyala/fastjson v1.6.10 // indirect
 	golang.org/x/arch v0.30.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
-	modernc.org/libc v1.75.7 // indirect
+	golang.org/x/sys v0.49.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
