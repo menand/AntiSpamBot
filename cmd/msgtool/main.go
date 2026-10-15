@@ -56,9 +56,16 @@ type wireEntry struct {
 }
 
 func main() {
+	// Дефолты берём из окружения контейнера (DB_PATH/ARCHIVE_DIR задаёт
+	// docker-compose): тогда `docker exec menand-antispam msgtool …` работает
+	// без флагов, а локальный запуск падает на привычный "bot.db" рядом с cwd.
+	dbDefault := os.Getenv("DB_PATH")
+	if dbDefault == "" {
+		dbDefault = "bot.db"
+	}
 	var (
-		dbPath   = flag.String("db", "bot.db", "путь к SQLite-файлу")
-		archiveP = flag.String("archive", "", "каталог архива (дефолт <dir(db)>/archive)")
+		dbPath   = flag.String("db", dbDefault, "путь к SQLite-файлу (дефолт $DB_PATH)")
+		archiveP = flag.String("archive", os.Getenv("ARCHIVE_DIR"), "каталог архива (дефолт $ARCHIVE_DIR или <dir(db)>/archive)")
 		chatID   = flag.Int64("chat", 0, "фильтр по chat_id")
 		userID   = flag.Int64("user", 0, "фильтр по user_id")
 		word     = flag.String("word", "", "подстрока в тексте/цитате")
