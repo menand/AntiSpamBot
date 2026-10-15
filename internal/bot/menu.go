@@ -911,16 +911,24 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
-		// UTC-часы подобраны так, чтобы после сдвига МСК = UTC+3 (его делает
-		// mskHourLabel) показываться как 00/04/08/12/16/20 МСК.
-		hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}),
-		{
+	}
+	// Часы сводки — только при включённой сводке: выключенную сводку
+	// настраивать нечего, экран и так плотный. Сценарий ровно тот же, что
+	// у пресетов ИИ-антиспама и карантина ниже.
+	//
+	// UTC-часы подобраны так, чтобы после сдвига МСК = UTC+3 (его делает
+	// mskHourLabel) показываться как 00/04/08/12/16/20 МСК.
+	if s.DailyStatsEnabled {
+		rows = append(rows, hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}))
+	}
+	rows = append(rows,
+		[]telego.InlineKeyboardButton{
 			// Кнопка теперь одна в ряду (бюджет 33), поэтому полное имя
 			// «Анонс молчунов» (20) влезает с запасом — коротить не надо.
 			tu.InlineKeyboardButton(toggleLabel("😴 Анонс молчунов", s.SilentAnnounceEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:sil:%d", chatID)),
 		},
-	}
+	)
 	// ИИ-антиспам — отдельной кнопкой (одна в ряду), а его пресеты — СРАЗУ
 	// под ней и только при включённой фиче: выключенную фичу настраивать
 	// нечего, экран и так плотный.
