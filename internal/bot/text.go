@@ -6,7 +6,47 @@ import (
 	"strings"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
+	"github.com/menand/AntiSpamBot/internal/textwidth"
 )
+
+// labelMaxWidth — бюджет ширины подписи кнопки в ряду из одной кнопки.
+// Значение и таблица бюджетов живут в internal/textwidth (общий пакет бота
+// и утилиты cmd/btnprobe) — дублировать нельзя, разъедутся.
+const labelMaxWidth = textwidth.MaxLabelWidth
+
+// labelBudget возвращает бюджет ширины подписи для ряда из per кнопок.
+// Обёртка над textwidth.LabelBudget.
+func labelBudget(per int) int {
+	return textwidth.LabelBudget(per)
+}
+
+// truncateLabelWidth укорачивает подпись кнопки до max единиц визуальной
+// ширины, ставя «…». Обёртка над textwidth.Truncate — логика живёт в общем
+// пакете, который также использует отладочная утилита cmd/btnprobe.
+func truncateLabelWidth(s string, max int) string {
+	return textwidth.Truncate(s, max)
+}
+
+// truncateLabel укорачивает строку до max РУН. Срез по байтам резал бы
+// многобайтовую руну пополам — для кириллицы это сломанный UTF-8.
+//
+// ТОЛЬКО ДЛЯ ТЕКСТОВ СООБЩЕНИЙ (отчёты, цитаты, био, ошибки), где лимит
+// задаётся в рунах и визуальной ширины не видно. Для подписей inline-кнопок
+// используй truncateLabelWidth: клиенты Telegram обрезают кнопку по
+// визуальной ширине, а не по рунам, и рунный срез к тому же может разрезать
+// эмодзи-кластер пополам.
+func truncateLabel(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
+}
+
+// labelWidth — визуальная ширина строки в условных единицах.
+func labelWidth(s string) int {
+	return textwidth.Width(s)
+}
 
 // pluralRU выбирает правильную русскую форму для count. Например: pluralRU(n, "день", "дня", "дней").
 func pluralRU(n int, one, few, many string) string {

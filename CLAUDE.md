@@ -130,7 +130,7 @@ Callback formats: `menu:main|help|add|chats|logs`, `menu:aicheck` (owner-only LL
 
 Greeting-text input flow: `menu:grtxt` stores `userID→chatID` in `Bot.greetInput`; the next private message (handled by `handlePrivateText`) becomes the template. `-` resets to default, any `/command` aborts, 500-rune cap. Templates are HTML-escaped at render time; `{name}` is replaced with the mention markup after escaping (`renderGreeting`).
 
-Button labels: always truncate with `truncateLabel` (rune-safe) — byte slicing corrupts Cyrillic titles and Telegram rejects the whole keyboard on invalid UTF-8.
+Button labels: truncate with `truncateLabelWidth(s, labelBudget(per))` (VISUAL-WIDTH safe, `internal/textwidth`) — pass `per` = buttons in that row, it shrinks as the row fills (1→33, 2→17, 3→10, 4→7, 5+→5; measured live via `cmd/btnprobe`, not derived). Rationale: Telegram clients cut button text by rendered WIDTH, not runes, and a rune slice also splits emoji clusters («👨‍👩‍👧‍👦» = 7 runes, 1 grapheme) — the whole keyboard is rejected on invalid UTF-8, and a half-slice renders as tofu. ALL budgets have ZERO margin by design (they equal the measured cut point — 33/17/10/7/5, October 2026, Telegram Desktop); on a stricter font the client's own ellipsis may fire. ROW BUDGETS ARE A HARD CAP: a label must fit its row's budget at build time, not only at truncation time — audit literal/dynamic labels against `textwidth.Width(label) > textwidth.LabelBudget(per)`. For MESSAGE TEXT (not buttons) keep `truncateLabel` (rune-based) — a rune limit is right there, and it must never touch buttons. To re-measure limits: `go run ./cmd/btnprobe -chat <CHAT_ID> -mode edge` (reads `BOT_TOKEN` from env; never commit host/chat IDs).
 
 ### Daily digest (`internal/bot/daily.go`)
 

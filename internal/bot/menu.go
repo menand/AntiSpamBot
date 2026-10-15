@@ -645,7 +645,7 @@ func (b *Bot) mainMenuKeyboard(userID int64) *telego.InlineKeyboardMarkup {
 				WithCallbackData("menu:spamnotify"),
 		})
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и ответы на приветствие в ЛС", modOn)).
+			tu.InlineKeyboardButton(toggleLabel("🛡 Кики, баны и ответы в ЛС", modOn)).
 				WithCallbackData("menu:modnotify"),
 		})
 		rows = append(rows, []telego.InlineKeyboardButton{
@@ -763,8 +763,12 @@ func chatsListView(chats []storage.ChatInfo, p statsPeriod, withBack bool) (stri
 			label = chatTitleFallback(c.ChatID)
 		}
 		cb := fmt.Sprintf("menu:stats:%d:%s", c.ChatID, p)
+		// Каждый чат — отдельный ряд из ОДНОЙ кнопки, поэтому бюджет
+		// labelBudget(1). Если раскладку поменяют на несколько чатов в ряд,
+		// здесь обязано стать labelBudget(кнопок в ряду) — иначе обрезка
+		// уедет за клиентский лимит.
 		rows = append(rows, []telego.InlineKeyboardButton{
-			tu.InlineKeyboardButton(truncateLabel(label, 40)).WithCallbackData(cb),
+			tu.InlineKeyboardButton(truncateLabelWidth(label, labelBudget(1))).WithCallbackData(cb),
 		})
 	}
 	if withBack {
@@ -773,18 +777,6 @@ func chatsListView(chats []storage.ChatInfo, p statsPeriod, withBack bool) (stri
 		})
 	}
 	return sb.String(), &telego.InlineKeyboardMarkup{InlineKeyboard: rows}
-}
-
-// truncateLabel укорачивает подпись кнопки до max рун. Срез по байтам резал
-// бы многобайтовую руну пополам — Telegram отклоняет всю клавиатуру при
-// невалидном UTF-8, что для кириллических названий значит сломанный список
-// чатов.
-func truncateLabel(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max-1]) + "…"
 }
 
 func (b *Bot) renderChatsMenu(ctx *th.Context, query telego.CallbackQuery) error {
@@ -815,6 +807,11 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		{
 			periodButton(chatID, periodDay, p, "Сегодня"),
 			periodButton(chatID, periodYesterday, p, "Вчера"),
+			// «Позавчера» со «• » = 11 при бюджете ряда 10. Владелец засёк,
+			// что на его клиенте влезает, и велел не трогать. Исключение
+			// зафиксировано в TestSettingsRowsFitBudget (menu_budget_test.go):
+			// при переименовании кнопки не забудь синхронно поправить и
+			// skip-ветку там.
 			periodButton(chatID, periodDayBefore, p, "Позавчера"),
 		},
 		{
@@ -897,11 +894,20 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		captchaModeRow(chatID, captchaMode),
 		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}, "х"),
 		intPresetRow(chatID, "tmo", intervalMin, []int{1, 2, 3}, "мин"),
+		// Ряд из 3 кнопок даёт бюджет 10 единиц, а «✅ 🎉Приветствие» = 16 —
+		// не влезало. Делим: переключатель приветствия + правка его текста
+		// рядом (бюджет 17, подписи 16 и 13), сводка — отдельным рядом
+		// (бюджет 33, подпись 12). Пробел после 🎉 убран — как в ряду капчи,
+		// иначе подпись была 17, ровно в лимит.
 		{
-			tu.InlineKeyboardButton(toggleLabel("🎉 Приветствие", s.GreetingEnabled)).
+			tu.InlineKeyboardButton(toggleLabel("🎉Приветствие", s.GreetingEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
-			tu.InlineKeyboardButton("✏️ Текст").
+			// «Текст» ничего не говорил; «Свой текст» = можно написать своё
+			// приветствие вместо стандартного.
+			tu.InlineKeyboardButton("✏️ Свой текст").
 				WithCallbackData(fmt.Sprintf("menu:grtxt:%d", chatID)),
+		},
+		{
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:daily:%d", chatID)),
 		},
@@ -909,37 +915,46 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		// mskHourLabel) показываться как 00/04/08/12/16/20 МСК.
 		hourPresetRow(chatID, digestHourUTC, []int{21, 1, 5, 9, 13, 17}),
 		{
+			// Кнопка теперь одна в ряду (бюджет 33), поэтому полное имя
+			// «Анонс молчунов» (20) влезает с запасом — коротить не надо.
 			tu.InlineKeyboardButton(toggleLabel("😴 Анонс молчунов", s.SilentAnnounceEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:sil:%d", chatID)),
-			tu.InlineKeyboardButton(toggleLabel("🤖 ИИ-антиспам", s.SpamCheckEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:spam:%d", chatID)),
-		},
-		{
-			tu.InlineKeyboardButton(toggleLabel("💬 Требовать ответ", s.ReplyCheckEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:rpl:%d", chatID)),
-			tu.InlineKeyboardButton(toggleLabel("👻 Эфемерно", s.EphemeralEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
-		},
-		{
-			tu.InlineKeyboardButton(toggleLabel("🧫 Карантин новичков", s.QuarantineEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:qr:%d", chatID)),
 		},
 	}
-	// Пресеты длительности — только при включённой фиче (сценарий тот же, что
-	// у пресетов антиспама: выключенную фичу настраивать нечего, экран и так
-	// плотный).
-	if s.QuarantineEnabled {
-		rows = append(rows, quarantineHoursRow(chatID, qrHours))
-	}
-	// Пресеты секунд ожидания убраны вместе с reply_check_seconds: серия
-	// напоминаний живёт на общем с капчей интервале («tmo» выше).
-	// Пресеты антиспама показываем только при включённой фиче — экран и так
-	// плотный.
+	// ИИ-антиспам — отдельной кнопкой (одна в ряду), а его пресеты — СРАЗУ
+	// под ней и только при включённой фиче: выключенную фичу настраивать
+	// нечего, экран и так плотный.
+	rows = append(rows, []telego.InlineKeyboardButton{
+		tu.InlineKeyboardButton(toggleLabel("🤖 ИИ-антиспам", s.SpamCheckEnabled)).
+			WithCallbackData(fmt.Sprintf("menu:spam:%d", chatID)),
+	})
 	if s.SpamCheckEnabled {
 		rows = append(rows,
 			intPresetRow(chatID, "swl", spamWhitelist, []int{5, 10, 20}, " смс"),
 			intPresetRow(chatID, "svm", spamMargin, []int{2, 3, 5}, " гол."))
 	}
+	rows = append(rows,
+		[]telego.InlineKeyboardButton{
+			// «Требовать ответ» = 21 при бюджете ряда 17 — не влезало.
+			// «Ждать ответ» = 17, ровно в лимит; пробел после 💬 убран → 16,
+			// чтобы был запас.
+			tu.InlineKeyboardButton(toggleLabel("💬Ждать ответ", s.ReplyCheckEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:rpl:%d", chatID)),
+			tu.InlineKeyboardButton(toggleLabel("👻 Эфемерно", s.EphemeralEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
+		},
+		// Карантин — тоже одна в ряду, пресеты длительности идут сразу под
+		// ней и только при включённой фиче (сценарий тот же, что у
+		// пресетов антиспама).
+		[]telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(toggleLabel("🧫 Карантин новичков", s.QuarantineEnabled)).
+				WithCallbackData(fmt.Sprintf("menu:qr:%d", chatID)),
+		})
+	if s.QuarantineEnabled {
+		rows = append(rows, quarantineHoursRow(chatID, qrHours))
+	}
+	// Пресеты секунд ожидания убраны вместе с reply_check_seconds: серия
+	// напоминаний живёт на общем с капчей интервале («tmo» выше).
 	// «Выйти из чата» — только владелец бота: админам кнопку не показываем
 	// (вывести бота из чата может лишь владелец, с подтверждением).
 	if b.isOwner(query.From.ID) {
@@ -960,9 +975,17 @@ func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardB
 		mode  captcha.Mode
 		label string
 	}{
-		{captcha.ModeCircles, "🟢 Кружки"},
-		{captcha.ModeEmoji, "🦋 Эмодзи"},
-		{captcha.ModeImage, "🖼 Картинка"},
+		// Подписи БЕЗ пробела после эмодзи: ряд из 3 кнопок даёт бюджет 10,
+		// а «🟢 Кружки» с пробелом = 9 (со «• » = 11) уходило за лимит.
+		// Без пробела: 🟢Кружки/🦋Эмодзи = 8 (со «• » = 10 — ровно в лимит),
+		// 🖼Фото = 5 (со «• » = 7, запас 3).
+		//
+		// ВНИМАНИЕ: caption в captchaModeLabel ниже и help-тексты всё ещё
+		// говорят «Картинка»/«Кружки» — это осознанное расхождение подписи
+		// на кнопке и описания режима в прозе.
+		{captcha.ModeCircles, "🟢Кружки"},
+		{captcha.ModeEmoji, "🦋Эмодзи"},
+		{captcha.ModeImage, "🖼Фото"},
 	}
 	row := make([]telego.InlineKeyboardButton, 0, len(opts))
 	for _, o := range opts {
