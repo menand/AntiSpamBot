@@ -227,6 +227,44 @@ CREATE TABLE IF NOT EXISTS chat_quarantine (
     PRIMARY KEY (chat_id, user_id)
 );
 
+-- Полный текстовый след сообщений обслуживаемых чатов — для расширенного
+-- сбора статистики (инструмент msgtool). Пишется только при включённом
+-- MESSAGE_CAPTURE_ENABLED; иначе таблица остаётся пустой.
+--
+-- Текст живёт здесь «горячим» дольше MESSAGE_ARCHIVE_HOT_DAYS (дефолт 7),
+-- дальше фоновая архивация (internal/bot/archive.go) складывает день в
+-- дневной zstd-JSONL рядом с БД и удаляет hot-строки этого дня по прочитанной
+-- границе id (строки, вставленные после чтения дня, переживают прогон и
+-- дописываются следующим тиком слиянием). День — единица партиционирования,
+-- операция идемпотентна. Каждая строка самодостаточна (цитата денормализована)
+-- — архив читается без joins.
+--
+-- kind: 'text' (текст) | 'caption' (подпись к медиа) | 'media' (вложение без
+-- подписи: стикер, фото, опрос — text пустой, has_media=1) | 'edit'
+-- (отредактированная версия; оригинальное сообщение остаётся отдельной строкой
+-- — обе версии связаны общим tg_msg_id, ts правки = message.EditDate, чтобы
+-- поздняя правка не легла в давно заархивированный день).
+CREATE TABLE IF NOT EXISTS messages (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id      INTEGER NOT NULL,
+    user_id      INTEGER NOT NULL,
+    tg_msg_id    INTEGER NOT NULL,           -- id сообщения Telegram (связь оригинал↔правка)
+    ts           INTEGER NOT NULL,           -- unix: для kind='edit' это EditDate (время правки!), иначе Date
+    day          TEXT    NOT NULL,           -- 'YYYY-MM-DD' по МСК (storage.DayOf)
+    kind         TEXT    NOT NULL,           -- 'text' | 'caption' | 'media' | 'edit'
+    text         TEXT,                       -- текст или подпись; NULL = медиа без подписи
+    has_media    INTEGER NOT NULL DEFAULT 0, -- был ли вложение (само вложение не храним)
+    reply_msg_id INTEGER,                    -- id сообщения-цитаты; NULL = не ответ
+    reply_uid    INTEGER,                    -- автор цитаты (user_id)
+    reply_author TEXT,                       -- отображаемое имя автора цитаты (для ЛЛМ без joins)
+    reply_text   TEXT,                       -- обрезанный текст цитаты
+    created_at   INTEGER NOT NULL
+);
+-- Архиватор находит незакрытые дни без полного скана.
+CREATE INDEX IF NOT EXISTS idx_messages_day ON messages(day);
+CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts);
+CREATE INDEX IF NOT EXISTS idx_messages_user_ts ON messages(user_id, ts);
+
 -- Служебные метки бота (ключ-значение): например, announced_version —
 -- последняя версия, о которой разосланы ЛС-оповещения.
 CREATE TABLE IF NOT EXISTS bot_meta (

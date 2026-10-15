@@ -6,12 +6,17 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
     -ldflags="-s -w -X main.version=${VERSION}" -o /out/bot ./cmd/bot
+# msgtool — редкий аналитический доступ к следу сообщений (hot-окно + архивы).
+# Тот же образ, чтобы на проде не тащить отдельный бинарь: docker exec.
+RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
+    -ldflags="-s -w" -o /out/msgtool ./cmd/msgtool
 
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -H -u 10001 bot && \
     mkdir -p /data && chown bot:bot /data
 COPY --from=build /out/bot /usr/local/bin/bot
+COPY --from=build /out/msgtool /usr/local/bin/msgtool
 USER bot
 VOLUME ["/data"]
 # Бот раз в минуту освежает /data/.heartbeat (рядом с DB_PATH); свежесть файла

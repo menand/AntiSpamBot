@@ -34,6 +34,19 @@ type Config struct {
 	GigaChatScope        string             // пусто = gigachat.DefaultScope
 	GigaChatModel        string             // пусто = gigachat.DefaultModel
 	AIProviderOrder      []string           // порядок цепочки ИИ-провайдеров; пусто = по умолчанию
+
+	// Расширенный сбор статистики: хранить ли текстовый след всех сообщений
+	// обслуживаемых чатов (таблица messages + дневные zstd-архивы). Выключено
+	// по умолчанию — включается явно на проде.
+	MessageCaptureEnabled bool
+	// ArchiveDir — каталог дневных zstd-архивов; пусто = рядом с БД
+	// (filepath.Dir(DBPath)/archive). Создаётся при старте.
+	ArchiveDir string
+	// ArchiveHotDays — сколько дней текст держится «горячим» в SQLite,
+	// прежде чем архиватор упакует день в zstd и удалит hot-строки.
+	// Это окно БЫСТРОГО доступа, а НЕ срок хранения: сами дневные архивы
+	// не удаляются никогда (удаление/пурж — ручная операция на VDS).
+	ArchiveHotDays int
 }
 
 func Load() (*Config, error) {
@@ -123,6 +136,20 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Расширенный сбор статистики: захват выключен по умолчанию (осознанное
+	// включение на проде), окно удержания горячего текста — 7 дней.
+	messageCapture, err := parseBool("MESSAGE_CAPTURE_ENABLED", false)
+	if err != nil {
+		return nil, err
+	}
+	archiveHotDays, err := parseInt("MESSAGE_ARCHIVE_HOT_DAYS", 7)
+	if err != nil {
+		return nil, err
+	}
+	if archiveHotDays < 0 {
+		return nil, errors.New("MESSAGE_ARCHIVE_HOT_DAYS must be >= 0 (0 archives every elapsed day)")
+	}
+
 	return &Config{
 		Token:                token,
 		CaptchaStageInterval: time.Duration(stageMinutes) * time.Minute,
@@ -144,6 +171,10 @@ func Load() (*Config, error) {
 		GigaChatScope:        os.Getenv("GIGACHAT_SCOPE"),
 		GigaChatModel:        os.Getenv("GIGACHAT_MODEL"),
 		AIProviderOrder:      aiOrder,
+
+		MessageCaptureEnabled: messageCapture,
+		ArchiveDir:            os.Getenv("ARCHIVE_DIR"),
+		ArchiveHotDays:        archiveHotDays,
 	}, nil
 }
 
@@ -214,6 +245,23 @@ func parseInt(name string, def int) (int, error) {
 		return 0, fmt.Errorf("invalid %s: %w", name, err)
 	}
 	return n, nil
+}
+
+// parseBool читает булеву env-переменную: пусто = дефолт; иначе разбор
+// 1/0/true/false/yes/no/on/off (в любом регистре). Опечатка — ошибка запуска,
+// а не молчаливое значение.
+func parseBool(name string, def bool) (bool, error) {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(name)))
+	if v == "" {
+		return def, nil
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true, nil
+	case "0", "false", "no", "off":
+		return false, nil
+	}
+	return false, fmt.Errorf("invalid %s: %q (expected 1/0/true/false/yes/no/on/off)", name, v)
 }
 
 func parseLogLevel(name string, def slog.Level) (slog.Level, error) {

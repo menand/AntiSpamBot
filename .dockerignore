@@ -12,5 +12,8 @@ docker-compose.yml
 *.db
 *.db-shm
 *.db-wal
+/archive/
+*.jsonl.zst
+*.jsonl.zst.tmp
 /bin
 /out

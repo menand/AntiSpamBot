@@ -29,6 +29,14 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("migrate events: %w", err)
 	}
 
+	// messages — PK здесь id (autoincrement); chat_id просто переписываем.
+	// Без этого текстовый след чата раскололся бы между старым и новым
+	// chat_id после апгрейда basic group → supergroup.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE messages SET chat_id = ? WHERE chat_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate messages: %w", err)
+	}
+
 	// members — PK (chat_id, user_id). Оставляем самый ранний joined_at юзера.
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO members (chat_id, user_id, joined_at)

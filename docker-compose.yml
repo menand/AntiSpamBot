@@ -15,6 +15,7 @@ services:
     environment:
       DB_PATH: /data/bot.db
       LOG_FILE: /data/bot.log
+      ARCHIVE_DIR: /data/archive
     volumes:
       - bot-data:/data
     logging:

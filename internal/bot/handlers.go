@@ -1362,6 +1362,10 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		Username:  user.Username,
 	})
 
+	// Расширенный сбор статистики: сохраняем полную запись сообщения (текст +
+	// цитата). Non-blocking (канал), горячий путь модерации не ждёт БД.
+	b.captureMessage(&message, captureKindFor(&message))
+
 	newcomer := b.isNewcomer(b.runCtx, chatID, user.ID, when)
 	if err := b.db.IncMessage(b.runCtx, chatID, when, newcomer); err != nil {
 		b.log.Warn("inc message", "err", err)
@@ -1420,7 +1424,13 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	// = эфемерное пояснение, дальше тихо). Админ/владелец карантину не цель —
 	// та же льгота, что в цензор-middleware бота.
 	if e, ok := b.quar.Get(message.Chat.ID, message.From.ID); ok {
+		// Льгота НЕ цензурит — правка остаётся видимой, значит её надо и в
+		// захват (иначе след статистики дырявится под админами/владельцем).
+		// А вот ветка quarantineViolates ниже ЦЕНЗУРИТ правку — удалённое
+		// из Telegram в архив не пишем (иначе содержимое жило бы в двух
+		// местах, одно из которых официально стёрто).
 		if b.isOwner(message.From.ID) {
+			b.captureMessage(&message, "edit")
 			return nil
 		}
 		isAdmin, sure := b.isChatAdminVerified(ctx, message.Chat.ID, message.From.ID)
@@ -1428,6 +1438,7 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 		// всякий случай» по одному 429 нечестно к админу — ошибка никогда не
 		// отбирает льготу (тот же трейд-офф, что у punishNonAdmin).
 		if isAdmin || !sure {
+			b.captureMessage(&message, "edit")
 			return nil
 		}
 		if quarantineViolates(&message) {
@@ -1435,6 +1446,12 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 			return nil
 		}
 	}
+	// Расширенный сбор статистики: правка сохраняется отдельной записью
+	// (kind='edit') — оригинальное сообщение уже записано при отправке, обе
+	// версии связаны общим tg_msg_id. Стоит ДО бюджет-предохранителя LLM:
+	// захват не зависит от квоты ИИ, и серия быстрых правок не должна теряться
+	// из-за editCheckCooldown / уже идущей проверки.
+	b.captureMessage(&message, "edit")
 	// Бюджет-предохранитель: правки не растят счётчик сообщений, поэтому
 	// новичок (total ≤ whitelist) мог бы бесконечными правками одного
 	// сообщения гонять LLM-запросы без всякого самоограничения — обычный
