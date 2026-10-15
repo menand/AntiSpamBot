@@ -6,6 +6,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.20.0
 	github.com/mymmrac/telego v1.12.1
+	github.com/rivo/uniseg v0.4.7
 	golang.org/x/image v0.46.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	modernc.org/sqlite v1.59.0

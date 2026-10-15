@@ -28,6 +28,122 @@ func TestTruncateLabel(t *testing.T) {
 	}
 }
 
+func TestTruncateLabelWidth(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		// wantEmpty — строка вообще не должна обрезаться.
+		wantNoEllipsis bool
+		// wantRunePrefix — срез ровно по этим рунам плюс многоточие.
+		wantRunePrefix string
+		// wantContains — подстрока, обязана сохраниться в результате
+		// (инварианты вроде «эмодзи-кластер цел»).
+		wantContains string
+	}{
+		{
+			name:           "короткое не трогаем",
+			in:             "129 роддом, июль-сентябрь",
+			max:            labelMaxWidth,
+			wantNoEllipsis: true,
+		},
+		{
+			name: "длинное кириллическое режем по ширине",
+			in:   "Беговой чат жителей Измайловского района",
+			max:  labelMaxWidth,
+			// 33 единицы бюджета: 32 на текст + 1 на многоточие.
+			// Кейс писался под старый бюджет 30 — при откате константы
+			// назад он упадёт здесь, а не молча на проде.
+			wantRunePrefix: "Беговой чат жителей Измайловског",
+		},
+		{
+			// Семья из 7 рун = ОДНА графема шириной 2. Рунная обрезка
+			// дала бы мусорный half-эмодзи, по графемам — целый кластер.
+			// Проверяем не только UTF-8, но и сам инвариант: кластер в
+			// результате обязан присутствовать целиком, иначе регрессия,
+			// ради которой тест писался, пройдёт молча.
+			name:           "эмодзи-кластер не режется пополам",
+			in:             "👨‍👩‍👧‍👦" + strings.Repeat("б", 40),
+			max:            labelMaxWidth,
+			wantNoEllipsis: false,
+			wantContains:   "👨‍👩‍👧‍👦",
+		},
+		{
+			// 35 «х» + 3 эмодзи = 41 единица. Под бюджет 33 текст занимает
+			// весь лимит (32 + многоточие), и все три эмодзи уходят ЦЕЛИКОМ,
+			// а не порезанными пополам. При старом бюджете 30 вход был 31
+			// и кейс ничего не проверял.
+			name:           "эмодзи в конце просто отваливаются",
+			in:             strings.Repeat("х", 35) + "🚀🔥🎉",
+			max:            labelMaxWidth,
+			wantNoEllipsis: false,
+		},
+		{
+			// 30 × 2 = 60 единиц, режется, но каждый 🚀 остаётся целым.
+			name:           "сплошные эмодзи режутся по ширине, не по рунам",
+			in:             strings.Repeat("🚀", 30),
+			max:            labelMaxWidth,
+			wantNoEllipsis: false,
+		},
+		{
+			// Бюджет 21: 20 на текст + многоточие, и 20-я позиция — пробел
+			// после «жителей». Без подчистки получилось бы «жителей …» с
+			// дыркой перед многоточием.
+			name:           "хвостовой пробел подчищается",
+			in:             "Беговой чат жителей Измайловского района",
+			max:            21,
+			wantRunePrefix: "Беговой чат жителей",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateLabelWidth(tc.in, tc.max)
+
+			if !utf8.ValidString(got) {
+				t.Fatalf("invalid UTF-8: %q", got)
+			}
+			if w := labelWidth(got); w > tc.max {
+				t.Errorf("width %d exceeds budget %d: %q", w, tc.max, got)
+			}
+			if tc.wantContains != "" && !strings.Contains(got, tc.wantContains) {
+				t.Errorf("invariant lost: %q not in %q", tc.wantContains, got)
+			}
+			if tc.wantNoEllipsis {
+				if strings.HasSuffix(got, "…") {
+					t.Errorf("must not be truncated, got %q", got)
+				}
+				return
+			}
+			if !strings.HasSuffix(got, "…") {
+				t.Errorf("expected ellipsis, got %q", got)
+			}
+			// Обрезанный хвост не должен оставлять висячего пробела.
+			if strings.HasSuffix(strings.TrimSuffix(got, "…"), " ") {
+				t.Errorf("trailing space before ellipsis: %q", got)
+			}
+			if tc.wantRunePrefix != "" {
+				if want := tc.wantRunePrefix + "…"; got != want {
+					t.Errorf("got %q, want %q", got, want)
+				}
+			}
+		})
+	}
+}
+
+// Семья должна считаться за ОДНУ графему шириной 2, а не за 7 рун.
+func TestLabelWidthCountsEmojiClusters(t *testing.T) {
+	if w := labelWidth("👨‍👩‍👧‍👦"); w != 2 {
+		t.Errorf("family emoji width = %d, want 2", w)
+	}
+	if w := labelWidth("б"); w != 1 {
+		t.Errorf("letter width = %d, want 1", w)
+	}
+	if w := labelWidth("🚀"); w != 2 {
+		t.Errorf("rocket width = %d, want 2", w)
+	}
+}
+
 func TestRenderGreeting(t *testing.T) {
 	mention := `<a href="tg://user?id=1">Вася</a>`
 
@@ -169,5 +285,34 @@ func TestMentionWithUsername(t *testing.T) {
 	}
 	if got := mentionWithUsername(infos, 99); strings.Contains(got, " - @") {
 		t.Fatalf("unknown user must have no tail, got %q", got)
+	}
+}
+
+// Бюджет обязан падать с ростом числа кнопок в ряду: ширина ряда делится
+// между кнопками, и по 30 на каждую в ряду из двух не влезет ни одна.
+func TestLabelBudget(t *testing.T) {
+	want := map[int]int{
+		-1: labelMaxWidth, // мусорный ввод = одна кнопка
+		0:  labelMaxWidth,
+		1:  labelMaxWidth,
+		2:  17,
+		3:  10,
+		4:  7,
+		5:  5,
+		9:  5, // дальше — тот же потолок
+	}
+	for per, w := range want {
+		if got := labelBudget(per); got != w {
+			t.Errorf("labelBudget(%d) = %d, want %d", per, got, w)
+		}
+	}
+	// Монотонность: больше кнопок — бюджет не растёт.
+	prev := labelBudget(1)
+	for per := 2; per <= 8; per++ {
+		cur := labelBudget(per)
+		if cur > prev {
+			t.Errorf("labelBudget(%d) = %d вырос относительно %d", per, cur, prev)
+		}
+		prev = cur
 	}
 }
