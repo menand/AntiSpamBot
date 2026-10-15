@@ -55,6 +55,9 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	_ = db.PutQuarantine(ctx, old, 1, now.Add(time.Hour), true)
 	_ = db.PutGreeting(ctx, old, 1, 777, now)
 	_ = db.AddTrusted(ctx, old, 1, now)
+	_ = db.AppendMessages(ctx, []StoredMessage{
+		{ChatID: old, UserID: 1, TGMsgID: 5, TS: now, Kind: "text", Text: "до миграции"},
+	})
 
 	if err := db.MigrateChat(ctx, old, neu); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -159,6 +162,14 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	// greetings старого чата чистятся: message id мертвы вместе с чатом.
 	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {
 		t.Error("old-chat greeting must be dropped on migration")
+	}
+	// messages (текстовый след) переключается на новый chat_id, иначе он
+	// раскололся бы между старым и новым id после апгрейда группы.
+	if got, _ := db.QueryMessages(ctx, MessageFilter{ChatID: neu}); len(got) != 1 {
+		t.Errorf("messages not re-keyed to new chat: got %d rows, want 1", len(got))
+	}
+	if got, _ := db.QueryMessages(ctx, MessageFilter{ChatID: old}); len(got) != 0 {
+		t.Errorf("messages still on old chat: got %d rows, want 0", len(got))
 	}
 }
 

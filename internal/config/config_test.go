@@ -19,6 +19,7 @@ func clearEnv(t *testing.T) {
 		"GEMINI_API_KEY", "GEMINI_MODEL",
 		"GIGACHAT_AUTH_KEY", "GIGACHAT_SCOPE", "GIGACHAT_MODEL",
 		"AI_PROVIDER_ORDER",
+		"MESSAGE_CAPTURE_ENABLED", "ARCHIVE_DIR", "MESSAGE_ARCHIVE_HOT_DAYS",
 	} {
 		t.Setenv(name, "")
 	}
@@ -184,6 +185,15 @@ func TestLoadDefaults(t *testing.T) {
 	if !reflect.DeepEqual(cfg.AIProviderOrder, DefaultAIProviders) {
 		t.Errorf("provider order default: got %v, want %v", cfg.AIProviderOrder, DefaultAIProviders)
 	}
+	if cfg.MessageCaptureEnabled {
+		t.Error("message capture must default to off")
+	}
+	if cfg.ArchiveHotDays != 7 {
+		t.Errorf("archive hot days default: %d, want 7", cfg.ArchiveHotDays)
+	}
+	if cfg.ArchiveDir != "" {
+		t.Errorf("archive dir default must be empty (derived from DB path): %q", cfg.ArchiveDir)
+	}
 }
 
 func TestLoadValidation(t *testing.T) {
@@ -203,6 +213,9 @@ func TestLoadValidation(t *testing.T) {
 		{"bad log level", "LOG_LEVEL", "loud"},
 		{"unknown AI provider", "AI_PROVIDER_ORDER", "groq,cerebras"},
 		{"duplicate AI provider", "AI_PROVIDER_ORDER", "groq,gemini,groq"},
+		{"negative archive hot days", "MESSAGE_ARCHIVE_HOT_DAYS", "-1"},
+		{"bad archive hot days", "MESSAGE_ARCHIVE_HOT_DAYS", "many"},
+		{"bad capture flag", "MESSAGE_CAPTURE_ENABLED", "maybe"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,4 +227,45 @@ func TestLoadValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseBool(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		def   bool
+		want  bool
+	}{
+		{"empty default false", "", false, false},
+		{"empty default true", "", true, true},
+		{"one", "1", false, true},
+		{"true", "true", false, true},
+		{"TRUE upper", "TRUE", false, true},
+		{"yes", "yes", false, true},
+		{"on", "on", false, true},
+		{"zero", "0", true, false},
+		{"false", "false", true, false},
+		{"no", "no", true, false},
+		{"off", "off", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TEST_PARSE_BOOL", tc.value)
+			got, err := parseBool("TEST_PARSE_BOOL", tc.def)
+			if err != nil {
+				t.Fatalf("parseBool(%q): %v", tc.value, err)
+			}
+			if got != tc.want {
+				t.Fatalf("parseBool(%q, %v) = %v, want %v", tc.value, tc.def, got, tc.want)
+			}
+		})
+	}
+
+	// Опечатка — ошибка запуска, а не молчаливый дефолт.
+	t.Run("invalid is error", func(t *testing.T) {
+		t.Setenv("TEST_PARSE_BOOL", "maybe")
+		if _, err := parseBool("TEST_PARSE_BOOL", false); err == nil {
+			t.Fatal("expected error for invalid bool")
+		}
+	})
 }

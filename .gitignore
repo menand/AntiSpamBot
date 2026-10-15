@@ -5,6 +5,11 @@
 *.db
 *.db-shm
 *.db-wal
+# Дневные архивы сообщений (расширенный сбор статистики): сырые тексты чатов
+# не должны попадать в git.
+/archive/
+*.jsonl.zst
+*.jsonl.zst.tmp
 .idea/
 .vscode/
 .DS_Store

@@ -10,6 +10,7 @@ JSON_TAGS := -tags stdjson
 
 build:
 	go build $(JSON_TAGS) -ldflags "$(LDFLAGS)" -o bin/bot ./cmd/bot
+	go build $(JSON_TAGS) -o bin/msgtool ./cmd/msgtool
 
 run:
 	go run $(JSON_TAGS) ./cmd/bot

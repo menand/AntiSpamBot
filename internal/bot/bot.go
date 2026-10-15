@@ -121,6 +121,16 @@ type Bot struct {
 	// завершился бы ошибкой и показал бы «не получилось» поверх удачного выхода.
 	leaveMu       sync.Mutex
 	leaveInflight map[int64]bool
+
+	// Расширенный сбор статистики (cfg.MessageCaptureEnabled). Канал
+	// буферизует записи сообщений, отдельная writer-горутина пачками пишет их
+	// в БД — чтобы SQLite-вставка не стояла на горячем пути модерации. Если
+	// канал переполнен (БД отстаёт), запись отбрасывается: лучше потерять
+	// статистику, чем тормозить обработку сообщений. captureDone закрывается
+	// writer-горутиной при выходе — Run дожидается её перед db.Close(), иначе
+	// финальный флаш упал бы на закрытой БД.
+	captureCh   chan storage.StoredMessage
+	captureDone chan struct{}
 }
 
 // chatUser — ключ пер-(chat, user) карт выше.
@@ -159,6 +169,8 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		approvalCache:  make(map[int64]bool),
 		spamGateCache:  make(map[int64]bool),
 		leaveInflight:  make(map[int64]bool),
+		captureCh:      make(chan storage.StoredMessage, captureBufSize),
+		captureDone:    make(chan struct{}),
 	}, nil
 }
 
@@ -178,6 +190,11 @@ func (b *Bot) Run(ctx context.Context) error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	b.db = db
+	// Финальный флаш writer-горутины захвата ждём отдельным defer'ом, который
+	// регистрируется НИЖЕ — сразу после запуска самой горутины (defer'ы идут
+	// LIFO, так waitCaptureDone выполнится ПЕРЕД db.Close). Здесь же ставить
+	// waitCaptureDone нельзя: при раннем выходе Run (ошибка GetMe) горутина
+	// ещё не запущена, captureDone не закроется, и дефер ждал бы зря таймаут.
 	defer func() { _ = db.Close() }()
 
 	me, err := b.api.GetMe(ctx)
@@ -218,6 +235,19 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
 	b.goSafe("announceVersion", func() { b.announceVersion(ctx) })
 	b.goSafe("healthbeat", func() { b.healthbeat(ctx) })
+	// Расширенный сбор статистики: пишущая горутина захвата включается только
+	// флагом MESSAGE_CAPTURE_ENABLED (captureCh иначе никто не читает).
+	// Архиватор запускается ВСЕГДА: он дешёвый (первый прогон и часовой тик —
+	// no-op на пустой таблице), а если захват когда-то выключили, уже
+	// накопленные hot-строки должны доархивироваться, а не зависнуть вечно.
+	if b.cfg.MessageCaptureEnabled {
+		b.goSafe("captureWriter", func() { b.captureWriter(ctx) })
+		// Дефер регистрируется только ЗДЕСЬ — после фактического запуска
+		// writer-горутины. Идёт раньше `db.Close` (LIFO), так что финальный
+		// detached-флаш успевает долить хвост на живую БД, а не на закрытую.
+		defer b.waitCaptureDone()
+	}
+	b.goSafe("archiveLoop", func() { b.archiveLoop(ctx) })
 	var providers []string
 	for _, p := range b.aiProviders() {
 		if p.c.Enabled() {
