@@ -136,8 +136,11 @@ announce:
 func (b *Bot) handleWhatsNewCommand(ctx *th.Context, message telego.Message) error {
 	text := renderWhatsNew(parseChangelog(antispam.ChangelogMD), whatsNewVersions)
 	if message.Chat.Type == "private" {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-			WithParseMode(telego.ModeHTML))
+		// Экран заменяет прошлую панель — кнопка «Назад» обязательна, иначе
+		// /whatsnew оставлял бы юзера без навигации (см. /chats).
+		if _, err := b.sendScreen(ctx, message.Chat.ID, screenPanel, text, true, backKeyboard()); err != nil {
+			b.log.Warn("send whatsnew", "err", err, "user", message.Chat.ID)
+		}
 		return nil
 	}
 	if message.Chat.Type != "group" && message.Chat.Type != "supergroup" {

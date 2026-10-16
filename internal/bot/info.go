@@ -7,7 +7,6 @@ import (
 
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
-	tu "github.com/mymmrac/telego/telegoutil"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -28,8 +27,10 @@ func (b *Bot) handleInfoCommand(ctx *th.Context, message telego.Message) error {
 // handlePrivateInfoCommand — аптайм-ветка /info в ЛС, только для владельцев.
 func (b *Bot) handlePrivateInfoCommand(ctx *th.Context, message telego.Message) error {
 	if message.From == nil || !b.isOwner(message.From.ID) {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Команда доступна только владельцам бота (OWNER_IDS)."))
+		// Отбивка-отказ — экран screenNotice: повторный отказ заменит
+		// прошлый, но панель/меню юзера не тронет.
+		_, _ = b.sendScreen(ctx, message.Chat.ID, screenNotice,
+			"Команда доступна только владельцам бота (OWNER_IDS).", false, nil)
 		return nil
 	}
 
@@ -47,8 +48,9 @@ func (b *Bot) handlePrivateInfoCommand(ctx *th.Context, message telego.Message) 
 		started,
 		formatUptimeRU(uptime),
 	)
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-		WithParseMode(telego.ModeHTML))
+	if _, err := b.sendScreen(ctx, message.Chat.ID, screenPanel, text, true, backKeyboard()); err != nil {
+		b.log.Warn("info send", "err", err, "user", message.Chat.ID)
+	}
 	return nil
 }
 
