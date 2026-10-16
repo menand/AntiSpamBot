@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -48,6 +49,11 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	// reply_check_seconds — легаси (серия напоминаний живёт на общем
 	// интервале): колонка переносится, но в Go-структуре её больше нет.
 	_, _ = db.sql.ExecContext(ctx, `UPDATE chat_settings SET reply_check_seconds = ? WHERE chat_id = ?`, rpls, old)
+	wmode := "greet"
+	_ = db.SetWelcomeMode(ctx, old, wmode)
+	repText := "Ответь, {name}!"
+	repEnts := `[{"type":"italic","offset":0,"length":6}]`
+	_ = db.SetReplyText(ctx, old, &repText, &repEnts)
 	_ = db.SetEphemeralEnabled(ctx, old, true)
 	qh := 24
 	_ = db.SetQuarantineEnabled(ctx, old, true)
@@ -142,6 +148,15 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	}
 	if !ms.ReplyCheckEnabled {
 		t.Error("reply_check_enabled did not migrate")
+	}
+	if !ms.WelcomeMode.Valid || ms.WelcomeMode.String != "greet" {
+		t.Errorf("welcome_mode did not migrate: %+v", ms.WelcomeMode)
+	}
+	if !ms.ReplyText.Valid || ms.ReplyText.String != repText {
+		t.Errorf("reply_text did not migrate: %+v", ms.ReplyText)
+	}
+	if !ms.ReplyEntities.Valid || ms.ReplyEntities.String != repEnts {
+		t.Errorf("reply_entities did not migrate: %+v", ms.ReplyEntities)
 	}
 	if !ms.EphemeralEnabled {
 		t.Error("ephemeral_enabled did not migrate")
@@ -330,6 +345,101 @@ func TestLegacyCaptchaTimeoutConverted(t *testing.T) {
 	s, _ := db.GetChatSettings(ctx, -1)
 	if !s.CaptchaIntervalMinutes.Valid || s.CaptchaIntervalMinutes.Int64 != 7 {
 		t.Errorf("re-open must not overwrite explicit interval: %+v", s.CaptchaIntervalMinutes)
+	}
+}
+
+// TestLegacyReplyTextMoved — разовая data-миграция при открытии БД: у чатов
+// с включённым «требовать ответа» greeting_text был текстом ПРОВЕРКИ —
+// переносится в reply_text (greeting-поля очищаются). Не адресует чаты без
+// reply-режима, не трёт чаты с явным welcome_mode и идемпотентна.
+func TestLegacyReplyTextMoved(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	// Первый Open: сеем легаси-состояние сырыми строками chat_settings.
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_check_enabled, greeting_text, greeting_entities) VALUES
+			(-1, 1, 'проверка {name}', '[{"type":"bold","offset":0,"length":8}]'),
+			(-2, 0, 'привет {name}', NULL),
+			(-3, 1, NULL, NULL)
+	`)
+	if err != nil {
+		t.Fatalf("seed legacy: %v", err)
+	}
+	// -4: чат уже переключён явным режимом — миграция не должна его задеть.
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_check_enabled, welcome_mode, greeting_text) VALUES
+			(-4, 1, 'greet', 'оставить как есть')
+	`)
+	if err != nil {
+		t.Fatalf("seed explicit mode: %v", err)
+	}
+	// -5: reply_text уже заполнен (новая версия успела записать текст до
+	// срабатывания миграции) — гард reply_text IS NULL обязан защитить его
+	// от перетирания легаси-текстом.
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_check_enabled, greeting_text, reply_text) VALUES
+			(-5, 1, 'старое', 'уже новое')
+	`)
+	if err != nil {
+		t.Fatalf("seed filled reply_text: %v", err)
+	}
+	_ = db.Close()
+
+	// Второй Open: перенос обязан отработать.
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck // test cleanup
+
+	s, _ := db.GetChatSettings(ctx, -1)
+	if !s.ReplyText.Valid || s.ReplyText.String != "проверка {name}" {
+		t.Errorf("chat -1: reply_text = %+v, want перенос текста проверки", s.ReplyText)
+	}
+	if !s.ReplyEntities.Valid || !strings.Contains(s.ReplyEntities.String, "bold") {
+		t.Errorf("chat -1: reply_entities = %+v, want перенос entities", s.ReplyEntities)
+	}
+	if s.GreetingText.Valid || s.GreetingEntities.Valid {
+		t.Errorf("chat -1: greeting-поля должны быть очищены, got %+v / %+v",
+			s.GreetingText, s.GreetingEntities)
+	}
+
+	if s, _ = db.GetChatSettings(ctx, -2); s.GreetingText.String != "привет {name}" || s.ReplyText.Valid {
+		t.Errorf("chat -2 (без reply): не должен трогаться, got %+v / %+v", s.GreetingText, s.ReplyText)
+	}
+	if s, _ = db.GetChatSettings(ctx, -3); s.ReplyText.Valid {
+		t.Errorf("chat -3 (нечего переносить): reply_text должен остаться NULL, got %+v", s.ReplyText)
+	}
+	if s, _ = db.GetChatSettings(ctx, -4); s.GreetingText.String != "оставить как есть" || s.ReplyText.Valid {
+		t.Errorf("chat -4 (явный welcome_mode): не должен трогаться, got %+v / %+v", s.GreetingText, s.ReplyText)
+	}
+	if s, _ = db.GetChatSettings(ctx, -5); s.ReplyText.String != "уже новое" || s.GreetingText.String != "старое" {
+		t.Errorf("chat -5 (reply_text уже заполнен): не должен трогаться, got reply=%+v greeting=%+v",
+			s.ReplyText, s.GreetingText)
+	}
+
+	// Идемпотентность: явный текст проверки не перетирается повторным Open.
+	repText := "новый текст проверки"
+	if err := db.SetReplyText(ctx, -1, &repText, nil); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck // second cleanup is fine in tests
+	s, _ = db.GetChatSettings(ctx, -1)
+	if !s.ReplyText.Valid || s.ReplyText.String != "новый текст проверки" {
+		t.Errorf("re-open must not overwrite explicit reply text: %+v", s.ReplyText)
+	}
+	if s.GreetingText.Valid {
+		t.Errorf("re-open must not resurrect greeting text: %+v", s.GreetingText)
 	}
 }
 

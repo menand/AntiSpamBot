@@ -146,14 +146,32 @@ func (s *replyStore) TakeChat(chatID int64) []*replyPending {
 	return out
 }
 
-// maybeArmReplyWait — хук после приветствия в onSuccess: при включённом
-// режиме взводит серию напоминаний (стадия 1). Само приветствие-якорь шлёт
-// onSuccess ДО этого вызова — см. комментарий там про порядок release→arm.
-// Возвращает true, если ожидание реально взведено: false (режим выключен
-// или провал персистентности) говорит onSuccess не рисовать в приветствии
-// требование, которое никто не проверяет.
+// maybeArmReplyWait — хук после приветствия в onSuccess: при режиме «с
+// ответом» взводит серию напоминаний (стадия 1). Якорь шлёт onSuccess ДО
+// этого вызова — см. комментарий там про порядок release→arm. Возвращает
+// true, если ожидание реально взведено: false (режим без проверки или провал
+// персистентности) говорит onSuccess не рисовать в якоре требование, которое
+// никто не проверяет.
 func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) bool {
-	if !s.ReplyCheckEnabled {
+	if effectiveWelcomeMode(s) != welcomeReply {
+		return false
+	}
+	// Снапшот s прочитан до размьюта (секунды ретраев release внутри
+	// onSuccess): админ мог увести чат из «с ответом», пока капча дозревала.
+	// Свежая проверка сужает окно гонки, но не закрывает его (смена режима
+	// может пройти между ней и Put) — добивает страховка в replyWaitLoop:
+	// серия в чате без режима не напомнит и не накажет, а снимется пассом.
+	// Ошибка чтения — не повод решать за чат: армируем как раньше.
+	// Уверенное «режим ушёл» — серию не взводим И закрываем воронку
+	// компенсирующим пассом: капча пройдена, требование отменено админом, а
+	// в reply-режиме пасс пишет только ответ — без этого юзер навсегда завис
+	// бы в «В процессе» (ожидания нет, и ни disarmReplyWaits, ни цикл его не
+	// увидят).
+	if fresh, err := b.db.GetChatSettings(b.runCtx, chatID); err == nil && effectiveWelcomeMode(fresh) != welcomeReply {
+		if rerr := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); rerr != nil {
+			b.log.Warn("record compensating pass (mode left reply before arm)", "err", rerr,
+				"chat", chatID, "user", userID)
+		}
 		return false
 	}
 	interval := b.effectiveStageInterval(s)
@@ -286,6 +304,61 @@ func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
 	return false
 }
 
+// disarmReplyWaits снимает ВСЕ живые ожидания ответа чата разом (смена режима
+// «после капчи» уводит чат из reply): таймеры отменяются, строки удаляются,
+// воронка каждого юзера закрывается компенсирующим пассом — требование
+// исчезло не по его вине (прецеденты: /mute, провал отправки якоря, промоушен
+// в админы). Без пасса эти юзеры навсегда зависли бы в «В процессе»: в режиме
+// reply пасс пишет только replyWaitSatisfied. Крэш между записью режима и этим
+// снятием подхватывает backstop в restorePendingReplies (режим != reply →
+// строка не восстанавливается, пасс пишется там).
+func (b *Bot) disarmReplyWaits(chatID int64) {
+	waits := b.replies.TakeChat(chatID)
+	if len(waits) == 0 {
+		return
+	}
+	// Свежий дедлайн: операция идёт из хендлера колбэка, чей ctx сейчас умрёт,
+	// а событие и удаление строк обязаны доехать до БД.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, p := range waits {
+		p.Cancel()
+		if err := b.db.RecordEvent(ctx, chatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass on reply disarm", "err", err,
+				"chat", chatID, "user", p.UserID)
+		}
+	}
+	if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
+		b.log.Warn("delete pending replies on disarm", "err", err, "chat", chatID)
+	}
+	b.log.Info("reply waits disarmed by mode switch", "chat", chatID, "count", len(waits))
+}
+
+// disarmReplyWait снимает ОДНО ожидание, если оно всё ещё наше (Take-гвард):
+// компенсирующий пасс пишется только победителем — проигравший гонку делает
+// no-op (терминальный исход уже записал другой: ответ, выход, /mute). Вызывается
+// страховкой режима в replyWaitLoop для серии, пережившей смену режима.
+// Строка гасится по СВОЕЙ стадии: предзаписанную N+1 добивает сам цикл после
+// перехода, а сюда попадаем только на исходе стадии.
+func (b *Bot) disarmReplyWait(ctx context.Context, chatID, userID int64, p *replyPending) {
+	taken, ok := b.replies.Take(chatID, userID)
+	if !ok || taken != p {
+		return
+	}
+	taken.Cancel()
+	if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+		b.log.Warn("record pass on reply disarm", "err", err, "chat", chatID, "user", userID)
+	}
+	if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage); err != nil {
+		// Выжившая строка воскресила бы серию при рестарте — но backstop
+		// режима в restorePendingReplies снимет её (режим != reply), ценой
+		// возможного двойного пасса; это шум против кика, принимаем.
+		b.log.Warn("delete pending reply on disarm", "err", err, "chat", chatID, "user", userID)
+	}
+	b.log.Info("reply wait disarmed — mode left reply",
+		"chat", chatID, "user", userID, "stage", p.Stage)
+}
+
 // replyWaitLoop ведёт серию напоминаний «ответь на приветствие» — ту же схему
 // из трёх сообщений, что у капчи (captchaStages), на том же интервале:
 // якорь стадии истёк → удаляем его, шлём следующий (напоминание, затем
@@ -311,6 +384,23 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// Identity-проверка БЕЗ изъятия: забрать ожидание вправе только
 		// настоящий победитель (ответ юзера, его выход, финальная кара ниже).
 		if cur, ok := b.replies.Get(chatID, userID); !ok || cur != p {
+			return
+		}
+
+		// Страховка от устаревшего арма и гонок со сменой режима: серия могла
+		// взвестись по снапшоту настроек, пока чат уже уводили из «с ответом»
+		// (disarmReplyWaits снял только прежние ожидания, а maybeArmReplyWait
+		// добавил новую пару уже после его TakeChat). Чат больше не обещает
+		// требование — не напоминаем и НЕ караем: снимаем ожидание
+		// компенсирующим пассом (прецедент /mute). Стоит ДО финальной кары,
+		// поэтому и «фантомная» серия никого не кикнет. Настройки читаются
+		// один раз на стадию — переход ниже переиспользует тот же снапшот;
+		// ошибка чтения — не повод решать за чат (та же дисциплина, что у
+		// backstop в restorePendingReplies и у свежей проверки в
+		// maybeArmReplyWait): серия продолжается как раньше.
+		s, serr := b.db.GetChatSettings(ctx, chatID)
+		if serr == nil && effectiveWelcomeMode(s) != welcomeReply {
+			b.disarmReplyWait(ctx, chatID, userID, p)
 			return
 		}
 
@@ -350,8 +440,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// 2) ожидание изымается ПОСЛЕ отправки напоминания: ответ юзера,
 		//    прилетевший в секунды ретраев отправки, обязан застать pending
 		//    в store (replyWaitSatisfied), иначе серия дожала бы написавшего.
-		settings := b.chatSettings(ctx, chatID)
-		nextExpires := time.Now().Add(b.effectiveStageInterval(settings))
+		nextExpires := time.Now().Add(b.effectiveStageInterval(s))
 		if err := b.db.PutPendingReply(ctx, storage.PendingReply{
 			ChatID: chatID, UserID: userID, ExpiresAt: nextExpires,
 			Stage: p.Stage + 1, ThreadID: p.ThreadID,
@@ -364,7 +453,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// к которому оно прикреплено, — мусор в ленте.
 		b.deleteReplyAnchor(ctx, chatID, userID)
 
-		msgID, sent := b.sendGreetingAnchor(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
+		msgID, sent := b.sendGreetingAnchor(ctx, s, welcomeReply, chatID, userID, p.ThreadID, p.Stage+1)
 		if !sent {
 			// Напоминание не ушло даже после ретраев (429-шторм, сеть), а
 			// предыдущий якорь мы только что удалили: требование «напиши
@@ -446,6 +535,7 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 	}
 	now := time.Now()
 	staleChats := map[int64]struct{}{}
+	disarmedChats := map[int64]struct{}{}
 	restored := 0
 	// Общий бюджет на все liveness-пробы истёкших строк — как в
 	// restorePending: массовый простой не должен тянуть рестарт по 10 c за
@@ -459,6 +549,21 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 		// строки только позже.
 		if !b.chatServiceable(row.ChatID) {
 			staleChats[row.ChatID] = struct{}{}
+			continue
+		}
+		// Режим могли увести из «с ответом», пока бот лежал (или крэш в окне
+		// между записью режима и снятием серий — см. disarmReplyWaits):
+		// требование больше не обещано, серию не восстанавливаем, воронку
+		// закрываем пассом. Ошибка чтения настроек — не повод решать за чат:
+		// восстанавливаем как раньше. Редкий двойной пасс (живое снятие
+		// успело записать пасс, но упало на удалении строки, а этот backstop
+		// записал второй) принимаем как шум против возможного кика.
+		if s, serr := b.db.GetChatSettings(ctx, row.ChatID); serr == nil && effectiveWelcomeMode(s) != welcomeReply {
+			if rerr := b.db.RecordEvent(ctx, row.ChatID, row.UserID, storage.EventPass, time.Now(), ""); rerr != nil {
+				b.log.Warn("record pass on restore disarm", "err", rerr,
+					"chat", row.ChatID, "user", row.UserID)
+			}
+			disarmedChats[row.ChatID] = struct{}{}
 			continue
 		}
 		expires := row.ExpiresAt
@@ -497,9 +602,16 @@ func (b *Bot) restorePendingReplies(ctx context.Context) (int, error) {
 				"err", err, "chat", chatID)
 		}
 	}
-	if restored > 0 || len(staleChats) > 0 {
+	for chatID := range disarmedChats {
+		if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
+			b.log.Warn("delete pending replies of disarmed chat",
+				"err", err, "chat", chatID)
+		}
+	}
+	if restored > 0 || len(staleChats) > 0 || len(disarmedChats) > 0 {
 		b.log.Info("restored pending replies", "count", restored,
-			"total", len(rows), "skipped_chats", len(staleChats))
+			"total", len(rows), "skipped_chats", len(staleChats),
+			"disarmed_chats", len(disarmedChats))
 	}
 	return restored, nil
 }

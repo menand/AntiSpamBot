@@ -150,8 +150,9 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 
 // reportLine — однострочная сводка чата для ЛС-отчёта: только счётчики, без
 // имён и топов («без излишних деталей»). Бан = обычные + спам-вердикты.
-// Пустота — как в digestHasContent: день с сообщениями, но без событий
-// воронки не называется «без событий».
+// Хвост — «в процессе N» (та же формула, что на экране статистики: pendingCount)
+// и «сообщений: M» всегда. Пустота — как в digestHasContent: день с
+// сообщениями, но без событий воронки не называется «без событий».
 func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	c.Title = truncateLabel(titleOrID(c), 60) // рун-безопасно; простыня в названии чата не съест бюджет отчёта
 	link := chatLinkHTML(c)
@@ -167,15 +168,21 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	}
 	line := fmt.Sprintf("%s — вступило %d, прошло %d, вышли сами %d, кик %d, бан %d",
 		link, s.Joined, s.Passed, s.Left, s.Kicked, banned)
+	// Скобка «из них спам» — сразу за «бан N» (к нему и относится), дальше
+	// хвосты воронки и счётчик сообщений.
+	if s.SpamBanned > 0 {
+		line += fmt.Sprintf(" (из них спам %d)", s.SpamBanned)
+	}
 	if modActs > 0 {
 		line += fmt.Sprintf(", админ-команды %d", modActs)
 	}
 	if s.Aborted > 0 {
 		line += fmt.Sprintf(", не проверено %d", s.Aborted)
 	}
-	if s.SpamBanned > 0 {
-		line += fmt.Sprintf(" (из них спам %d)", s.SpamBanned)
+	if pending := pendingCount(s); pending > 0 {
+		line += fmt.Sprintf(", в процессе %d", pending)
 	}
+	line += fmt.Sprintf(", сообщений: %d", msgs)
 	return line
 }
 

@@ -148,12 +148,12 @@ func TestRenderGreeting(t *testing.T) {
 	mention := `<a href="tg://user?id=1">Вася</a>`
 
 	// Дефолт, когда кастомного шаблона нет.
-	if got := renderGreeting("", "", mention); !strings.Contains(got, mention) {
+	if got := renderWelcome("", "", mention, defaultGreetingText); !strings.Contains(got, mention) {
 		t.Errorf("default greeting must mention the user: %q", got)
 	}
 
 	// Кастомный шаблон: {name} подставляется, пользовательский HTML экранируется.
-	got := renderGreeting("Привет, {name}! <b>Прочти правила</b>", "", mention)
+	got := renderWelcome("Привет, {name}! <b>Прочти правила</b>", "", mention, defaultGreetingText)
 	if !strings.Contains(got, mention) {
 		t.Errorf("{name} not substituted: %q", got)
 	}
@@ -162,6 +162,11 @@ func TestRenderGreeting(t *testing.T) {
 	}
 	if !strings.Contains(got, "&lt;b&gt;") {
 		t.Errorf("expected escaped tags in output: %q", got)
+	}
+
+	// Дефолт режима «с ответом» — отдельный текст (не приветствие).
+	if got := renderWelcome("", "", mention, defaultReplyText); !strings.Contains(got, "спамер") {
+		t.Errorf("default reply text expected: %q", got)
 	}
 }
 

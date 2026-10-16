@@ -386,7 +386,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspam:"))  // rpspam:<userID> (first click)
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamc:")) // rpspamc:<userID> (confirm)
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamx:")) // rpspamx:<userID> (cancel)
-	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))         // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|gr|daily|sil|spam|rpl|eph|qr|max|tmo|hour|swl|svm|qper|cmode|grtxt|leave|leavec:<chatID>:<val>
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))         // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|welcome|wset|wtxt|daily|sil|spam|eph|qr|max|tmo|hour|swl|svm|qper|cmode|leave|leavec:<chatID>:<val> (gr|rpl|grtxt — legacy-алиасы: ре-рендер настроек / контекстный ввод)
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))       // estats:<chatID>:<list>:<page>
 	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))       // sv:1|0 (vote)
 	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))      // mc:<u|f|m|w>:<userID>|x

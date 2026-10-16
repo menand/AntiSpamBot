@@ -143,3 +143,179 @@ func TestCancelReplyWaitSignalsCancelled(t *testing.T) {
 		t.Fatal("cancelReplyWait on an idle wait must report false")
 	}
 }
+
+// TestDisarmReplyWaits — смена режима «после капчи» уводит чат из reply:
+// живые серии снимаются разом, каждая воронка закрывается компенсирующим
+// пассом (в режиме reply пасс пишет только ответ — без пасса юзеры навсегда
+// зависли бы в «В процессе»), строки pending_replies удаляются, таймеры
+// отменяются: дорешать или наказать после смены режима некому.
+func TestDisarmReplyWaits(t *testing.T) {
+	ctx := context.Background()
+	b, db := newTestBotWithDB(t)
+
+	var cancels []*replyPending
+	for _, uid := range []int64{10, 11} {
+		cancels = append(cancels, b.replies.Put(1, uid, time.Now().Add(time.Minute), 0, 1, 0))
+		if err := db.PutPendingReply(ctx, storage.PendingReply{
+			ChatID: 1, UserID: uid, ExpiresAt: time.Now().Add(time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Чужой чат снятие не трогает — ни в сторе, ни в БД.
+	b.replies.Put(2, 20, time.Now().Add(time.Minute), 0, 1, 0)
+	if err := db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: 2, UserID: 20, ExpiresAt: time.Now().Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	b.disarmReplyWaits(1)
+
+	for i, p := range cancels {
+		select {
+		case <-p.Done():
+		default:
+			t.Fatalf("pending %d must be cancelled", i)
+		}
+	}
+	if _, ok := b.replies.Take(1, 10); ok {
+		t.Fatal("disarmed wait must leave the store")
+	}
+	if _, ok := b.replies.Take(2, 20); !ok {
+		t.Fatal("wait of another chat must survive the disarm")
+	}
+	rows, err := db.LoadAllPendingReplies(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ChatID != 2 {
+		t.Fatalf("pending_replies after disarm = %+v, want only chat 2", rows)
+	}
+	s, err := db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Passed != 2 {
+		t.Fatalf("compensating passes = %d, want 2", s.Passed)
+	}
+}
+
+// TestRestorePendingRepliesDisarmsNonReplyMode — крэш в окне между записью
+// режима и живым снятием серий (или ручная правка настроек): строка чата,
+// ушедшего из «с ответом», не восстанавливается — воронка закрывается
+// пассом, иначе юзер получил бы кик за требование, которое уже не обещано.
+func TestRestorePendingRepliesDisarmsNonReplyMode(t *testing.T) {
+	ctx := context.Background()
+	b, db, _ := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeGreet)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: testChatID, UserID: testUserID,
+		ExpiresAt: time.Now().Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := b.restorePendingReplies(ctx)
+	if err != nil || n != 0 {
+		t.Fatalf("restored = %d err=%v, want 0/nil", n, err)
+	}
+	if _, ok := b.replies.Take(testChatID, testUserID); ok {
+		t.Fatal("wait of a non-reply chat must not be armed")
+	}
+	rows, err := db.LoadAllPendingReplies(ctx)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("pending_replies rows = %d, err=%v; want 0", len(rows), err)
+	}
+	if k := statsKinds(t, db, testChatID, testUserID); k[storage.EventPass] != 1 {
+		t.Fatalf("compensating pass = %d, want 1 (%v)", k[storage.EventPass], k)
+	}
+}
+
+// TestMaybeArmReplyWaitModeLeftRecordsPass — пока капча дозревала, админ увёл
+// чат из «с ответом» (устаревший снапшот s): серия не взводится, но воронка
+// закрывается компенсирующим пассом — иначе прошедший капчу юзер навсегда
+// завис бы в «В процессе» (в reply-режиме пасс пишет только ответ, а ожидания
+// нет — ни disarmReplyWaits, ни цикл его не увидят).
+func TestMaybeArmReplyWaitModeLeftRecordsPass(t *testing.T) {
+	ctx := context.Background()
+	b, db, _ := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeGreet)); err != nil {
+		t.Fatal(err)
+	}
+	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true} // снимок ДО смены режима
+	if b.maybeArmReplyWait(s, testChatID, testUserID, 0) {
+		t.Fatal("stale snapshot must not arm against the DB mode")
+	}
+	if _, ok := b.replies.Take(testChatID, testUserID); ok {
+		t.Fatal("no wait may be armed")
+	}
+	rows, err := db.LoadAllPendingReplies(ctx)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("pending_replies rows = %d, err=%v; want 0", len(rows), err)
+	}
+	if k := statsKinds(t, db, testChatID, testUserID); k[storage.EventPass] != 1 {
+		t.Fatalf("compensating pass = %d, want 1 (%v)", k[storage.EventPass], k)
+	}
+}
+
+// TestReplyWaitLoopDisarmsWhenModeLeft — страховка режима в цикле: серия,
+// пережившая смену режима (устаревший арм / гонка со снятием), на первой же
+// стадии снимается компенсирующим пассом — без напоминаний и без кика за
+// «молчание», которое чат больше не требует.
+func TestReplyWaitLoopDisarmsWhenModeLeft(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeGreet)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: testChatID, UserID: testUserID, ExpiresAt: time.Now().Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Просроченный дедлайн — цикл проверяет режим сразу, без ожидания стадии.
+	p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Second), 0, 1, 0)
+
+	b.replyWaitLoop(testChatID, testUserID, p) // синхронно: страховка возвращает управление
+
+	if _, ok := b.replies.Take(testChatID, testUserID); ok {
+		t.Fatal("wait must be taken by the mode guard")
+	}
+	rows, err := db.LoadAllPendingReplies(ctx)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("pending_replies rows = %d, err=%v; want 0", len(rows), err)
+	}
+	k := statsKinds(t, db, testChatID, testUserID)
+	if k[storage.EventPass] != 1 || k[storage.EventKick]+k[storage.EventBan] != 0 {
+		t.Fatalf("want one compensating pass and no punish, got %v", k)
+	}
+	if n := fc.callCount("sendMessage"); n != 0 {
+		t.Fatalf("no reminder may be sent after the mode left reply, sends = %d", n)
+	}
+}
+
+// TestDisarmReplyWaitLoserNoSecondPass — disarm проигравшего гонку не пишет
+// второй пасс: ожидание уже изъял настоящий победитель (ответ юзера и т.п.).
+func TestDisarmReplyWaitLoserNoSecondPass(t *testing.T) {
+	ctx := context.Background()
+	b, db := newTestBotWithDB(t)
+	p := b.replies.Put(1, 2, time.Now().Add(time.Minute), 0, 1, 0)
+	if _, ok := b.replies.Take(1, 2); !ok {
+		t.Fatal("winner must take the wait")
+	}
+	b.disarmReplyWait(ctx, 1, 2, p)
+
+	s, err := db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Passed != 0 {
+		t.Fatalf("loser must not record a pass, got %d", s.Passed)
+	}
+}

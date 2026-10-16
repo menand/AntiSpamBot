@@ -533,7 +533,8 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			b.store.FinishKickoff(chatID, user.ID)
 			released = true
 			b.log.Info("trusted user admitted without captcha", "chat", chatID, "user", user.ID)
-			b.maybeSendGreeting(b.runCtx, b.chatSettings(b.runCtx, chatID), chatID, user.ID, threadID)
+			st := b.chatSettings(b.runCtx, chatID)
+			b.maybeSendGreeting(b.runCtx, st, effectiveWelcomeMode(st), chatID, user.ID, threadID)
 		})
 		return
 	}
@@ -600,12 +601,12 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 	// второй join и фантомный кик. Тот же bail-out по свежему joined_at, что
 	// у trusted-ветки выше; побочный эффект тоже совпадает с ней и принят
 	// сознательно: ре-вход в течение минуты после прохождения обходит капчу.
-	// Исключение — require-reply: там молчаливый пропуск оставил бы юзера
+	// Исключение — режим «с ответом»: там молчаливый пропуск оставил бы юзера
 	// без перевзведённого ожидания и якоря-приветствия, т.е. допущенным, не
-	// выполнив второй шаг проверки, — поэтому при включённом режиме едем
-	// через обычную капчу (она после успеха переармит reply-wait).
+	// выполнив второй шаг проверки, — поэтому в нём едем через обычную капчу
+	// (она после успеха переармит reply-wait).
 	if b.joinedRecently(b.runCtx, chatID, user.ID) {
-		if s := b.chatSettings(b.runCtx, chatID); !s.ReplyCheckEnabled {
+		if s := b.chatSettings(b.runCtx, chatID); effectiveWelcomeMode(s) != welcomeReply {
 			return
 		}
 		b.log.Info("recently passed user rejoined with reply-check on — re-running captcha",
@@ -1148,8 +1149,12 @@ func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error
 	if p, ok := b.replies.Get(chatID, targetUserID); ok {
 		stage = p.Stage
 	}
-	greetingText := renderGreeting(settings.GreetingText.String, settings.GreetingEntities.String, mention)
-	greetingText += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(settings).Minutes())))
+	// Якорь серии — всегда тело ПРОВЕРКИ стадии (серия живёт только в режиме
+	// «с ответом»; после одноразовой миграции текстов оно лежит в reply_*):
+	// общий рендер welcomeAnchorText добавляет и строку-требование, и
+	// карантинную сноску — вручную собранная копия их теряла.
+	greetingText := welcomeAnchorText(settings, welcomeReply, stage,
+		int(b.effectiveStageInterval(settings).Minutes()), mention)
 
 	origKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{
 		{tu.InlineKeyboardButton("✅ Впустить (для админов)").
@@ -2145,12 +2150,13 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 		b.log.Warn("upsert member", "err", err)
 	}
 	s := b.chatSettings(ctx, p.ChatID)
-	// «Прошёл» засчитывается только после ВСЕХ включённых проверок: при
-	// однофакторной (одна капча) — сразу здесь; при включённом reply-check —
-	// когда юзер реально ответил на приветствие (replyWaitSatisfied). Иначе
-	// пасс до таймаута задваивался последующим киком за молчание
-	// (join→pass→kick/noreply в воронке статистики).
-	if !s.ReplyCheckEnabled {
+	mode := effectiveWelcomeMode(s)
+	// «Прошёл» засчитывается только после ВСЕХ включённых проверок: в режимах
+	// «Ничего» и «Приветствие» (одна капча) — сразу здесь; в режиме «с
+	// ответом» — когда юзер реально ответил на приветствие
+	// (replyWaitSatisfied). Иначе пасс до таймаута задваивался последующим
+	// киком за молчание (join→pass→kick/noreply в воронке статистики).
+	if mode != welcomeReply {
 		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
 			b.log.Warn("record pass event", "err", err)
 		}
@@ -2208,12 +2214,15 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	}
 	// Ожидание ответа взводим СРАЗУ после размьюта, до сетевой отправки
 	// приветствия: юзер уже может писать, и его первое сообщение должно
-	// застать ожидание активным (иначе гонка → кик написавшего).
-	if b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID) {
-		greetingID, greetingSent := b.maybeSendGreeting(ctx, s, p.ChatID, p.UserID, p.ThreadID)
+	// застать ожидание активным (иначе гонка → кик написавшего). В режимах
+	// без проверки взводить нечего — просто шлём приветствие (регрессия
+	// v1.13–v1.19: ветка однофакторного режима теряла приветствие целиком).
+	switch {
+	case mode == welcomeReply && b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID):
+		greetingID, greetingSent := b.maybeSendGreeting(ctx, s, welcomeReply, p.ChatID, p.UserID, p.ThreadID)
 		if greetingSent {
 			b.replies.SetGreetingMsgID(p.ChatID, p.UserID, greetingID)
-		} else if s.ReplyCheckEnabled {
+		} else {
 			// Приветствие-якорь с требованием не ушёл даже после ретраев
 			// (429-шторм масс-джойна, сеть): требование «напиши что-нибудь»
 			// юзер выполнить не может — он его никогда не видел. Снимаем
@@ -2228,14 +2237,15 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 					"chat", p.ChatID, "user", p.UserID)
 			}
 		}
-	} else if s.ReplyCheckEnabled {
+	case mode == welcomeReply:
 		// Армирование сорвалось (fail-open при провале персистентности,
 		// см. maybeArmReplyWait): ожидания нет и не будет — строчка
 		// «напиши что-нибудь, иначе придётся зайти заново» была бы ложью,
-		// которую никто не проверяет. Шлём приветствие как обычное.
-		plain := s
-		plain.ReplyCheckEnabled = false
-		b.maybeSendGreeting(ctx, plain, p.ChatID, p.UserID, p.ThreadID)
+		// которую никто не проверяет. Шлём приветствие без требования.
+		b.maybeSendGreeting(ctx, s, welcomeGreet, p.ChatID, p.UserID, p.ThreadID)
+	case mode == welcomeGreet:
+		// Обычное приветствие после капчи (режим «Приветствие»).
+		b.maybeSendGreeting(ctx, s, welcomeGreet, p.ChatID, p.UserID, p.ThreadID)
 	}
 	// Затем — ИИ-оценка профиля новичка (асинхронная внутри).
 	b.maybeProfileCheck(p.ChatID, p.UserID, p.ThreadID)
