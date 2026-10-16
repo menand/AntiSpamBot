@@ -1,6 +1,8 @@
 .env
 /bin
 /out
+# Бинарник go build ./cmd/btnprobe в корне модуля.
+/btnprobe
 *.log
 *.db
 *.db-shm

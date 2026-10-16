@@ -24,8 +24,10 @@ func OpenReadOnly(ctx context.Context, path string) (*DB, error) {
 	u := url.URL{Scheme: "file", Path: path, OmitHost: true}
 	q := url.Values{}
 	q.Set("mode", "ro")
-	q.Set("_pragma", "query_only(1)")
-	q.Set("_pragma", "busy_timeout(5000)")
+	// Именно Add: Set дважды по одному ключу оставляет только последнюю
+	// прагму — query_only молча терялся бы.
+	q.Add("_pragma", "query_only(1)")
+	q.Add("_pragma", "busy_timeout(5000)")
 	u.RawQuery = q.Encode()
 
 	raw, err := sql.Open("sqlite", u.String())

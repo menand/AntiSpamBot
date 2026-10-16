@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,16 +53,36 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 		b.log.Debug("delete mod command", "err", err, "chat", chatID)
 	}
 
+	// Мутационный хвост — на liveCtx (O1): живой runCtx, пока жив (лестницы
+	// retryTG под 429 выжидают retry_after целиком), а после SIGTERM-дренажа
+	// хендлеров — свежий detached-бюджет. Без этого сигнал между баном и
+	// unban кика оставил бы юзера в перманентном бане без события, а админа —
+	// без ответа; провал кик-хвоста дополнительно добивает unban ниже.
+	mctx, cancelMut := b.liveCtx()
+	defer cancelMut()
 	reason := storage.ReasonModPrefix + fmt.Sprintf("%d", message.From.ID)
 	var actErr error
 	if permanent {
-		actErr = b.banRevoke(b.runCtx, chatID, targetID)
+		actErr = b.banRevoke(mctx, chatID, targetID)
 	} else {
-		actErr = b.kickRevoke(b.runCtx, chatID, targetID)
+		actErr = b.kickRevoke(mctx, chatID, targetID)
 	}
 	if actErr != nil {
 		b.log.Warn("mod command action failed", "err", actErr, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на блокировку.")
+		if !permanent {
+			// Лестница могла оборваться ПОСЛЕ бана, но ДО unban (429-растяжка
+			// съела бюджет ctx или грянул SIGTERM) — тогда юзер остался бы в
+			// перманентном бане без события. Добиваем unban-половину на
+			// свежем detached-бюджете: unban идемпотентен (OnlyIfBanned), юзера
+			// без бана вызов не трогает.
+			uctx, ucancel := detachedMutCtx()
+			if uerr := b.unban(uctx, chatID, targetID); uerr != nil {
+				b.log.Warn("compensating unban after failed kick", "err", uerr,
+					"chat", chatID, "target", targetID)
+			}
+			ucancel()
+		}
+		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на блокировку.")
 		return nil
 	}
 
@@ -69,7 +90,7 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	if permanent {
 		kind = storage.EventBan
 	}
-	if err := b.db.RecordEvent(b.runCtx, chatID, targetID, kind, time.Now(), reason); err != nil {
+	if err := b.db.RecordEvent(mctx, chatID, targetID, kind, time.Now(), reason); err != nil {
 		b.log.Warn("record mod event", "err", err, "chat", chatID, "target", targetID)
 	}
 	b.cleanupTargetTraces(chatID, targetID)
@@ -85,9 +106,9 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	mention := b.mentionFor(targetID)
 	recv := b.modReceiver(chatID, message)
 	if permanent {
-		b.sendHTML(chatID, threadOf(message), recv, "🚫 "+mention+" забанен.")
+		b.sendHTMLCtx(mctx, chatID, threadOf(message), recv, "🚫 "+mention+" забанен.")
 	} else {
-		b.sendHTML(chatID, threadOf(message), recv, "👢 "+mention+" кикнут.")
+		b.sendHTMLCtx(mctx, chatID, threadOf(message), recv, "👢 "+mention+" кикнут.")
 	}
 	b.log.Info("mod command", "action", action, "chat", chatID,
 		"target", targetID, "by", message.From.ID)
@@ -153,9 +174,14 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
 		b.log.Debug("delete mute command", "err", err, "chat", chatID)
 	}
-	if err := b.mute(b.runCtx, chatID, targetID, d); err != nil {
+	// Мутационный хвост — на liveCtx (O1, как у /kick|/ban): живой runCtx,
+	// пока жив, а после SIGTERM-дренажа хендлеров — свежий detached-бюджет;
+	// рестрикт, события и ответ админу не должны оборваться на SIGTERM.
+	mctx, cancelMut := b.liveCtx()
+	defer cancelMut()
+	if err := b.mute(mctx, chatID, targetID, d); err != nil {
 		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
-		b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на ограничение участников.")
+		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на ограничение участников.")
 		return nil
 	}
 	// Мьют команды строже текст-онли карантина и полностью его заменяет
@@ -170,7 +196,7 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	// kick поверх мьюта, а верный ответ через onSuccess снёс бы мьют админа.
 	// Воронку закрываем пассом — пройти проверку замьюченный не может.
 	if b.cancelCaptchaSilent(chatID, targetID) {
-		if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
+		if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
 			b.log.Warn("record pass event (muted mid-captcha)", "err", err)
 		}
 	}
@@ -180,18 +206,18 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 	// фиксируем пасс здесь: капча уже позади, а невозможность ответить — не
 	// вина юзера (раньше этот пасс писался сразу на капче, поведение то же).
 	if b.cancelReplyWait(chatID, targetID) {
-		if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
+		if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
 			b.log.Warn("record pass event (muted)", "err", err)
 		}
 	}
 	// Событие mute питает список «10 последних» команды /unmute (в воронку
 	// статистики не идёт). Наказательный минутный мьют punishNonAdmin сюда
 	// не пишется — это не админское решение о юзере.
-	if err := b.db.RecordEvent(b.runCtx, chatID, targetID, storage.EventMute, time.Now(),
+	if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventMute, time.Now(),
 		storage.ReasonModPrefix+fmt.Sprintf("%d", message.From.ID)); err != nil {
 		b.log.Warn("record mute event", "err", err)
 	}
-	b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
+	b.sendHTMLCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
 	b.log.Info("mute command", "chat", chatID, "target", targetID,
 		"minutes", int(d.Minutes()), "by", message.From.ID)
 	return nil
@@ -518,25 +544,37 @@ func firstUsernameArg(text string) string {
 }
 
 // cleanupTargetTraces сносит наши сообщения о цели и гасит её активные
-// проверки: приветствие, плашку голосования, капчу и reply-wait. Капча нужна:
-// /kick по цели с активной капчей иначе дал бы таймауту право записать СВОЙ
-// kick/ban поверх только что записанного события команды (двойной счёт в
-// воронке). Reply-wait — по той же причине: таймаут серии кикнул бы за
-// «молчание» того, кого уже кикнули. Без событий — их пишет команда.
-// Чужие сообщения с упоминанием цели удалить нельзя — Bot API не ищет по
-// истории, а тексты мы не храним.
+// проверки: приветствие, плашку голосования, капчу, reply-wait и карантин.
+// Капча нужна: /kick по цели с активной капчей иначе дал бы таймауту право
+// записать СВОЙ kick/ban поверх только что записанного события команды
+// (двойной счёт в воронке). Reply-wait — по той же причине: таймаут серии
+// кикнул бы за «молчание» того, кого уже кикнули. Без событий — их пишет
+// команда. Чужие сообщения с упоминанием цели удалить нельзя — Bot API не
+// ищет по истории, а тексты мы не храним.
 func (b *Bot) cleanupTargetTraces(chatID, targetID int64) {
+	// Очистка — на liveCtx: при SIGTERM (дренаж уже отменил runCtx) удаление
+	// персистентных строк не должно молча пропасть — иначе рестарт воскресит
+	// погашенную серию или карантинное зеркало.
+	ctx, cancel := b.liveCtx()
+	defer cancel()
 	b.cancelCaptchaSilent(chatID, targetID)
 	b.cancelReplyWait(chatID, targetID)
-	if msgID, ok, err := b.db.TakeGreetingMsg(b.runCtx, chatID, targetID); err == nil && ok {
-		if err := b.deleteMessage(b.runCtx, chatID, msgID); err != nil {
+	// Карантин — та же дисциплина, что у /mute (dropQuarantineState и там):
+	// зеркало цензора и строка chat_quarantine не должны переживать
+	// наказание — вернувшийся до новой капчи юзер иначе чистится цензором,
+	// а накопленные «нарушения» могли бы дать эскалационный мьют поверх
+	// уже отработанной команды. Серверный release не нужен: кик снимает
+	// рестрикт вместе с членством, забаненному он не мешает.
+	b.dropQuarantineState(chatID, targetID)
+	if msgID, ok, err := b.db.TakeGreetingMsg(ctx, chatID, targetID); err == nil && ok {
+		if err := b.deleteMessage(ctx, chatID, msgID); err != nil {
 			b.log.Debug("delete greeting of moderated user", "err", err, "chat", chatID)
 		}
 	}
-	// botMsgID == 0 — синтетическая lock-строка golden-репорта: инвариант
-	// проекта — deleteMessage(0) не вызывать.
-	if botMsgID, ok, err := b.db.TakeSpamVoteByAuthor(b.runCtx, chatID, targetID); err == nil && ok && botMsgID != 0 {
-		if err := b.deleteMessage(b.runCtx, chatID, botMsgID); err != nil {
+	// botMsgID <= 0 — синтетическая lock-строка репорта (bot_msg_id =
+	// -authorID): инвариант проекта — deleteMessage с не-боевым id не вызывать.
+	if botMsgID, ok, err := b.db.TakeSpamVoteByAuthor(ctx, chatID, targetID); err == nil && ok && botMsgID > 0 {
+		if err := b.deleteMessage(ctx, chatID, botMsgID); err != nil {
 			b.log.Debug("delete vote plashka of moderated user", "err", err, "chat", chatID)
 		}
 	}
@@ -549,7 +587,14 @@ func (b *Bot) modReceiver(chatID int64, message telego.Message) int64 {
 	if message.From == nil || message.From.IsBot {
 		return 0
 	}
-	if !b.chatSettings(b.runCtx, chatID).EphemeralEnabled {
+	// liveCtx: настройку читаем из БД/кэша и в модерационных хвостах, которые
+	// переживают SIGTERM — на отменённом runCtx чтение молча вернуло бы 0,
+	// и админ получил бы публичный ответ вместо эфемерного (читателю чата —
+	// лишний шум; гейт эфемерности не про безопасность, но поведение должно
+	// быть детерминированным).
+	ctx, cancel := b.liveCtx()
+	defer cancel()
+	if !b.chatSettings(ctx, chatID).EphemeralEnabled {
 		return 0
 	}
 	return message.From.ID
@@ -572,7 +617,13 @@ func (b *Bot) replyTo(ctx *th.Context, message telego.Message, text string) {
 }
 
 // sendPlain/sendHTML: receiverID ≠ 0 — эфемерно этому юзеру, 0 — публично.
+// Ctx-варианты — для мутационных хвостов на detached-бюджете (O1): ответ
+// админу не должен теряться на SIGTERM; обычные версии шлют на b.runCtx.
 func (b *Bot) sendPlain(chatID int64, threadID int, receiverID int64, text string) {
+	b.sendPlainCtx(b.runCtx, chatID, threadID, receiverID, text)
+}
+
+func (b *Bot) sendPlainCtx(ctx context.Context, chatID int64, threadID int, receiverID int64, text string) {
 	params := tu.Message(tu.ID(chatID), text)
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
@@ -580,12 +631,16 @@ func (b *Bot) sendPlain(chatID int64, threadID int, receiverID int64, text strin
 	if receiverID != 0 {
 		params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(receiverID)})
 	}
-	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
+	if _, err := b.api.SendMessage(ctx, params); err != nil {
 		b.log.Debug("plain send", "err", err, "chat", chatID)
 	}
 }
 
 func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string) {
+	b.sendHTMLCtx(b.runCtx, chatID, threadID, receiverID, text)
+}
+
+func (b *Bot) sendHTMLCtx(ctx context.Context, chatID int64, threadID int, receiverID int64, text string) {
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {
 		params = params.WithMessageThreadID(threadID)
@@ -593,7 +648,7 @@ func (b *Bot) sendHTML(chatID int64, threadID int, receiverID int64, text string
 	if receiverID != 0 {
 		params = params.WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(receiverID)})
 	}
-	if _, err := b.api.SendMessage(b.runCtx, params); err != nil {
+	if _, err := b.api.SendMessage(ctx, params); err != nil {
 		b.log.Debug("html send", "err", err, "chat", chatID)
 	}
 }

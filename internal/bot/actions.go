@@ -255,6 +255,46 @@ func (b *Bot) releaseOnAbort(ctx context.Context, chatID, userID int64) {
 	}
 }
 
+// modMutBudget — бюджет detached-мутационных хвостов модерации (O1):
+// от решения админа до записи события и ответа проходит не больше пары
+// retryTG-проходов; 15 c покрывают banRevoke/kickRevoke с ретраями и
+// отправку с запасом (тот же порядок, что у releaseOnAbort на мёртвом ctx).
+const modMutBudget = 15 * time.Second
+
+// detachedMutCtx — свежий detached-бюджет для мутационного хвоста: SIGTERM
+// посреди /kick|/ban|/mute или вердикта не должен оставлять кик без unban,
+// бан без события, разбан без снятия глобального флага — runCtx к этому
+// моменту уже отменён дренажом хендлеров.
+func detachedMutCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), modMutBudget)
+}
+
+// liveCtx — контекст мутационного хвоста либо короткой очистки, который
+// переживает SIGTERM: живой runCtx, пока он жив (лестницы retryTG под 429
+// честно выжидают retry_after — минуты), а после отмены дренажом хендлеров —
+// свежий detached-бюджет. Без этого сигнал посреди хвоста оставил бы кик без
+// unban, бан без события, а невыполненное удаление персистентной строки
+// (капча/reply-wait/карантин) воскресило бы серию после рестарта.
+func (b *Bot) liveCtx() (context.Context, context.CancelFunc) {
+	if b.runCtx != nil && b.runCtx.Err() == nil {
+		return b.runCtx, func() {}
+	}
+	return detachedMutCtx()
+}
+
+// releaseDetached — release на свежем detached-бюджете: для вызовов из уже
+// ограниченных по времени хвостов — карательный хвост капчи живёт в 10 c
+// cleanup-ctx, куда две лестницы release (getChat + restrict, ~14 c чистого
+// сна) не помещаются, а повторять его после провала некому (pending уже
+// забран наказанием). Для админа release безвреден в любом случае.
+func (b *Bot) releaseDetached(chatID, userID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), modMutBudget)
+	defer cancel()
+	if err := b.release(ctx, chatID, userID); err != nil {
+		b.log.Warn("release on detached budget", "err", err, "chat", chatID, "user", userID)
+	}
+}
+
 func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
 	// Обе половины кика ретраятся: без ретрая бана сетевой чих оставляет
 	// юзера замьюченным «зомби» в чате, а событие kick уже записано (почему

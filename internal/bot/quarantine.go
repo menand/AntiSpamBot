@@ -350,8 +350,13 @@ func (b *Bot) escalateQuarantine(chatID, userID int64) {
 // свежее ограничение. Probe зеркала/строки fail-open; true — карантин был
 // и снят.
 func (b *Bot) dropQuarantineState(chatID, userID int64) bool {
+	// liveCtx: очистка живёт в модерационных хвостах, которые переживают
+	// SIGTERM — на отменённом runCtx удаление строки молча пропало бы, и
+	// зеркало цензора воскресло бы после рестарта.
+	ctx, cancel := b.liveCtx()
+	defer cancel()
 	_, inMirror := b.quar.Get(chatID, userID)
-	has, err := b.db.HasQuarantine(b.runCtx, chatID, userID, time.Now().Unix())
+	has, err := b.db.HasQuarantine(ctx, chatID, userID, time.Now().Unix())
 	if err != nil {
 		b.log.Warn("quarantine: has row", "err", err, "chat", chatID, "user", userID)
 	}
@@ -359,7 +364,7 @@ func (b *Bot) dropQuarantineState(chatID, userID int64) bool {
 		return false
 	}
 	b.quar.Remove(chatID, userID)
-	if err := b.db.DeleteQuarantine(b.runCtx, chatID, userID); err != nil {
+	if err := b.db.DeleteQuarantine(ctx, chatID, userID); err != nil {
 		b.log.Warn("quarantine: delete row", "err", err, "chat", chatID, "user", userID)
 	}
 	return true
@@ -371,8 +376,13 @@ func (b *Bot) dropQuarantineState(chatID, userID int64) bool {
 // дёргать API на каждого админа при промоушене незачем. Общий путь для
 // /trust, промоушена в админы и reconcile-свипа выключенных чатов.
 func (b *Bot) releaseQuarantineUser(chatID, userID int64) bool {
+	// liveCtx: вызывается и из хвостов, переживающих SIGTERM (промоушен,
+	// /trust, /whitelist) — на отменённом runCtx release молча не прошёл бы,
+	// и серверный текст-рестрикт остался бы висеть без единого повторителя.
+	ctx, cancel := b.liveCtx()
+	defer cancel()
 	_, inMirror := b.quar.Get(chatID, userID)
-	has, err := b.db.HasQuarantine(b.runCtx, chatID, userID, time.Now().Unix())
+	has, err := b.db.HasQuarantine(ctx, chatID, userID, time.Now().Unix())
 	if err != nil {
 		b.log.Warn("quarantine: has row", "err", err, "chat", chatID, "user", userID)
 	}
@@ -384,10 +394,10 @@ func (b *Bot) releaseQuarantineUser(chatID, userID int64) bool {
 		return false
 	}
 	b.quar.Remove(chatID, userID)
-	if err := b.db.DeleteQuarantine(b.runCtx, chatID, userID); err != nil {
+	if err := b.db.DeleteQuarantine(ctx, chatID, userID); err != nil {
 		b.log.Warn("quarantine: delete row", "err", err, "chat", chatID, "user", userID)
 	}
-	if err := b.release(b.runCtx, chatID, userID); err != nil {
+	if err := b.release(ctx, chatID, userID); err != nil {
 		b.log.Warn("quarantine: release", "err", err, "chat", chatID, "user", userID)
 	}
 	return true

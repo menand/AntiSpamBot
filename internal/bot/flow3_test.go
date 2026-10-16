@@ -268,6 +268,32 @@ func TestRunCaptchaAborts(t *testing.T) {
 		}
 	})
 
+	t.Run("промоушен в окне kickoff — пасс и release, серии нет", func(t *testing.T) {
+		b, db, fc := newFlowBot(t)
+		serviceableChat(t, b, db, testChatID)
+		// К моменту live-чека отправки юзер уже администратор: ветка
+		// промоушена в handleChatMember серию ещё не видит — в store её нет
+		// (рестрикт уже лёг, Put ещё не было).
+		fc.resp["getChatMember"] = `{"status":"administrator","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
+
+		b.runCaptcha(testChatID, user, 0)
+
+		kinds := statsKinds(t, db, testChatID, testUserID)
+		if kinds[storage.EventPass] != 1 || kinds[storage.EventKick]+kinds[storage.EventBan] != 0 {
+			t.Fatalf("promoted admin must be passed, not punished: %v", kinds)
+		}
+		if n := fc.callCount("deleteMessage"); n == 0 {
+			t.Fatal("just-sent captcha message must be deleted")
+		}
+		if _, ok := b.store.Get(testChatID, testUserID); ok || len(pendingRows(t, db)) != 0 {
+			t.Fatal("series must not persist for a promoted admin")
+		}
+		// Первоначальный restrict + releaseOnAbort: мьют не переживает промоушен.
+		if n := fc.callCount("restrictChatMember"); n < 2 {
+			t.Fatalf("initial restrict + release expected, calls: %v", fc.callList())
+		}
+	})
+
 	t.Run("счастливый путь — restrict, store, pending-строка", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)

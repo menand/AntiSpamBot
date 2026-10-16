@@ -456,10 +456,14 @@ func TestSpamVoteCallbackStrictParser(t *testing.T) {
 }
 
 // TestUnmodGuardBlocksAdminTarget — кнопки mc: не действуют на админов.
+// Инвокер и цель отвечают «administrator» живой проверкой: инвокер обязан
+// пройти гейт (иначе тест был бы вакуумным — отказ пришёл бы от гейта
+// нажавшего, а не от гарда цели).
 func TestUnmodGuardBlocksAdminTarget(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
-	seedAdminCache(b, testChatID, 9, true)
+	// Живой ответ администратора — и для нажавшего (77), и для цели (9).
+	fc.resp["getChatMember"] = `{"status":"administrator","user":{"id":0,"is_bot":false,"first_name":"A"}}`
 
 	query := telego.CallbackQuery{
 		ID:   "q",
@@ -476,6 +480,20 @@ func TestUnmodGuardBlocksAdminTarget(t *testing.T) {
 	// release не вызывался: цель — админ.
 	if fc.callCount("restrictChatMember") != 0 {
 		t.Fatal("unmod action must not target an admin")
+	}
+	// Отказ пришёл от гарда ЦЕЛИ, а не от гейта нажавшего.
+	var refusedTarget bool
+	for _, body := range fc.callBodies("answerCallbackQuery") {
+		if strings.Contains(body, "Это админ") {
+			refusedTarget = true
+		}
+		if strings.Contains(body, "только для админов") {
+			t.Fatalf("invoker gate refused — target guard never exercised: %s", body)
+		}
+	}
+	if !refusedTarget {
+		t.Fatalf("target-admin refusal toast not sent; bodies: %v",
+			fc.callBodies("answerCallbackQuery"))
 	}
 }
 

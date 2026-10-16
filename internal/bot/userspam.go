@@ -197,8 +197,8 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 // Single-winner: синтетическая строка в spam_votes через PutSpamVoteOnce —
 // атомарный «один исполнитель на автора», как у голосований. Проигравший
 // гонку выходит с тихим ответом; строка снимается сразу после исполнения
-// (крах между вставкой и Take оставит её до суточного свипа — редкий
-// задвоенный отказ репортам на этого автора, безобидный).
+// (крах между вставкой и Take оставит её только этому автору — стартовый
+// DeleteSpamLocks снесёт её до приёма апдейтов, второго исполнителя не будет).
 func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, targetID int64) {
 	chatID := message.Chat.ID
 
@@ -224,19 +224,24 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 
 	// Висящую на авторе плашку снимаем: репорт золотого голоса закрыл вопрос
 	// раньше сообщества. Best effort — ошибка БД не отменяет вердикт.
-	// botMsgID == 0 — синтетическая lock-строка прошлого golden-репорта:
-	// deleteMessage(0) не вызываем (инвариант проекта).
+	// TakeSpamVoteByAuthor возвращает только реальные плашки (bot_msg_id > 0):
+	// синтетический замок репорта, исполняющегося прямо сейчас, трогать
+	// нельзя — его изъятие открыло бы второму репорту второй бан.
 	if botMsgID, up, terr := b.db.TakeSpamVoteByAuthor(b.runCtx, chatID, targetID); terr != nil {
 		b.log.Warn("golden report: take pending vote", "err", terr, "chat", chatID, "target", targetID)
-	} else if up && botMsgID != 0 {
+	} else if up && botMsgID > 0 {
 		if err := b.deleteMessage(b.runCtx, chatID, botMsgID); err != nil {
 			b.log.Debug("delete taken vote plashka", "err", err, "chat", chatID)
 		}
 	}
 
 	v := storage.SpamVote{
-		ChatID:      chatID,
-		BotMsgID:    0, // плашки нет — синтетическая строка-замок
+		ChatID: chatID,
+		// Плашки нет — синтетическая строка-замок. bot_msg_id = -targetID:
+		// ключ уникален НА АВТОРА (репорты разных спамеров не делят PK, как
+		// при общем нуле), повторный репорт на того же ловится WHERE NOT
+		// EXISTS у PutSpamVoteOnce, а с реальными id (> 0) пересечений нет.
+		BotMsgID:    -int(targetID),
 		TargetMsgID: r.MessageID,
 		AuthorID:    targetID,
 		InitiatorID: message.From.ID,

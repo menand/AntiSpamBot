@@ -221,3 +221,46 @@ func TestUnbanStaysLocal(t *testing.T) {
 		t.Fatalf("plain unban must touch only the current chat, calls = %d", n)
 	}
 }
+
+// TestSpamReportGoldenForeignLockIndependent — регресс общего sentinel=0:
+// golden-репорт на второго спамера не должен «проигрывать гонку» синтетическому
+// замку репорта на ПЕРВОГО (ключ замка — -authorID, у разных авторов ключи
+// независимы). Чужой замок при этом не трогается — его владелец исполнит и
+// снимет его сам.
+func TestSpamReportGoldenForeignLockIndependent(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.OwnerIDs = map[int64]struct{}{9: {}}
+	// Живой замок чужого репорта (автор 777), исполняющегося прямо сейчас.
+	if ok, err := db.PutSpamVoteOnce(ctx, storage.SpamVote{
+		ChatID: testChatID, BotMsgID: -777, TargetMsgID: 5,
+		AuthorID: 777, InitiatorID: 3, Prob: 100, CreatedAt: time.Now(),
+	}); err != nil || !ok {
+		t.Fatalf("seed foreign lock: ok=%v err=%v", ok, err)
+	}
+	// guardModTarget: canManageChat -> isChatAdminFresh для цели (778).
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":778,"is_bot":false,"first_name":"Спамер2"}}`,
+	}
+
+	if err := b.handleSpamCommand(nil, reportCommand(9, &telego.User{ID: 778, FirstName: "Спамер2"})); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := fc.callCount("banChatMember"); n < 1 {
+		t.Fatalf("foreign lock must not block the report (banChatMember=%d, messages:\n%s)",
+			n, strings.Join(fc.callBodies("sendMessage"), "\n"))
+	}
+	if banned, err := db.IsSpamBanned(ctx, 778); err != nil || !banned {
+		t.Fatalf("target must be banned (banned=%v err=%v)", banned, err)
+	}
+	got := strings.Join(fc.callBodies("sendMessage"), "\n")
+	if strings.Contains(got, "дубль не нужен") {
+		t.Fatalf("report must not be told «дубль не нужен»:\n%s", got)
+	}
+	// Чужой замок не тронут.
+	if pending, err := db.HasPendingVoteForAuthor(ctx, testChatID, 777); err != nil || !pending {
+		t.Fatalf("foreign lock must survive (pending=%v err=%v)", pending, err)
+	}
+}

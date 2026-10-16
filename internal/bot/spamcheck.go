@@ -1205,10 +1205,11 @@ func (b *Bot) resolveSpamVote(v storage.SpamVote, spam bool, why string) bool {
 	} else {
 		b.log.Info("spam verdict: not spam", "chat", v.ChatID, "user", v.AuthorID, "why", why)
 	}
-	// Плашку снимает победитель гонки. BotMsgID == 0 — синтетическая строка
-	// golden-репорта (плашки не было): инвариант проекта — deleteMessage(0)
-	// не вызывать; бюллетени к таким строкам прикрепиться не могут.
-	if v.BotMsgID != 0 {
+	// Плашку снимает победитель гонки. BotMsgID <= 0 — синтетическая
+	// строка-замок golden/reply-spam-репорта (bot_msg_id = -authorID):
+	// плашки не было, deleteMessage к ней не применяется (инвариант проекта —
+	// только реальные id > 0); бюллетени к таким строкам прикрепиться не могут.
+	if v.BotMsgID > 0 {
 		if err := b.deleteMessage(b.runCtx, v.ChatID, v.BotMsgID); err != nil {
 			b.log.Warn("delete spam vote message", "err", err, "chat", v.ChatID)
 		}
@@ -1299,6 +1300,10 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 // «истёк без кворума» — при том, что сообщество решение приняло. Только на
 // старте: на каждом тике он гонял бы пересчёт наперегонки с живым голосованием.
 func (b *Bot) reconcileSpamVotes(ctx context.Context) {
+	// Синтетические lock-строки сюда сознательно НЕ заглядывают: их снимает
+	// DeleteSpamLocks синхронно в Run до приёма апдейтов (реконсиляция идёт
+	// параллельно приёму — DELETE отсюда мог бы снести замок живого репорта).
+	// Пересчёт замок не тронет: бюллетеней у него нет — ни кворума, ни Take.
 	active, err := b.db.YoungSpamVotes(ctx, time.Now().Add(-spamVoteTTL))
 	if err != nil {
 		b.log.Warn("reconcile spam votes", "err", err)
@@ -1386,10 +1391,12 @@ func (b *Bot) sweepExpiredVotes(ctx context.Context) {
 		if err != nil || !taken {
 			continue
 		}
-		// BotMsgID == 0 — синтетическая lock-строка golden-репорта (userspam.go):
-		// её release мог потеряться при крэше между PutSpamVoteOnce и
-		// TakeSpamVote. Инвариант проекта — deleteMessage(0) не вызывать.
-		if v.BotMsgID != 0 {
+		// BotMsgID <= 0 — синтетическая строка-замок golden/reply-spam-репорта
+		// (bot_msg_id = -authorID): сообщения нет, удалять нечего (инвариант
+		// проекта — deleteMessage только с реальным id > 0). Обычно такие
+		// строки снимает стартовый DeleteSpamLocks — сюда доходят лишь
+		// пережившие нештатный release в долгоживущем процессе.
+		if v.BotMsgID > 0 {
 			if err := b.deleteMessage(ctx, v.ChatID, v.BotMsgID); err != nil {
 				b.log.Warn("delete expired spam vote message", "err", err, "chat", v.ChatID)
 			}

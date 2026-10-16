@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -67,11 +68,37 @@ func (f *fakeCaller) Call(_ context.Context, url string, data *telegoapi.Request
 		}
 		return &telegoapi.Response{Ok: false, Error: apiErr}, apiErr
 	}
+	if method == "getChatMember" && want == "" {
+		want = defaultChatMember(data)
+	}
 	result := json.RawMessage("true")
 	if want != "" {
 		result = json.RawMessage(want)
 	}
 	return &telegoapi.Response{Ok: true, Result: result}, nil
+}
+
+// defaultChatMember — ответ getChatMember без явного override: статус
+// зависит от ЗАПРОШЕННОГО юзера, как в настоящем API. Сам бот (testBotID) —
+// администратор, любой другой — member. Статичный «administrator на всех»
+// ломал бы live-проверки карательного хвоста (промоушен-гвардия видит
+// « admin» у только что наказанного новичка). Тесты, которым нужен другой
+// статус конкретного юзера, задают resp/respSeq («админ 9» и т.п.) или
+// errWhen по телу запроса.
+func defaultChatMember(data *telegoapi.RequestData) string {
+	uid := int64(0)
+	if data != nil && data.BodyRaw != nil {
+		var q struct {
+			UserID int64 `json:"user_id"`
+		}
+		if err := json.Unmarshal(data.BodyRaw, &q); err == nil {
+			uid = q.UserID
+		}
+	}
+	if uid == testBotID {
+		return fmt.Sprintf(`{"status":"administrator","user":{"id":%d,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`, testBotID)
+	}
+	return fmt.Sprintf(`{"status":"member","user":{"id":%d,"is_bot":false,"first_name":"Member"}}`, uid)
 }
 
 func (f *fakeCaller) callList() []string {
@@ -109,6 +136,7 @@ func (f *fakeCaller) callBodies(method string) []string {
 const (
 	testChatID = -100100
 	testUserID = 7
+	testBotID  = 42
 )
 
 func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
@@ -123,11 +151,12 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		resp: map[string]string{
 			// Объектные ответы: голый "true" не анмаршаллится в структуру и
 			// telego ретраит вызов (лишние 7 c на лестницу).
+			// getChatMember без записи: его ответ синтезируется по user_id
+			// запроса (см. defaultChatMember).
 			"getChat": "{}",
-			"getMe":   `{"id":42,"is_bot":true,"first_name":"Test","username":"antispam_bot"}`,
+			"getMe":   fmt.Sprintf(`{"id":%d,"is_bot":true,"first_name":"Test","username":"antispam_bot"}`, testBotID),
 			"sendMessage": `{"message_id":555,"date":1700000000,
 				"chat":{"id":-100100,"type":"supergroup"}}`,
-			"getChatMember": `{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
 		},
 		respSeq: map[string][]string{},
 		err:     map[string]*telegoapi.Error{},
@@ -146,7 +175,7 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		store:   captcha.NewStore(),
 		db:      db,
 		log:     slog.New(slog.NewTextHandler(logOut, nil)),
-		me:      &telego.User{ID: 42, IsBot: true, Username: "antispam_bot"},
+		me:      &telego.User{ID: testBotID, IsBot: true, Username: "antispam_bot"},
 		runCtx:  context.Background(),
 		replies: newReplyStore(),
 		quar:    newQuarantineStore(),
