@@ -203,14 +203,12 @@ func (b *Bot) cancelGreetingInputOnCommand(ctx context.Context, message telego.M
 		return
 	}
 	if _, kind, ok, expired := b.takeGreetingInput(message.From.ID); ok {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			fmt.Sprintf("Ок, ввод текста %s отменён.", welcomeTextKindNoun(kind))).
-			WithParseMode(telego.ModeHTML))
+		_, _ = b.sendScreen(ctx, message.Chat.ID, screenPrompt,
+			fmt.Sprintf("Ок, ввод текста %s отменён.", welcomeTextKindNoun(kind)), true, nil)
 	} else if expired {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
+		_, _ = b.sendScreen(ctx, message.Chat.ID, screenPrompt,
 			fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.",
-				welcomeTextKindNoun(kind))).
-			WithParseMode(telego.ModeHTML))
+				welcomeTextKindNoun(kind)), true, nil)
 	}
 }
 
@@ -224,15 +222,33 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	chatID, kind, ok, expired := b.takeGreetingInput(message.From.ID)
 	noun := welcomeTextKindNoun(kind)
 
-	reply := func(text string) {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-			WithParseMode(telego.ModeHTML))
+	// Все сообщения флоу — один заменяемый экран screenPrompt: переспрос или
+	// подтверждение гасит прошлый промпт, «пришли мне текст» не копится.
+	// Ошибку отправки возвращаем вызывающим: там, где флоу продолжается,
+	// ввод перевзводится только после доставленного промпта.
+	reply := func(text string) error {
+		_, err := b.sendScreen(ctx, message.Chat.ID, screenPrompt, text, true, nil)
+		return err
+	}
+
+	// rePrompt — переспрос: ПОЛНЫЙ промпт с вводной строкой, а не короткая
+	// отбивка — экран флоу один, и при переспросе не теряется контекст
+	// ({name}, «текущий текст», лимит 15 минут). Настройки и заголовок читаем
+	// на runCtx (та же БД-дисциплина, что у setWelcomeText), отправка — на ctx
+	// хендлера. Ошибка чтения — деградация до одной вводной строки.
+	rePrompt := func(lead string) error {
+		s, err := b.db.GetChatSettings(b.runCtx, chatID)
+		if err != nil {
+			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+			return reply(lead)
+		}
+		return reply(b.welcomeInputPromptText(b.runCtx, chatID, s, kind, lead))
 	}
 
 	if expired {
 		// Единственный abort-путь без ответа был бы здесь — а именно тут
 		// админ мог 20 минут сочинять текст. Честно скажем, что не сохранили.
-		reply(fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.", noun))
+		_ = reply(fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.", noun))
 		return nil
 	}
 	if !ok {
@@ -242,14 +258,14 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	// Перепроверка: права могли отозвать между нажатием кнопки и этим
 	// сообщением.
 	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		reply("У тебя больше нет прав на этот чат — текст не сохранён.")
+		_ = reply("У тебя больше нет прав на этот чат — текст не сохранён.")
 		return nil
 	}
 	// Чат мог стать необслуживаемым (отклонён владельцем, выпал из
 	// ALLOWED_CHATS): настройки мёртвого чата не пишем — они бы активировались
 	// при его возврате (та же причина, что у гейта chatCallbackTarget).
 	if !b.chatServiceable(chatID) {
-		reply("Чат больше не обслуживается — текст не сохранён.")
+		_ = reply("Чат больше не обслуживается — текст не сохранён.")
 		return nil
 	}
 
@@ -259,22 +275,27 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	switch {
 	case text == "":
 		// Медиа/стикер/пусто — продолжаем ждать настоящий текст. Перевзвод
-		// после отправки: упавшая подсказка не должна оставить взведённый
-		// ввод без промпта (следующее ЛС молча стало бы шаблоном).
-		reply(fmt.Sprintf("Нужно обычное текстовое сообщение. Пришли текст %s, «-» для сброса или /cancel для отмены.", noun))
+		// только после УДАЧНОЙ отправки переспроса (та же дисциплина, что у
+		// взвода в startWelcomeTextInput): упавшая подсказка не должна
+		// оставить взведённый ввод без промпта, где следующее обычное ЛС
+		// молча стало бы шаблоном.
+		if err := rePrompt("⚠️ Нужно именно текстовое сообщение — стикеры и медиа не подойдут."); err != nil {
+			b.log.Warn("send welcome input re-prompt", "err", err, "chat", chatID)
+			return nil
+		}
 		b.setGreetingInputPending(message.From.ID, chatID, kind)
 		return nil
 	case strings.HasPrefix(text, "/"):
 		// Любая команда (включая /cancel) отменяет флоу ввода.
-		reply(fmt.Sprintf("Ок, ввод текста %s отменён.", noun))
+		_ = reply(fmt.Sprintf("Ок, ввод текста %s отменён.", noun))
 		return nil
 	case text == "-":
 		if err := b.setWelcomeText(chatID, kind, nil, nil); err != nil {
 			b.log.Warn("reset welcome text", "err", err, "chat", chatID, "kind", kind)
-			reply("Не получилось сохранить, попробуй ещё раз.")
+			_ = reply("Не получилось сохранить, попробуй ещё раз.")
 			return nil
 		}
-		reply(resetLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
+		_ = reply(resetLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 		return nil
 	}
 
@@ -291,18 +312,58 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	}
 
 	if len([]rune(saved)) > maxGreetingRunes {
-		reply(fmt.Sprintf("Слишком длинно (больше %d символов). Сократи и пришли ещё раз.", maxGreetingRunes))
+		// Тот же условный перевзвод, что и в пустой ветке.
+		lead := fmt.Sprintf("⚠️ Слишком длинно (больше %d символов) — сократи и пришли ещё раз.", maxGreetingRunes)
+		if err := rePrompt(lead); err != nil {
+			b.log.Warn("send welcome input re-prompt", "err", err, "chat", chatID)
+			return nil
+		}
 		b.setGreetingInputPending(message.From.ID, chatID, kind)
 		return nil
 	}
 
 	if err := b.setWelcomeText(chatID, kind, &saved, entJSON); err != nil {
 		b.log.Warn("set welcome text", "err", err, "chat", chatID, "kind", kind)
-		reply("Не получилось сохранить, попробуй ещё раз.")
+		_ = reply("Не получилось сохранить, попробуй ещё раз.")
 		return nil
 	}
-	reply(savedLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
+	_ = reply(savedLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 	return nil
+}
+
+// welcomeInputPromptText собирает полный текст промпта флоу «пришли мне
+// текст»: правила ({name}, «-», /cancel, лимит 15 минут), сноску reply-режима
+// и текущий сохранённый текст. lead — необязательная вводная строка
+// (переспрос после стикера или слишком длинного текста). Настройки передаёт
+// вызывающий: ошибку чтения решает он сам (startWelcomeTextInput прерывается,
+// переспрос деградирует до одной вводной строки).
+func (b *Bot) welcomeInputPromptText(ctx context.Context, chatID int64, s storage.ChatSettings, kind welcomeMode, lead string) string {
+	current := "стандартный"
+	switch kind {
+	case welcomeGreet:
+		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
+			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
+		}
+	case welcomeReply:
+		if s.ReplyText.Valid && strings.TrimSpace(s.ReplyText.String) != "" {
+			current = "<code>" + html.EscapeString(s.ReplyText.String) + "</code>"
+		}
+	}
+	extra := ""
+	if kind == welcomeReply {
+		extra = "Строка «напиши что-нибудь…» и кнопки для админов добавятся сами.\n"
+	}
+	if lead != "" {
+		lead += "\n\n"
+	}
+	return lead + fmt.Sprintf(
+		"✏️ Пришли мне текст %s для чата <b>%s</b> одним сообщением.\n\n"+
+			"Подстановка: <code>{name}</code> — имя новичка.\n"+
+			extra+
+			"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n"+
+			"Запрос действует 15 минут.\n\n"+
+			"Текущий текст: %s",
+		welcomeTextKindNoun(kind), html.EscapeString(b.chatTitle(ctx, chatID)), current)
 }
 
 // setWelcomeText пишет текст по роду ввода: приветствие → greeting_text,

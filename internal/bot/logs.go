@@ -18,55 +18,59 @@ func (b *Bot) handleLogsCommand(ctx *th.Context, message telego.Message) error {
 		return nil
 	}
 	if message.From == nil || !b.isOwner(message.From.ID) {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Команда доступна только владельцам бота (OWNER_IDS)."))
+		// Отбивка-отказ — экран screenNotice: повторный отказ заменит
+		// прошлый, но экраны панели и флоу не тронет.
+		_, _ = b.sendScreen(ctx, message.Chat.ID, screenNotice,
+			"Команда доступна только владельцам бота (OWNER_IDS).", false, nil)
 		return nil
 	}
+	// Все сообщения /logs — один заменяемый экран screenLogs: повторный вызов
+	// гасит прошлый файл/отбивку, файлы не копятся стопкой.
+	notice := func(text string, html bool) {
+		if _, err := b.sendScreen(ctx, message.Chat.ID, screenLogs, text, html, nil); err != nil {
+			b.log.Warn("send logs notice", "err", err, "user", message.From.ID)
+		}
+	}
 	if b.cfg.LogFile == "" {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"LOG_FILE не задан в настройках — бот не пишет логи в файл. "+
-				"Для Docker compose он обычно выставляется автоматически в <code>/data/bot.log</code>. "+
-				"Если ты деплоишь вручную — укажи <code>LOG_FILE=/path/to/bot.log</code> в окружении.").
-			WithParseMode(telego.ModeHTML))
+		notice("LOG_FILE не задан в настройках — бот не пишет логи в файл. "+
+			"Для Docker compose он обычно выставляется автоматически в <code>/data/bot.log</code>. "+
+			"Если ты деплоишь вручную — укажи <code>LOG_FILE=/path/to/bot.log</code> в окружении.", true)
 		return nil
 	}
 
 	file, err := os.Open(b.cfg.LogFile)
 	if err != nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			fmt.Sprintf("Не удалось открыть лог-файл (%s): %v", b.cfg.LogFile, err)))
+		notice(fmt.Sprintf("Не удалось открыть лог-файл (%s): %v", b.cfg.LogFile, err), false)
 		return nil
 	}
 	defer file.Close() //nolint:errcheck // cleanup, error intentionally ignored
 
 	info, err := file.Stat()
 	if err != nil {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			fmt.Sprintf("stat лог-файла упал: %v", err)))
+		notice(fmt.Sprintf("stat лог-файла упал: %v", err), false)
 		return nil
 	}
 	if info.Size() == 0 {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Лог-файл пустой."))
+		notice("Лог-файл пустой.", false)
 		return nil
 	}
 	if info.Size() > maxLogUploadBytes {
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			fmt.Sprintf(
-				"Файл лога больше 50 МБ (%.1f МБ) — Telegram не даёт отправить ботом такой размер. "+
-					"Файл автоматически ротируется при 10 МБ; попробуй позже или забери с VDS вручную.",
-				float64(info.Size())/1024/1024)))
+		notice(fmt.Sprintf(
+			"Файл лога больше 50 МБ (%.1f МБ) — Telegram не даёт отправить ботом такой размер. "+
+				"Файл автоматически ротируется при 10 МБ; попробуй позже или забери с VDS вручную.",
+			float64(info.Size())/1024/1024), false)
 		return nil
 	}
 
 	filename := fmt.Sprintf("bot-%s.log", time.Now().UTC().Format("2006-01-02-150405"))
-	_, err = b.api.SendDocument(ctx,
+	sent, err := b.api.SendDocument(ctx,
 		tu.Document(tu.ID(message.Chat.ID), tu.File(tu.NameReader(file, filename))).
 			WithCaption(fmt.Sprintf("📄 %s (%.1f КБ)", filename, float64(info.Size())/1024)))
 	if err != nil {
 		b.log.Warn("send logs", "err", err)
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			fmt.Sprintf("Ошибка отправки: %v", err)))
+		notice(fmt.Sprintf("Ошибка отправки: %v", err), false)
+		return nil
 	}
+	b.replaceScreen(ctx, message.Chat.ID, screenLogs, sent.MessageID)
 	return nil
 }

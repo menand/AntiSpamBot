@@ -298,3 +298,18 @@ CREATE TABLE IF NOT EXISTS owner_settings (
     version_notify  INTEGER NOT NULL DEFAULT 1, -- слать ЛС «бот обновлён»; единственный opt-out тумблер (нет строки = ВКЛ)
     last_stats_period TEXT                      -- последний выбранный период статистики DM-меню, NULL = неделя
 );
+
+-- Последнее отправленное юзеру ЛС-сообщение-экран каждого вида: показ нового
+-- экрана того же вида удаляет прошлый (SwapDMScreen возвращает прежний id).
+-- Так в личке не копятся стопки старых меню/списков/файлов логов. Виды:
+-- 'panel' — экраны меню (/start, /chats, /help, /info, /whatsnew);
+-- 'logs' — сообщения команды /logs (файл лога и отбивки);
+-- 'prompt' — флоу ввода текста «после капчи» (промпт и его переспросы);
+-- 'notice' — служебные отбивки (отказ в доступе, пояснения про ключи).
+CREATE TABLE IF NOT EXISTS dm_screens (
+    user_id    INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,
+    message_id INTEGER NOT NULL,
+    at         INTEGER NOT NULL,
+    PRIMARY KEY (user_id, kind)
+);

@@ -30,8 +30,9 @@ const aiCheckFacts = "Автор: Проверка связи, всего соо
 const aiCheckTimeout = 15 * time.Second
 
 // runAICheck опрашивает каждого провайдера ОТДЕЛЬНО (не через classifySpam —
-// его фолбек замаскировал бы умершего первичного) и редактирует ранее
-// отправленное «⏳…» сообщение итогом. Запускается горутиной из меню.
+// его фолбек замаскировал бы умершего первичного) и редактирует нажатое
+// сообщение меню (в нём же нарисовано «⏳…») итогом с кнопкой «Назад».
+// Запускается горутиной из меню.
 func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 	providers := []struct {
 		name string
@@ -66,11 +67,14 @@ func (b *Bot) runAICheck(dmChatID int64, msgID int) {
 	for _, l := range lines {
 		text += l + "\n"
 	}
+	// Кнопка «Назад» возвращает сообщение в главное меню — результат больше не
+	// тупиковое сообщение, а такой же экран панели, как справка/статистика.
 	if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
-		ChatID:    tu.ID(dmChatID),
-		MessageID: msgID,
-		Text:      text,
-		ParseMode: telego.ModeHTML,
+		ChatID:      tu.ID(dmChatID),
+		MessageID:   msgID,
+		Text:        text,
+		ParseMode:   telego.ModeHTML,
+		ReplyMarkup: backKeyboard(),
 	}); err != nil {
 		b.log.Warn("edit ai check result", "err", err, "chat", dmChatID)
 	}

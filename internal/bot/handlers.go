@@ -1182,9 +1182,9 @@ func (b *Bot) handleHelpCommand(ctx *th.Context, message telego.Message) error {
 	if message.Chat.Type != "private" {
 		return b.handleGroupHelpCommand(ctx, message)
 	}
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), helpText).
-		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(backKeyboard()))
+	if _, err := b.sendScreen(ctx, message.Chat.ID, screenPanel, helpText, true, backKeyboard()); err != nil {
+		b.log.Warn("help send", "err", err, "user", message.Chat.ID)
+	}
 	return nil
 }
 
@@ -1204,9 +1204,7 @@ func (b *Bot) handlePrivateStart(ctx *th.Context, message telego.Message) error 
 		text += fmt.Sprintf("\n\n<i>Твой Telegram ID: <code>%d</code></i>", message.From.ID)
 	}
 
-	if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(b.mainMenuKeyboard(userID))); err != nil {
+	if _, err := b.sendScreen(ctx, message.Chat.ID, screenPanel, text, true, b.mainMenuKeyboard(userID)); err != nil {
 		b.log.Debug("start menu send", "err", err, "user", userID)
 	}
 	// Владелец мог не получить ЛС-вопрос о pending-чате (закрытая личка на

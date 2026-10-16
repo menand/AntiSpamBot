@@ -71,13 +71,37 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !b.isOwner(query.From.ID) {
 			return nil
 		}
-		sent, err := b.api.SendMessage(ctx, tu.Message(
-			tu.ID(query.Message.GetChat().ID), "⏳ Проверяю ИИ-провайдеров…"))
-		if err != nil {
-			b.log.Warn("send ai check placeholder", "err", err)
-			return nil
+		// «⏳…» рисуем прямо в нажатом сообщении, а не отдельным: результаты
+		// проверок больше не копятся стопкой, runAICheck отредактирует это же
+		// сообщение итогом с кнопкой «Назад». Не вышло отредактировать
+		// (сообщения уже нет?) — как раньше, шлём новое.
+		aiChatID := query.Message.GetChat().ID
+		aiMsgID := query.Message.GetMessageID()
+		if _, err := b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
+			ChatID:      tu.ID(aiChatID),
+			MessageID:   aiMsgID,
+			Text:        "⏳ Проверяю ИИ-провайдеров…",
+			ReplyMarkup: backKeyboard(),
+		}); err != nil {
+			if isNotModified(err) {
+				// Гонка двойного тапа: плейсхолдер уже нарисован другим
+				// вызовом этого же колбэка — его проверка уже в полёте,
+				// второй раз не запускаем (и стопка не растёт).
+				return nil
+			}
+			// Сообщение старше 48ч или удалено — редактировать нельзя.
+			// Новый плейсхолдер шлём экраном panel: он сразу несёт «Назад»
+			// и его заменит следующая панель, а не повиснет вечной стопкой
+			// (повторные тапы в старом меню заменяют его же).
+			sent, serr := b.sendScreen(ctx, aiChatID, screenPanel,
+				"⏳ Проверяю ИИ-провайдеров…", false, backKeyboard())
+			if serr != nil {
+				b.log.Warn("send ai check placeholder", "err", serr)
+				return nil
+			}
+			aiMsgID = sent.MessageID
 		}
-		b.goSafe("runAICheck", func() { b.runAICheck(sent.Chat.ID, sent.MessageID) })
+		b.goSafe("runAICheck", func() { b.runAICheck(aiChatID, aiMsgID) })
 		return nil
 	case "spamnotify":
 		// Глобальный (не пер-чатовый) тумблер владельца: слать ли ему в ЛС
@@ -319,10 +343,11 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		if !s.SpamCheckEnabled && !b.spamAIEnabled() {
 			b.toggleMu.Unlock()
 			// На query уже ответили в начале хендлера — второй Answer (алерт)
-			// Telegram отбросил бы молча, поэтому объясняем обычным
-			// сообщением: меню живёт в личке, оно ляжет прямо под ним.
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
-				"⚠️ Ни GROQ_API_KEY, ни GEMINI_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя."))
+			// Telegram отбросил бы молча, поэтому объясняем отбивкой
+			// screenNotice: повторное нажатие заменит прошлую отбивку, а
+			// сама панель настроек под ней останется на месте.
+			_, _ = b.sendScreen(ctx, query.Message.GetChat().ID, screenNotice,
+				"⚠️ Ни GROQ_API_KEY, ни GEMINI_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя.", false, nil)
 			return nil
 		}
 		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
@@ -1026,36 +1051,14 @@ func (b *Bot) startWelcomeTextInput(ctx *th.Context, query telego.CallbackQuery,
 		return b.renderWelcomeMenu(ctx, query, chatID)
 	}
 
-	current := "стандартный"
-	switch kind {
-	case welcomeGreet:
-		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
-			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
-		}
-	case welcomeReply:
-		if s.ReplyText.Valid && strings.TrimSpace(s.ReplyText.String) != "" {
-			current = "<code>" + html.EscapeString(s.ReplyText.String) + "</code>"
-		}
-	}
-	extra := ""
-	if kind == welcomeReply {
-		extra = "Строка «напиши что-нибудь…» и кнопки для админов добавятся сами.\n"
-	}
-	text := fmt.Sprintf(
-		"✏️ Пришли мне текст %s для чата <b>%s</b> одним сообщением.\n\n"+
-			"Подстановка: <code>{name}</code> — имя новичка.\n"+
-			extra+
-			"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n"+
-			"Запрос действует 15 минут.\n\n"+
-			"Текущий текст: %s",
-		welcomeTextKindNoun(kind), html.EscapeString(b.chatTitle(ctx, chatID)), current)
-	if _, serr := b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
-		WithParseMode(telego.ModeHTML)); serr != nil {
+	text := b.welcomeInputPromptText(ctx, chatID, s, kind, "")
+	if _, serr := b.sendScreen(ctx, query.Message.GetChat().ID, screenPrompt, text, true, nil); serr != nil {
 		b.log.Warn("send welcome input prompt", "err", serr, "chat", chatID)
 		// На query уже ответили в начале хендлера — второй Answer
-		// Telegram отбросил бы молча, поэтому объясняем сообщением.
-		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
-			"⚠️ Не получилось отправить запрос — попробуй ещё раз."))
+		// Telegram отбросил бы молча, поэтому объясняем сообщением (тот же
+		// экран флоу: отбивка заменит прошлый промпт, стопки не будет).
+		_, _ = b.sendScreen(ctx, query.Message.GetChat().ID, screenPrompt,
+			"⚠️ Не получилось отправить запрос — попробуй ещё раз.", false, nil)
 		return nil
 	}
 	// Арм — только после удачных чтения И отправки промпта: упавшая отправка
@@ -1278,10 +1281,13 @@ func (b *Bot) handleChatsCommand(ctx *th.Context, message telego.Message) error 
 		b.log.Warn("user chats", "err", err)
 		return nil
 	}
-	text, kb := chatsListView(chats, b.lastStatsPeriod(ctx, message.From.ID), false)
-	_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
-		WithParseMode(telego.ModeHTML).
-		WithReplyMarkup(kb))
+	// withBack=true: экран заменяет прошлую панель (sendScreen), поэтому без
+	// кнопки «Назад» команда оставляла бы юзера без навигации — вернуться
+	// можно было бы только новой командой.
+	text, kb := chatsListView(chats, b.lastStatsPeriod(ctx, message.From.ID), true)
+	if _, err := b.sendScreen(ctx, message.Chat.ID, screenPanel, text, true, kb); err != nil {
+		b.log.Warn("chats list send", "err", err, "user", message.From.ID)
+	}
 	return nil
 }
 
