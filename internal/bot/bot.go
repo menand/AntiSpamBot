@@ -212,6 +212,20 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	b.restoreQuarantine(ctx)
 
+	// Синтетические замки golden-/reply-spam-репортов (bot_msg_id <= 0) —
+	// координация ТОЛЬКО внутри живого процесса: крахнувший репорт некому
+	// продолжить. Чистим синхронно и строго ДО приёма апдейтов: из
+	// reconcile-горутины (идёт параллельно приёму — reconcileChats тянется
+	// getChat'ами секундами) вызов мог бы снести замок живого репорта, и
+	// второй исполнитель открыл бы второй бан. Ноль — легаси-замки прежнего
+	// общего sentinel: пережив крах, они блокировали бы репорты автора до
+	// суточного свипа (см. DeleteSpamLocks).
+	if n, err := b.db.DeleteSpamLocks(ctx); err != nil {
+		b.log.Warn("delete spam locks", "err", err)
+	} else if n > 0 {
+		b.log.Info("stale spam locks deleted", "count", n)
+	}
+
 	b.goSafe("attemptsSweepLoop", func() { b.attemptsSweepLoop(ctx) })
 	b.goSafe("dailyDigestLoop", func() { b.dailyDigestLoop(ctx) })
 	b.goSafe("reconcileChats", func() {

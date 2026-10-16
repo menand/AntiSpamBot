@@ -62,6 +62,16 @@ func TestOpenReadOnlyRejectsWrites(t *testing.T) {
 	}); err == nil {
 		t.Fatal("write on read-only handle must fail")
 	}
+
+	// query_only — вторая страховка (на случай, если mode=ro не применился):
+	// обе прагмы DSN должны дойти до соединения, а не перезаписать друг друга.
+	var qo int
+	if err := ro.sql.QueryRowContext(ctx, `PRAGMA query_only`).Scan(&qo); err != nil {
+		t.Fatalf("read query_only: %v", err)
+	}
+	if qo != 1 {
+		t.Fatalf("query_only = %d, want 1 — прагма потерялась в DSN", qo)
+	}
 }
 
 func TestOpenReadOnlyMissingFileErrors(t *testing.T) {

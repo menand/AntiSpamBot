@@ -91,6 +91,48 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	// глобальный флаг, и снять карантин.
 	if newStatus == "administrator" {
 		b.releaseQuarantineUser(upd.Chat.ID, user.ID)
+		// Промоушен — терминал и для активных проверок: серия капчи или
+		// reply-wait не должна досчитать до наказания свежего админа
+		// (бэкстоп punishAttempt перепроверяет статус, но только в самом
+		// конце серии — эта ветка гасит её сразу), а персистентные строки —
+		// воскрешать кик на каждом рестарте. Наказания не было — ни провал,
+		// ни kick/ban не пишем; воронку закрываем пассом, иначе юзер навсегда
+		// завис бы в «В процессе» (канон /mute и unmod).
+		ctx, cancel := b.liveCtx()
+		defer cancel()
+		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
+			p.Cancel()
+			// Серверный release ДО удаления строки: обрыв в этом окне
+			// оставит строку — рестарт перевзведёт серию, а бэкстоп хвоста
+			// повторит release; обратный порядок нёс бы мьют без единой
+			// ссылки — закрыть его после рестарта было бы нечем. Рестрикт
+			// без until_date иначе пережил бы промоушен и всплыл бы после
+			// разжалования. Для админа release безвреден (прецедент
+			// карантина строкой выше).
+			b.releaseOnAbort(ctx, upd.Chat.ID, user.ID)
+			if err := b.db.DeletePendingIfMsg(ctx, upd.Chat.ID, user.ID,
+				p.MessageID, p.EphemeralID); err != nil {
+				b.log.Warn("delete pending of promoted admin", "err", err,
+					"chat", upd.Chat.ID, "user", user.ID)
+			}
+			if err := b.deleteBotMessage(ctx, upd.Chat.ID,
+				p.MessageID, p.EphemeralID, p.UserID); err != nil {
+				b.log.Debug("delete captcha of promoted admin (already gone?)",
+					"err", err, "chat", upd.Chat.ID)
+			}
+			if err := b.db.RecordEvent(ctx, upd.Chat.ID, user.ID,
+				storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (promoted mid-captcha)", "err", err,
+					"chat", upd.Chat.ID, "user", user.ID)
+			}
+		}
+		if b.cancelReplyWait(upd.Chat.ID, user.ID) {
+			if err := b.db.RecordEvent(ctx, upd.Chat.ID, user.ID,
+				storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (promoted mid-reply-wait)", "err", err,
+					"chat", upd.Chat.ID, "user", user.ID)
+			}
+		}
 		return nil
 	}
 
@@ -955,10 +997,13 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
 
 	// Сингл-лайн-замок через синтетическую запись: параллельный репорт не
-	// дублирует spamban/уведомления.
+	// дублирует spamban/уведомления. bot_msg_id = -targetUserID: ключ уникален
+	// НА АВТОРА (репорты разных спамеров не конфликтуют, как при общем нуле),
+	// повторный репорт по тому же ловится WHERE NOT EXISTS у PutSpamVoteOnce,
+	// а с реальными id сообщений (> 0) пересечений нет.
 	v := storage.SpamVote{
 		ChatID:      chatID,
-		BotMsgID:    0,
+		BotMsgID:    -int(targetUserID),
 		TargetMsgID: 0,
 		AuthorID:    targetUserID,
 		InitiatorID: query.From.ID,
@@ -1764,6 +1809,28 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 				"chat", chatID, "user", userID, "stage", stage)
 			b.releaseOnAbort(ctx, chatID, userID)
 			return nil
+		} else if s == "administrator" || s == "creator" {
+			// Промоушен в окне kickoff: рестрикт уже лёг, но в store/строке
+			// серии ещё нет — ветка administrator в handleChatMember её не
+			// видит. Гасим здесь по её канону (пасс + release): иначе свежий
+			// админ до конца серии оставался бы под IsCaptchaActive — его
+			// сообщения и правки стирались бы (рестрикт админам Telegram не
+			// применяет, а вот удаление сообщений — работает). Пасс — на
+			// liveCtx, как у самой ветки промоушена: воронку надо закрыть
+			// даже при дренаже.
+			pctx, pcancel := b.liveCtx()
+			if derr := b.deleteBotMessage(pctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID); derr != nil {
+				b.log.Debug("delete captcha of promoted admin", "err", derr, "chat", chatID)
+			}
+			if err := b.db.RecordEvent(pctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (promoted mid-kickoff)", "err", err,
+					"chat", chatID, "user", userID)
+			}
+			b.log.Info("captcha aborted — user promoted mid-kickoff",
+				"chat", chatID, "user", userID, "stage", stage)
+			b.releaseOnAbort(pctx, chatID, userID)
+			pcancel()
+			return nil
 		}
 	} else {
 		b.log.Debug("captcha liveness check", "err", merr, "chat", chatID, "user", userID)
@@ -1803,6 +1870,27 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 			b.releaseOnAbort(ctx, chatID, userID)
 		}
 		return nil
+	}
+	// Пост-персист identity-чек (гонка «решение прилетело между Put в память
+	// и PutPending»): ответ юзера, промоушен или /mute могли изъять запись за
+	// миллисекунды персиста — тогда только что записанная строка сирота, и
+	// рестарт воскресил бы серию на уже решённого юзера (промоушен-бэкстоп
+	// закрыл бы воронку вторым пассом, замьюченный получил бы кик за
+	// «молчание» поверх решения админа). Guard по msg-id — не тронем новую;
+	// message_id/ephemeral_id только что отправленного сообщения и есть наш
+	// ключ. Сам Pending возвращаем как обычно: identity решена — таймеры
+	// цикла выйдут на закрытом Done, а вызывающие стадии-перехода удалят
+	// сообщение своим post-send чеком.
+	if cur, ok := b.store.Get(chatID, userID); !ok || cur != p {
+		// Guard-delete — на liveCtx: невыполненный на отменённом runCtx
+		// (SIGTERM в микроокне персиста) он оставил бы сироту, и рестарт
+		// воскресил бы серию уже решённому юзеру.
+		dctx, dcancel := b.liveCtx()
+		if derr := b.db.DeletePendingIfMsg(dctx, chatID, userID, msg.MessageID, msg.EphemeralMessageID); derr != nil {
+			b.log.Warn("delete orphan pending (resolved mid-persist)", "err", derr,
+				"chat", chatID, "user", userID)
+		}
+		dcancel()
 	}
 	return p
 }
@@ -1995,10 +2083,16 @@ func (b *Bot) cancelCaptchaSilent(chatID, userID int64) bool {
 		return false
 	}
 	p.Cancel()
-	if err := b.db.DeletePending(b.runCtx, chatID, userID); err != nil {
+	// Строка и сообщение — на liveCtx: при SIGTERM удаление строки не должно
+	// молча пропасть — рестарт иначе перевзведёт серию на юзера, которого
+	// команда уже разобрала (замьюченного кикнул бы таймаут, а верный ответ
+	// стёр бы свежий мьют через onSuccess).
+	ctx, cancel := b.liveCtx()
+	defer cancel()
+	if err := b.db.DeletePending(ctx, chatID, userID); err != nil {
 		b.log.Warn("delete pending of punished user", "err", err, "chat", chatID, "user", userID)
 	}
-	if err := b.deleteBotMessage(b.runCtx, chatID, p.MessageID, p.EphemeralID, userID); err != nil {
+	if err := b.deleteBotMessage(ctx, chatID, p.MessageID, p.EphemeralID, userID); err != nil {
 		b.log.Debug("delete captcha of punished user (already gone?)", "err", err, "chat", chatID)
 	}
 	return true
@@ -2157,6 +2251,29 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 func (b *Bot) punishAttempt(ctx context.Context, chatID, userID int64,
 	dbReason, logReason string, notify func(event storage.EventKind, count int),
 ) error {
+	// Промоушен — терминал и для карательного хвоста: юзер, ставший админом
+	// между Take проверки и этим наказанием (или во время простоя), не
+	// кикается; успешный возврат закрывает персистентную строку у
+	// вызывающих. Тихий пропуск с компенсирующим pass — канон гашения
+	// снаружи (/mute, unmod, executeSpamBan); EventFail не пишем, наказания
+	// не было. Ошибка API — fail-open (старое поведение), как в
+	// restorePending.
+	if isAdmin, err := b.isChatAdmin(ctx, chatID, userID); err == nil && isAdmin {
+		b.log.Info("punish skipped: user became admin", "chat", chatID, "user", userID,
+			"reason", logReason)
+		// Капча-мьют мог остаться незакрытым: событие промоушена,
+		// опоздавшее к этому хвосту, уже не найдёт pending (его снимет
+		// вызывающий) и release не сделает — закрываем здесь. Свежий
+		// detached-бюджет: окружающий cleanup-ctx всего 10 c, а двум
+		// лестницам release (~14 c чистого сна) туда не поместиться —
+		// оборванный release оставил бы мьют без единого повторителя.
+		b.releaseDetached(chatID, userID)
+		if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (promoted admin)", "err", err,
+				"chat", chatID, "user", userID)
+		}
+		return nil
+	}
 	count, err := b.db.IncrementAttempt(ctx, chatID, userID, attemptsTTL)
 	incFailed := false
 	if err != nil {

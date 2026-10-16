@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -340,6 +341,31 @@ func TestPruneEvents(t *testing.T) {
 	}
 	if left != 2 {
 		t.Fatalf("left %d rows, want 2 (fresh events survive)", left)
+	}
+}
+
+// TestEventsAtIndexUsedByPruneShape — прунинг PruneEvents фильтрует и сортирует
+// по at: без idx_events_at план падает в SCAN + TEMP B-TREE и прунинг большой
+// таблицы деградирует до полного прохода с сортировкой.
+func TestEventsAtIndexUsedByPruneShape(t *testing.T) {
+	db := openTest(t)
+	rows, err := db.sql.Query(`EXPLAIN QUERY PLAN
+		SELECT id FROM events WHERE at < ? ORDER BY at LIMIT 100`, time.Now().Unix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+	plan := ""
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan += detail + "\n"
+	}
+	if !strings.Contains(plan, "idx_events_at") || strings.Contains(plan, "TEMP B-TREE") {
+		t.Fatalf("prune shape must use idx_events_at (no temp b-tree):\n%s", plan)
 	}
 }
 

@@ -29,9 +29,15 @@ const spamVoteColumns = `chat_id, bot_msg_id, target_msg_id, author_id, initiato
 // PutSpamVoteOnce создаёт голосование ТОЛЬКО если у автора ещё нет живой
 // плашки — атомарно, одним INSERT…WHERE NOT EXISTS (check-then-act гонка
 // двух создателей исключена: проигравший получает ok=false и сносит свою
-// только что отправленную плашку). Инвариант «одна активная плашка на
-// автора» общий для всех трёх путей создания: ИИ-спам-чек, профиль-чек и
-// ручной репорт /spam.
+// только что отправленную плашку). Синтетические lock-строки golden- и
+// reply-spam-репортов ключуются bot_msg_id = -authorID (userspam.go,
+// handlers.go): ключ уникален НА АВТОРА, поэтому репорты на разных спамеров
+// не конфликтуют между собой, а повторный репорт на того же автора ловится
+// WHERE NOT EXISTS. ON CONFLICT сознательно нет: при живом WHERE NOT EXISTS
+// конфликт PK возможен только багом — честная ошибка (вызывающий предложит
+// повторить) лучше тихой лжи «дубль не нужен».
+// Инвариант «одна активная плашка на автора» общий для всех трёх путей
+// создания: ИИ-спам-чек, профиль-чек и ручной репорт /spam.
 func (d *DB) PutSpamVoteOnce(ctx context.Context, v SpamVote) (bool, error) {
 	res, err := d.sql.ExecContext(ctx, `
 		INSERT INTO spam_votes (chat_id, bot_msg_id, target_msg_id, author_id, initiator_id, prob, created_at)
@@ -615,9 +621,12 @@ func (d *DB) GreetingUserByMsg(ctx context.Context, chatID int64, messageID int)
 	return userID, true, nil
 }
 
-// TakeSpamVoteByAuthor удаляет активную плашку голосования по автору и
+// TakeSpamVoteByAuthor удаляет активную ПЛАШКУ голосования по автору и
 // возвращает её bot_msg_id — чтобы снести само сообщение при /kick|/ban.
 // Бюллетени чистятся в той же транзакции. (0, false, nil) — плашки нет.
+// Синтетические lock-строки (bot_msg_id = -authorID, репорт в исполнении)
+// не берутся: это не сообщение, а координация «один исполнитель» — украсть
+// замок в окне исполнения значило бы открыть второму репорту второй бан.
 func (d *DB) TakeSpamVoteByAuthor(ctx context.Context, chatID, authorID int64) (int, bool, error) {
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -627,7 +636,7 @@ func (d *DB) TakeSpamVoteByAuthor(ctx context.Context, chatID, authorID int64) (
 
 	var botMsgID int
 	err = tx.QueryRowContext(ctx,
-		`SELECT bot_msg_id FROM spam_votes WHERE chat_id = ? AND author_id = ? LIMIT 1`,
+		`SELECT bot_msg_id FROM spam_votes WHERE chat_id = ? AND author_id = ? AND bot_msg_id > 0 LIMIT 1`,
 		chatID, authorID).Scan(&botMsgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
@@ -647,6 +656,31 @@ func (d *DB) TakeSpamVoteByAuthor(ctx context.Context, chatID, authorID int64) (
 		return 0, false, fmt.Errorf("take vote by author: commit: %w", err)
 	}
 	return botMsgID, true, nil
+}
+
+// DeleteSpamLocks сносит синтетические lock-строки (bot_msg_id <= 0) — место
+// вызова: Run, СИНХРОННО и строго до приёма апдейтов (th.Start и вечных
+// горутин). Координация «один исполнитель» живёт только внутри процесса:
+// крах между claim и release некому завершить, а пережившая крах строка
+// блокировала бы новые репорты этого автора до суточного свипа и врала бы
+// «дубль не нужен». Ноль — тоже синтетика: общий sentinel прежних версий,
+// след краха до перехода на ключ -authorID. Из reconcile-горутины вызов
+// запрещён: она идёт параллельно приёму, и DELETE снёс бы замок живого
+// репорта — второму исполнителю открылся бы второй бан. Реальных
+// bot_msg_id <= 0 не бывает (id сообщений положительны), поэтому строки
+// плашек не задеты, а target_msg_id = 0 у профиль-плашки — другое поле.
+// Исполнение крахнувшего репорта не продолжается — новая попытка начнётся
+// с чистого замка.
+func (d *DB) DeleteSpamLocks(ctx context.Context) (int64, error) {
+	res, err := d.sql.ExecContext(ctx, `DELETE FROM spam_votes WHERE bot_msg_id <= 0`)
+	if err != nil {
+		return 0, fmt.Errorf("delete spam locks: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete spam locks rows: %w", err)
+	}
+	return n, nil
 }
 
 // PruneGreetings выкидывает записи старше olderThan — сообщения старше 48 ч

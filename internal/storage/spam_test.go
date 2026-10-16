@@ -431,3 +431,85 @@ func TestPutSpamVoteOnceOnePerAuthor(t *testing.T) {
 		t.Fatalf("re-arm after take must succeed: ok=%v err=%v", ok, err)
 	}
 }
+
+// TestPutSpamVoteOnceSentinelPerAuthor — синтетические lock-строки golden- и
+// reply-spam-репортов ключуются bot_msg_id = -authorID: репорты на РАЗНЫХ
+// спамеров не делят PK (регресс общего sentinel=0, из-за которого второй
+// репорт молча «проигрывал гонку» и получал «дубль не нужен»), а повторный
+// репорт на того же автора ловится WHERE NOT EXISTS.
+func TestPutSpamVoteOnceSentinelPerAuthor(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	sentinel := func(author int64) SpamVote {
+		return SpamVote{ChatID: -5, BotMsgID: -int(author), TargetMsgID: 44,
+			AuthorID: author, InitiatorID: 9, Prob: 100, CreatedAt: time.Now()}
+	}
+	if ok, err := db.PutSpamVoteOnce(ctx, sentinel(42)); err != nil || !ok {
+		t.Fatalf("first sentinel must win: ok=%v err=%v", ok, err)
+	}
+	// Другой автор — свой замок; меж-авторского конфликта быть не должно.
+	if ok, err := db.PutSpamVoteOnce(ctx, sentinel(43)); err != nil || !ok {
+		t.Fatalf("cross-author sentinel must not collide: ok=%v err=%v", ok, err)
+	}
+	// Повторный репорт на того же автора — тихий проигрыш гонки.
+	if ok, err := db.PutSpamVoteOnce(ctx, sentinel(42)); err != nil || ok {
+		t.Fatalf("same-author second claim must lose quietly: ok=%v err=%v", ok, err)
+	}
+	for _, author := range []int64{42, 43} {
+		if pending, err := db.HasPendingVoteForAuthor(ctx, -5, author); err != nil || !pending {
+			t.Fatalf("author %d row must exist (pending=%v err=%v)", author, pending, err)
+		}
+	}
+	// Release замка первого автора не трогает второго.
+	if taken, err := db.TakeSpamVote(ctx, -5, -42); err != nil || !taken {
+		t.Fatalf("release first sentinel: taken=%v err=%v", taken, err)
+	}
+	if pending, err := db.HasPendingVoteForAuthor(ctx, -5, 43); err != nil || !pending {
+		t.Fatalf("second author row must survive (pending=%v err=%v)", pending, err)
+	}
+}
+
+// TestTakeSpamVoteByAuthorSkipsLocks — по автору снимается только РЕАЛЬНАЯ
+// плашка: синтетический замок исполняющегося репорта не воруется (иначе
+// второй репорт получил бы право на второй бан), а DeleteSpamLocks чистит
+// замки (включая легаси-нули прежнего sentinel) и ничего больше.
+func TestTakeSpamVoteByAuthorSkipsLocks(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	if ok, err := db.PutSpamVoteOnce(ctx, SpamVote{ChatID: -6, BotMsgID: -7,
+		TargetMsgID: 1, AuthorID: 7, Prob: 100, CreatedAt: time.Now()}); err != nil || !ok {
+		t.Fatalf("claim lock: ok=%v err=%v", ok, err)
+	}
+	// Реальная плашка того же автора (PutSpamVote — без WHERE NOT EXISTS).
+	if err := db.PutSpamVote(ctx, SpamVote{ChatID: -6, BotMsgID: 55,
+		TargetMsgID: 2, AuthorID: 7, Prob: 100, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok, err := db.TakeSpamVoteByAuthor(ctx, -6, 7); err != nil || !ok || id != 55 {
+		t.Fatalf("by-author take must return the real plashka (id=%d ok=%v err=%v)", id, ok, err)
+	}
+	// Замок не тронут — второй take плашки не находит.
+	if _, ok, err := db.TakeSpamVoteByAuthor(ctx, -6, 7); err != nil || ok {
+		t.Fatalf("lock must not be takeable as a plashka (ok=%v err=%v)", ok, err)
+	}
+	if _, found, err := db.GetSpamVote(ctx, -6, -7); err != nil || !found {
+		t.Fatalf("lock row must survive (found=%v err=%v)", found, err)
+	}
+	// Легаси-замок прежнего формата (общий sentinel = 0) — тоже синтетика:
+	// пережив крах до апгрейда, он блокировал бы репорты этого автора.
+	if err := db.PutSpamVote(ctx, SpamVote{ChatID: -6, BotMsgID: 0,
+		TargetMsgID: 3, AuthorID: 8, Prob: 100, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.DeleteSpamLocks(ctx); err != nil || n != 2 {
+		t.Fatalf("DeleteSpamLocks n=%d err=%v, want 2", n, err)
+	}
+	if _, found, err := db.GetSpamVote(ctx, -6, -7); err != nil || found {
+		t.Fatalf("lock row must be deleted (found=%v err=%v)", found, err)
+	}
+	if _, found, err := db.GetSpamVote(ctx, -6, 0); err != nil || found {
+		t.Fatalf("legacy zero-sentinel row must be deleted (found=%v err=%v)", found, err)
+	}
+}

@@ -653,3 +653,31 @@ func TestCensorNoticeThreaded(t *testing.T) {
 		t.Fatalf("notice must go to the offending topic: %v", msgs)
 	}
 }
+
+// TestUnmodUnbanReleasesQuarantine — /unban по юзеру из «10 последних»
+// (список исторический: он может быть НЕ забанен, а активно карантинить)
+// снимает карантин ПОЛНЫМ release: drop оставил бы серверный текст-рестрикт
+// висеть до until_date с выключенным цензором ссылок — половинчатый карантин.
+func TestUnmodUnbanReleasesQuarantine(t *testing.T) {
+	ctx := context.Background()
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.armQuarantine(ctx, testChatID, testUserID, time.Now().Add(time.Hour))
+
+	text, err := b.execUnmod("u", testChatID, testUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "разбанен") {
+		t.Fatalf("unexpected summary: %s", text)
+	}
+	if has, err := db.HasQuarantine(ctx, testChatID, testUserID, time.Now().Unix()); err != nil || has {
+		t.Fatalf("quarantine row must be dropped (has=%v err=%v)", has, err)
+	}
+	if _, ok := b.quar.Get(testChatID, testUserID); ok {
+		t.Fatal("quarantine mirror must be cleared")
+	}
+	if n := fc.callCount("restrictChatMember"); n == 0 {
+		t.Fatalf("quarantine must be released server-side, calls: %v", fc.callList())
+	}
+}

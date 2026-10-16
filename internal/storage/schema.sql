@@ -35,6 +35,9 @@ CREATE INDEX IF NOT EXISTS idx_events_chat_kind_at ON events(chat_id, kind, at);
 -- Под коррелированные подзапросы PassedUsers/TopFailers/EventUsers
 -- (поиск последнего join/pass конкретного юзера без скана всех событий чата).
 CREATE INDEX IF NOT EXISTS idx_events_chat_user_kind_at ON events(chat_id, user_id, kind, at);
+-- Под прунинг: PruneEvents фильтрует и сортирует по at; без ведущего at
+-- каждый батч — скан всей таблицы (TEMP B-TREE) на единственном соединении.
+CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
 
 CREATE TABLE IF NOT EXISTS members (
     chat_id   INTEGER NOT NULL,

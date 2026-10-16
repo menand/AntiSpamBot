@@ -182,6 +182,26 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 		}
 		return false
 	}
+	// Пост-персист identity-чек (гонка «решение прилетело между Put в память
+	// и PutPendingReply»): ответ юзера, промоушен или /mute могли изъять
+	// ожидание за миллисекунды персиста — тогда только что записанная строка
+	// сирота, и рестарт воскресил бы серию на уже решённого юзера (промоушен-
+	// бэкстоп закрыл бы воронку вторым пассом, а замьюченный получил бы кик
+	// за неответ поверх решения админа). Guard по стадии 1 — не тронем чужой.
+	if cur, ok := b.replies.Get(chatID, userID); !ok || cur != p {
+		// Guard-delete — на liveCtx (как в sendCaptchaStage): SIGTERM в
+		// микроокне персиста не должен оставить сироту, которую рестарт
+		// воскресит для уже решённого юзера.
+		dctx, dcancel := b.liveCtx()
+		if derr := b.db.DeletePendingReplyIf(dctx, chatID, userID, 1); derr != nil {
+			b.log.Warn("delete orphan pending reply (resolved mid-persist)", "err", derr,
+				"chat", chatID, "user", userID)
+		}
+		dcancel()
+		// Ожидание уже снято: требование-строку в приветствии рисовать
+		// нельзя (enforce'ить её нечем), серию не запускаем.
+		return false
+	}
 	b.goSafe("replyWaitLoop", func() { b.replyWaitLoop(chatID, userID, p) })
 	return true
 }
@@ -254,7 +274,11 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) *replyPending {
 func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
 	if p, ok := b.replies.Take(chatID, userID); ok {
 		p.Cancel()
-		if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.Stage); err != nil {
+		// liveCtx: при SIGTERM строка не должна пережить отмену — рестарт
+		// воскресил бы серию на юзера, которого команда уже разобрала.
+		ctx, cancel := b.liveCtx()
+		defer cancel()
+		if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage); err != nil {
 			b.log.Warn("delete pending reply on cancel", "err", err, "chat", chatID, "user", userID)
 		}
 		return true
