@@ -201,6 +201,11 @@ func TestReplyWaitPunishSkippedForPromotedAdmin(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
+	// Цикл сверяет режим перед карой: серия обязана быть в «с ответом»,
+	// иначе тест проверял бы disarm, а не promotion-guard карательного хвоста.
+	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+		t.Fatal(err)
+	}
 	fc.resp["getChatMember"] = `{"status":"administrator","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
 	if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 		t.Fatal(err)

@@ -43,6 +43,11 @@ func TestPunishReasonColumns(t *testing.T) {
 			wantReason := storage.ReasonCaptcha
 			if tc.noreply {
 				wantReason = storage.ReasonNoReply
+				// Серия существует только в «с ответом»: цикл сверяет режим
+				// перед карой и без него снял бы ожидание пассом.
+				if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+					t.Fatal(err)
+				}
 				if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 					t.Fatal(err)
 				}
@@ -82,6 +87,11 @@ func TestRestorePendingRepliesGrace(t *testing.T) {
 	t.Run("истёкшая за простой — грейс и noreply-кик", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
+		// Серия живёт только в режиме «с ответом»: иначе restore снимает её
+		// компенсирующим пассом (см. TestDisarmReplyWaits / backstop режима).
+		if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+			t.Fatal(err)
+		}
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
 		}
@@ -120,6 +130,9 @@ func TestRestorePendingRepliesGrace(t *testing.T) {
 	t.Run("живая — восстановлена с исходным дедлайном", func(t *testing.T) {
 		b, db, _ := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
+		if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+			t.Fatal(err)
+		}
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
 			ChatID: testChatID, UserID: testUserID,
 			ExpiresAt: time.Now().Add(time.Minute),

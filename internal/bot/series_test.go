@@ -275,7 +275,7 @@ func TestReplyWaitSeriesThreeStages(t *testing.T) {
 	}
 
 	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
-	if _, ok := b.sendGreetingAnchor(ctx, s, testChatID, testUserID, 77, 1); !ok {
+	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 77, 1); !ok {
 		t.Fatal("anchor send failed")
 	}
 	b.maybeArmReplyWait(s, testChatID, testUserID, 77)
@@ -323,7 +323,7 @@ func TestReplyWaitReminderFailDisarmsWithPass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := b.sendGreetingAnchor(ctx, s, testChatID, testUserID, 0, 1); !ok {
+	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 0, 1); !ok {
 		t.Fatal("anchor send failed")
 	}
 	b.maybeArmReplyWait(s, testChatID, testUserID, 0)

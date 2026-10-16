@@ -130,12 +130,22 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     -- JSON-массив telego.MessageEntity кастомного приветствия (жирный/курсив,
     -- офсеты в UTF-16); NULL = шаблон плоский, рендер экранирует как раньше.
     greeting_entities       TEXT,
+    -- Режим «после капчи»: none | greet | reply. NULL = деривация из
+    -- легаси-флагов (reply_check_enabled → reply, greeting_enabled → greet,
+    -- иначе none). Легаси-флаги перестали быть UI-тумблерами, но остаются
+    -- источником деривации и полем одноразовой миграции текстов.
+    welcome_mode            TEXT,
+    reply_text              TEXT, -- NULL = встроенный текст проверки (режим reply)
+    -- JSON-массив telego.MessageEntity кастомного текста ПРОВЕРКИ (режим
+    -- reply); офсеты в UTF-16; NULL = шаблон плоский. greeting_entities —
+    -- для режима greet.
+    reply_entities          TEXT,
     silent_announce_enabled INTEGER NOT NULL DEFAULT 1,
     spam_check_enabled      INTEGER NOT NULL DEFAULT 0,
     spam_threshold          INTEGER, -- легаси (вердикт теперь бинарный); колонка живёт ради миграций
     spam_whitelist_msgs     INTEGER, -- NULL = 5; сообщений до белого списка
     spam_vote_margin        INTEGER, -- NULL = 3; перевес голосов для вердикта
-    reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- режим «требовать ответа»
+    reply_check_enabled     INTEGER NOT NULL DEFAULT 0, -- легаси: деривация welcome_mode, когда он NULL; UI не переключает
     reply_check_seconds     INTEGER, -- легаси (серия напоминаний живёт на captcha_interval_minutes); не читается
     ephemeral_enabled       INTEGER NOT NULL DEFAULT 0, -- служебные сообщения эфемерно (Bot API 10.2)
     quarantine_enabled      INTEGER NOT NULL DEFAULT 0, -- карантин новичков: только текст без ссылок/пересылок

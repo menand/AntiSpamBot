@@ -457,6 +457,12 @@ func TestWaitReplyTimeoutLadder(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			b, db, fc := newFlowBot(t)
+			// Цикл сверяет режим чата перед карой: без «с ответом» серия
+			// снимается компенсирующим пассом, и лестница наказаний здесь
+			// не проверялась бы вовсе.
+			if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+				t.Fatal(err)
+			}
 			for range tc.preAttempts {
 				if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
 					t.Fatal(err)

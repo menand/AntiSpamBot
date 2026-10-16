@@ -141,13 +141,15 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO chat_settings (chat_id, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
+			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities,
+			welcome_mode, reply_text, reply_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
 			reply_check_enabled, reply_check_seconds, ephemeral_enabled,
 			quarantine_enabled, quarantine_hours)
 		SELECT ?, greeting_enabled, max_attempts,
 			captcha_timeout_seconds, captcha_interval_minutes, daily_stats_enabled, daily_stats_utc_hour,
-			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
+			last_daily_stats_day, captcha_mode, greeting_text, greeting_entities,
+			welcome_mode, reply_text, reply_entities, silent_announce_enabled,
 			spam_check_enabled, spam_threshold, spam_whitelist_msgs, spam_vote_margin,
 			reply_check_enabled, reply_check_seconds, ephemeral_enabled,
 			quarantine_enabled, quarantine_hours

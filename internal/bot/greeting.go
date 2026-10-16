@@ -15,42 +15,55 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
-// Кастомные шаблоны приветствия ограничены сильно ниже телеграмного лимита
-// 4096 символов, чтобы итоговый текст (шаблон + разметка mention) влезал
-// всегда.
+// Кастомные шаблоны приветствия/проверки ограничены сильно ниже телеграмного
+// лимита 4096 символов, чтобы итоговый текст (шаблон + разметка mention)
+// влезал всегда.
 const maxGreetingRunes = 500
 
-// greetInputTTL ограничивает жизнь взведённого запроса «пришли мне текст
-// приветствия». Без него админ, нажавший ✏️ и ушедший, через несколько дней
-// молча превратил бы случайное личное сообщение в приветствие чата.
+// Встроенные тексты стадий «после капчи»: приветствие (режим greet) и
+// сообщение-проверка (режим reply — к нему replyRequirementLine добавляет
+// строку-требование стадии). {name} заменяется упоминанием новичка.
+const (
+	defaultGreetingText = "🎉 Добро пожаловать, {name}!"
+	defaultReplyText    = "привет {name}. добро пожаловать в чат. а ты точно не спамер? скажи как тебя в этот чат занесло?"
+)
+
+// quarantineNoticeLine объявляется в теле якоря: новичок сразу знает, что
+// после капчи он ограничен «только текстом», а не узнаёт это первым удалённым
+// сообщением. Строка идёт в тело якоря, поэтому повторяется и на напоминаниях.
+const quarantineNoticeLine = "\n🧫 Карантин новичка: пока можно писать только текст — без ссылок и пересылок."
+
+// greetInputTTL ограничивает жизнь взведённого запроса «пришли мне текст».
+// Без него админ, нажавший ✏️ и ушедший, через несколько дней молча превратил
+// бы случайное личное сообщение в текст чата.
 const greetInputTTL = 15 * time.Minute
 
-// greetInputState — взведённый запрос: для какого чата текст и когда админ
-// его взвёл.
+// greetInputState — взведённый запрос: для какого чата текст, какого рода
+// (приветствие или проверка — род фиксируется в момент арма) и когда взведён.
 type greetInputState struct {
 	chatID  int64
+	kind    welcomeMode // welcomeGreet | welcomeReply
 	armedAt time.Time
 }
 
-// maybeSendGreeting шлёт приветствие (первая стадия серии) и возвращает
-// message_id и доставку. Взвод reply-ожидания — НЕ здесь: onSuccess делает
-// это сразу после release, до этого сетевого round-trip'а, иначе юзер успел
-// бы написать в окне release→arm и был бы кикнут за молчание, хотя ответил.
-func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID int) (int, bool) {
-	msgID, sent := b.sendGreetingAnchor(ctx, s, chatID, userID, threadID, 1)
+// maybeSendGreeting шлёт якорь стадии 1 серии (или просто приветствие, когда
+// второй проверки нет) и возвращает message_id и доставку. Взвод reply-ожидания
+// — НЕ здесь: onSuccess делает это сразу после release, до этого сетевого
+// round-trip'а, иначе юзер успел бы написать в окне release→arm и был бы кикнут
+// за молчание, хотя ответил.
+func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, mode welcomeMode, chatID, userID int64, threadID int) (int, bool) {
+	msgID, sent := b.sendGreetingAnchor(ctx, s, mode, chatID, userID, threadID, 1)
 	return msgID, sent
 }
 
-// sendGreetingAnchor шлёт якорное сообщение стадии stage серии «ответь на
-// приветствие» (и просто приветствие, когда reply-check выключен): тело
-// приветствия + строка-требование стадии. Напоминания (стадии 2+) повторяют
-// то же тело приветствия с усиленной строкой — три сообщения, как в серии
-// капчи. Возвращает message_id отправленного сообщения (0 — не отправлено)
-// и флаг доставки.
-func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, chatID, userID int64, threadID, stage int) (int, bool) {
-	// При включённом «требовать ответа» приветствие шлётся ВСЕГДА, даже с
-	// выключенным тумблером приветствия: требованию нужен якорь-сообщение.
-	if !s.GreetingEnabled && !s.ReplyCheckEnabled {
+// sendGreetingAnchor шлёт якорное сообщение стадии stage: тело режима
+// (приветствие или проверка) + строка-требование стадии (только reply).
+// Напоминания (стадии 2+) повторяют то же тело с усиленной строкой — три
+// сообщения, как в серии капчи. Возвращает message_id отправленного сообщения
+// (0 — не отправлено) и флаг доставки. Режим none — сообщений нет вовсе
+// ((0, true): «доставлять было нечего», вызывающий не считает это провалом).
+func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, mode welcomeMode, chatID, userID int64, threadID, stage int) (int, bool) {
+	if mode == welcomeNone {
 		return 0, true
 	}
 	infos, err := b.db.GetUserInfos(ctx, []int64{userID})
@@ -58,17 +71,7 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 		b.log.Warn("fetch user info for greeting", "err", err)
 	}
 	mention := mentionOrID(infos, userID)
-	text := renderGreeting(s.GreetingText.String, s.GreetingEntities.String, mention)
-	if s.ReplyCheckEnabled {
-		text += replyRequirementLine(stage, minutesGen(int(b.effectiveStageInterval(s).Minutes())))
-	}
-	// Карантин объявляем прямо в приветствии: новичок сразу знает, что после
-	// капчи он ограничен «только текстом», а не узнаёт это первым удалённым
-	// сообщением. Строка идёт в тело якоря, поэтому повторяется и на
-	// напоминаниях — консистентно со стадией серии.
-	if s.QuarantineEnabled {
-		text += "\n🧫 Карантин новичка: пока можно писать только текст — без ссылок и пересылок."
-	}
+	text := welcomeAnchorText(s, mode, stage, int(b.effectiveStageInterval(s).Minutes()), mention)
 
 	params := tu.Message(tu.ID(chatID), text).WithParseMode(telego.ModeHTML)
 	if threadID != 0 {
@@ -76,8 +79,9 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	}
 	// Кнопки «✅ Впустить» и «🚫 Спам» — для админов: впустить вручную
 	// или пометить как спамера (с подтверждением → бан во всех чатах).
-	// Приветствие всегда публичное (не эфемерное), кнопки видны админам.
-	if s.ReplyCheckEnabled {
+	// Нужны только в режиме проверки, где ждут ответ; приветствие всегда
+	// публичное (не эфемерное), кнопки видны админам.
+	if mode == welcomeReply {
 		kb := tu.InlineKeyboard(
 			tu.InlineKeyboardRow(
 				tu.InlineKeyboardButton("✅ Впустить (для админов)").
@@ -88,9 +92,8 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 		params = params.WithReplyMarkup(kb)
 	}
 	// Ретраится той же лестницей, что отправка капчи: 429 прилетает ровно во
-	// время масс-джойна, а при включённом reply-check провал здесь означает
-	// кик юзера за «молчание» — приветствие-якорь с требованием он никогда
-	// не видел.
+	// время масс-джойна, а в режиме проверки провал здесь означает кик юзера
+	// за «молчание» — тело с требованием он никогда не видел.
 	var sent *telego.Message
 	if err = retryTG(ctx, func() error {
 		var e error
@@ -108,15 +111,40 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, ch
 	return sent.MessageID, true
 }
 
-// renderGreeting собирает текст приветствия. Шаблон с сохранёнными
+// welcomeAnchorText собирает тело якоря стадии stage так, как его увидит
+// новичок: тело режима (шаблон чата или встроенный дефолт) + строка-требование
+// (только reply) + объявление карантина (оба говорящих режима). Чистая
+// функция — ею же рендерятся предпросмотры в ЛС администратора.
+func welcomeAnchorText(s storage.ChatSettings, mode welcomeMode, stage, intervalMin int, mention string) string {
+	template, entities, def := welcomeTextSource(s, mode)
+	text := renderWelcome(template, entities, mention, def)
+	if mode == welcomeReply {
+		text += replyRequirementLine(stage, minutesGen(intervalMin))
+	}
+	if s.QuarantineEnabled {
+		text += quarantineNoticeLine
+	}
+	return text
+}
+
+// welcomeTextSource — шаблон/entities/встроенный дефолт тела для режима:
+// greet читает пару приветствия, reply — пару проверки.
+func welcomeTextSource(s storage.ChatSettings, mode welcomeMode) (template, entitiesJSON, def string) {
+	if mode == welcomeReply {
+		return s.ReplyText.String, s.ReplyEntities.String, defaultReplyText
+	}
+	return s.GreetingText.String, s.GreetingEntities.String, defaultGreetingText
+}
+
+// renderWelcome собирает текст тела: кастомный шаблон с сохранёнными
 // entities (админ форматировал жирным/курсивом) конвертируется в HTML
 // конвертером entitiesToHTML — он сам экранирует пользовательский текст и
 // НЕ тримит его (офсеты entities считаются от сырой строки). Плоский шаблон
-// HTML-экранируется как раньше. Плейсхолдеры {name} заменяются разметкой
-// mention ПОСЛЕ экранирования. Пустой шаблон = встроенный дефолт.
-func renderGreeting(template, entitiesJSON, mention string) string {
+// HTML-экранируется. Плейсхолдеры {name} заменяются разметкой mention ПОСЛЕ
+// экранирования. Пустой шаблон = встроенный дефолт def.
+func renderWelcome(template, entitiesJSON, mention, def string) string {
 	if strings.TrimSpace(template) == "" {
-		return fmt.Sprintf("🎉 Добро пожаловать, %s!", mention)
+		return strings.ReplaceAll(def, "{name}", mention)
 	}
 	if entitiesJSON != "" {
 		var ents []telego.MessageEntity
@@ -127,42 +155,43 @@ func renderGreeting(template, entitiesJSON, mention string) string {
 	return strings.ReplaceAll(html.EscapeString(strings.TrimSpace(template)), "{name}", mention)
 }
 
-// handleGreetingCommand — no-op. Приветствие тогглится через DM-меню
-// (/chats → выбрать чат → кнопка «🎉 Приветствие»). Хендлер зарегистрирован,
+// handleGreetingCommand — no-op. Приветствие/проверка настраиваются через
+// DM-меню (/chats → выбрать чат → «✉️ После капчи»). Хендлер зарегистрирован,
 // чтобы /greeting в группе молча проглатывался.
 func (b *Bot) handleGreetingCommand(_ *th.Context, _ telego.Message) error {
 	return nil
 }
 
 // setGreetingInputPending взводит для юзера состояние «следующее личное
-// сообщение — новый текст приветствия чата chatID».
-func (b *Bot) setGreetingInputPending(userID, chatID int64) {
+// сообщение — новый текст (kind) для чата chatID».
+func (b *Bot) setGreetingInputPending(userID, chatID int64, kind welcomeMode) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
-	b.greetInput[userID] = greetInputState{chatID: chatID, armedAt: time.Now()}
+	b.greetInput[userID] = greetInputState{chatID: chatID, kind: kind, armedAt: time.Now()}
 }
 
-// takeGreetingInput забирает взведённое состояние ввода приветствия.
-// expired=true значит, что запрос был, но провисел дольше greetInputTTL —
-// вызывающий обязан сказать админу, что текст НЕ сохранён, а не промолчать.
-func (b *Bot) takeGreetingInput(userID int64) (chatID int64, ok, expired bool) {
+// takeGreetingInput забирает взведённое состояние ввода. expired=true значит,
+// что запрос был, но провисел дольше greetInputTTL — вызывающий обязан
+// сказать админу, что текст НЕ сохранён, а не промолчать. kind возвращается и
+// на expired-пути, чтобы отказ был назван по роду текста.
+func (b *Bot) takeGreetingInput(userID int64) (chatID int64, kind welcomeMode, ok, expired bool) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
 	st, found := b.greetInput[userID]
 	if !found {
-		return 0, false, false
+		return 0, "", false, false
 	}
 	delete(b.greetInput, userID)
 	if time.Since(st.armedAt) > greetInputTTL {
-		return 0, false, true
+		return 0, st.kind, false, true
 	}
-	return st.chatID, true, false
+	return st.chatID, st.kind, true, false
 }
 
-// cancelGreetingInputOnCommand разряжает взведённый ввод приветствия, когда
-// админ отправил в ЛС команду. Зарегистрированные команды (/start, /help,
-// /stats...) перехватываются своими хендлерами раньше handlePrivateText и без
-// этого разряда оставляли бы ввод висеть: следующее обычное сообщение молча
+// cancelGreetingInputOnCommand разряжает взведённый ввод текста, когда админ
+// отправил в ЛС команду. Зарегистрированные команды (/start, /help, /stats...)
+// перехватываются своими хендлерами раньше handlePrivateText и без этого
+// разряда оставляли бы ввод висеть: следующее обычное сообщение молча
 // превратилось бы в шаблон. Подтверждения те же, что у команд, дошедших до
 // handlePrivateText («отменён» / «устарел»). Зовётся из pre-routing
 // middleware; некомандные сообщения не трогает.
@@ -173,24 +202,27 @@ func (b *Bot) cancelGreetingInputOnCommand(ctx context.Context, message telego.M
 	if !strings.HasPrefix(strings.TrimSpace(message.Text), "/") {
 		return
 	}
-	if _, ok, expired := b.takeGreetingInput(message.From.ID); ok {
+	if _, kind, ok, expired := b.takeGreetingInput(message.From.ID); ok {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"Ок, ввод текста приветствия отменён.").WithParseMode(telego.ModeHTML))
+			fmt.Sprintf("Ок, ввод текста %s отменён.", welcomeTextKindNoun(kind))).
+			WithParseMode(telego.ModeHTML))
 	} else if expired {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID),
-			"⌛ Запрос на текст приветствия устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.").
+			fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.",
+				welcomeTextKindNoun(kind))).
 			WithParseMode(telego.ModeHTML))
 	}
 }
 
 // handlePrivateText получает некомандные личные сообщения. Его единственная
-// работа — флоу ввода текста приветствия; всё остальное игнорируется (та же
+// работа — флоу ввода текста «после капчи»; всё остальное игнорируется (та же
 // тишина, что была до появления этого флоу).
 func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if message.From == nil {
 		return nil
 	}
-	chatID, ok, expired := b.takeGreetingInput(message.From.ID)
+	chatID, kind, ok, expired := b.takeGreetingInput(message.From.ID)
+	noun := welcomeTextKindNoun(kind)
 
 	reply := func(text string) {
 		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(message.Chat.ID), text).
@@ -200,7 +232,7 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if expired {
 		// Единственный abort-путь без ответа был бы здесь — а именно тут
 		// админ мог 20 минут сочинять текст. Честно скажем, что не сохранили.
-		reply("⌛ Запрос на текст приветствия устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.")
+		reply(fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.", noun))
 		return nil
 	}
 	if !ok {
@@ -213,6 +245,15 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 		reply("У тебя больше нет прав на этот чат — текст не сохранён.")
 		return nil
 	}
+	// Чат мог стать необслуживаемым (отклонён владельцем, выпал из
+	// ALLOWED_CHATS): настройки мёртвого чата не пишем — они бы активировались
+	// при его возврате (та же причина, что у гейта chatCallbackTarget).
+	if !b.chatServiceable(chatID) {
+		reply("Чат больше не обслуживается — текст не сохранён.")
+		return nil
+	}
+
+	resetLine, savedLine := welcomeTextActionNames(kind)
 
 	text := strings.TrimSpace(message.Text)
 	switch {
@@ -220,20 +261,20 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 		// Медиа/стикер/пусто — продолжаем ждать настоящий текст. Перевзвод
 		// после отправки: упавшая подсказка не должна оставить взведённый
 		// ввод без промпта (следующее ЛС молча стало бы шаблоном).
-		reply("Нужно обычное текстовое сообщение. Пришли текст приветствия, «-» для сброса или /cancel для отмены.")
-		b.setGreetingInputPending(message.From.ID, chatID)
+		reply(fmt.Sprintf("Нужно обычное текстовое сообщение. Пришли текст %s, «-» для сброса или /cancel для отмены.", noun))
+		b.setGreetingInputPending(message.From.ID, chatID, kind)
 		return nil
 	case strings.HasPrefix(text, "/"):
 		// Любая команда (включая /cancel) отменяет флоу ввода.
-		reply("Ок, ввод текста приветствия отменён.")
+		reply(fmt.Sprintf("Ок, ввод текста %s отменён.", noun))
 		return nil
 	case text == "-":
-		if err := b.db.SetGreetingText(b.runCtx, chatID, nil, nil); err != nil {
-			b.log.Warn("reset greeting text", "err", err, "chat", chatID)
+		if err := b.setWelcomeText(chatID, kind, nil, nil); err != nil {
+			b.log.Warn("reset welcome text", "err", err, "chat", chatID, "kind", kind)
 			reply("Не получилось сохранить, попробуй ещё раз.")
 			return nil
 		}
-		reply("Вернул стандартное приветствие:\n\n" + renderGreeting("", "", b.previewMention(message.From)))
+		reply(resetLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 		return nil
 	}
 
@@ -251,21 +292,34 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 
 	if len([]rune(saved)) > maxGreetingRunes {
 		reply(fmt.Sprintf("Слишком длинно (больше %d символов). Сократи и пришли ещё раз.", maxGreetingRunes))
-		b.setGreetingInputPending(message.From.ID, chatID)
+		b.setGreetingInputPending(message.From.ID, chatID, kind)
 		return nil
 	}
 
-	if err := b.db.SetGreetingText(b.runCtx, chatID, &saved, entJSON); err != nil {
-		b.log.Warn("set greeting text", "err", err, "chat", chatID)
+	if err := b.setWelcomeText(chatID, kind, &saved, entJSON); err != nil {
+		b.log.Warn("set welcome text", "err", err, "chat", chatID, "kind", kind)
 		reply("Не получилось сохранить, попробуй ещё раз.")
 		return nil
 	}
-	entPreview := ""
-	if entJSON != nil {
-		entPreview = *entJSON
-	}
-	reply("Сохранил! Так будет выглядеть приветствие:\n\n" + renderGreeting(saved, entPreview, b.previewMention(message.From)))
+	reply(savedLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 	return nil
+}
+
+// setWelcomeText пишет текст по роду ввода: приветствие → greeting_text,
+// проверка → reply_text (со своими entities).
+func (b *Bot) setWelcomeText(chatID int64, kind welcomeMode, text, entitiesJSON *string) error {
+	if kind == welcomeReply {
+		return b.db.SetReplyText(b.runCtx, chatID, text, entitiesJSON)
+	}
+	return b.db.SetGreetingText(b.runCtx, chatID, text, entitiesJSON)
+}
+
+// welcomePreview рендерит якорь стадии 1 так, как его увидит новичок —
+// предпросмотр ровно того, что увидит чат (включая строку-требование и
+// карантинную сноску). u — админ, чьё имя подставляется вместо {name}.
+func (b *Bot) welcomePreview(chatID int64, kind welcomeMode, u *telego.User) string {
+	s := b.chatSettings(b.runCtx, chatID)
+	return welcomeAnchorText(s, kind, 1, int(b.effectiveStageInterval(s).Minutes()), b.previewMention(u))
 }
 
 // previewMention рендерит mention самого админа — предпросмотр приветствия

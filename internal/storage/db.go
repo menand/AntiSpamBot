@@ -82,6 +82,9 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"pending_captchas", "stage", `ALTER TABLE pending_captchas ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "stage", `ALTER TABLE pending_replies ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "thread_id", `ALTER TABLE pending_replies ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`},
+		{"chat_settings", "welcome_mode", `ALTER TABLE chat_settings ADD COLUMN welcome_mode TEXT`},
+		{"chat_settings", "reply_text", `ALTER TABLE chat_settings ADD COLUMN reply_text TEXT`},
+		{"chat_settings", "reply_entities", `ALTER TABLE chat_settings ADD COLUMN reply_entities TEXT`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}
@@ -110,6 +113,27 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	`); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("migrate captcha_timeout_seconds to interval minutes: %w", err)
+	}
+
+	// Разовая миграция текстов под режимы «после капчи»: у чатов с включённым
+	// «требовать ответа» greeting_text фактически был текстом ПРОВЕРКИ (якорем
+	// серии напоминаний) — в новой модели его читает reply_text, а greeting_text
+	// обслуживает обычное приветствие. ПЕРЕНОСИМ (не копируем): при переключении
+	// на «Приветствие» такой чат получит стандартный тёплый текст, а не старое
+	// «иначе придётся тебя забанить». Идемпотентно: после переноса greeting_text
+	// пуст, а reply_text заполнен — оба условия не срабатывают; welcome_mode
+	// IS NULL не даёт задеть чаты, уже переключённые явным выбором режима.
+	if _, err := raw.ExecContext(ctx, `
+		UPDATE chat_settings
+		SET reply_text = greeting_text,
+		    reply_entities = greeting_entities,
+		    greeting_text = NULL,
+		    greeting_entities = NULL
+		WHERE reply_check_enabled = 1 AND welcome_mode IS NULL
+		  AND greeting_text IS NOT NULL AND reply_text IS NULL
+	`); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("migrate greeting text to reply text: %w", err)
 	}
 
 	return &DB{sql: raw}, nil

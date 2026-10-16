@@ -151,6 +151,75 @@ func TestSetGreetingText(t *testing.T) {
 	}
 }
 
+func TestSetReplyText(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	s, _ := db.GetChatSettings(ctx, 1)
+	if s.ReplyText.Valid || s.ReplyEntities.Valid {
+		t.Error("default reply_text/reply_entities must be NULL")
+	}
+
+	text := "привет {name}! скажи, как тебя занесло?"
+	ents := `[{"type":"bold","offset":0,"length":5}]`
+	if err := db.SetReplyText(ctx, 1, &text, &ents); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.ReplyText.Valid || s.ReplyText.String != text {
+		t.Errorf("got %+v, want %q", s.ReplyText, text)
+	}
+	if !s.ReplyEntities.Valid || s.ReplyEntities.String != ents {
+		t.Errorf("got %+v, want %q", s.ReplyEntities, ents)
+	}
+
+	// Сброс через nil → обратно в NULL (встроенный дефолт).
+	if err := db.SetReplyText(ctx, 1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.ReplyText.Valid || s.ReplyEntities.Valid {
+		t.Errorf("expected NULL after clear, got %+v / %+v", s.ReplyText, s.ReplyEntities)
+	}
+}
+
+func TestSetWelcomeMode(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+
+	s, _ := db.GetChatSettings(ctx, 1)
+	if s.WelcomeMode.Valid {
+		t.Error("default welcome_mode must be NULL (derived from legacy flags)")
+	}
+
+	if err := db.SetWelcomeMode(ctx, 1, "reply"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.WelcomeMode.Valid || s.WelcomeMode.String != "reply" {
+		t.Errorf("got %+v, want reply", s.WelcomeMode)
+	}
+
+	// Смена режима перезаписывает значение (не апсерт-мусор).
+	if err := db.SetWelcomeMode(ctx, 1, "none"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if !s.WelcomeMode.Valid || s.WelcomeMode.String != "none" {
+		t.Errorf("got %+v, want none", s.WelcomeMode)
+	}
+
+	// Режим не трогает тексты: welcome_mode — отдельная колонка.
+	text := "привет {name}"
+	if err := db.SetGreetingText(ctx, 1, &text, nil); err != nil {
+		t.Fatal(err)
+	}
+	s, _ = db.GetChatSettings(ctx, 1)
+	if s.WelcomeMode.String != "none" || !s.GreetingText.Valid {
+		t.Errorf("mode/text interfere: mode=%+v text=%+v", s.WelcomeMode, s.GreetingText)
+	}
+}
+
 func TestChatsNeedingDailyStats(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

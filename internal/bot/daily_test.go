@@ -18,21 +18,37 @@ func TestReportLine(t *testing.T) {
 			"«Бег» — без событий"},
 		{"normal day", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Joined: 5, Passed: 4, Kicked: 1},
-			"«Бег» — вступило 5, прошло 4, вышли сами 0, кик 1, бан 0"},
+			"«Бег» — вступило 5, прошло 4, вышли сами 0, кик 1, бан 0, сообщений: 0"},
 		{"bans merge spam", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Banned: 1, SpamBanned: 2},
-			"«Бег» — вступило 0, прошло 0, вышли сами 0, кик 0, бан 3 (из них спам 2)"},
+			"«Бег» — вступило 0, прошло 0, вышли сами 0, кик 0, бан 3 (из них спам 2), сообщений: 0"},
 		{"title escaped", storage.ChatInfo{ChatID: -5, Title: "A<b>&"}, storage.Stats{Passed: 1},
-			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0"},
+			"«A&lt;b&gt;&amp;» — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0, сообщений: 0"},
 		{"public chat linked", storage.ChatInfo{ChatID: -5, Title: "Бег", Username: "run_chat"},
 			storage.Stats{Passed: 1},
-			`<a href="https://t.me/run_chat">«Бег»</a> — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0`},
+			`<a href="https://t.me/run_chat">«Бег»</a> — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0, сообщений: 0`},
 		{"left counted", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{Joined: 5, Passed: 3, Kicked: 1, Left: 1},
-			"«Бег» — вступило 5, прошло 3, вышли сами 1, кик 1, бан 0"},
+			"«Бег» — вступило 5, прошло 3, вышли сами 1, кик 1, бан 0, сообщений: 0"},
 		{"messages only is not empty", storage.ChatInfo{ChatID: -5, Title: "Бег"},
 			storage.Stats{MsgOldtimer: 12},
 			"«Бег» — сообщений: 12, событий воронки нет"},
+		// Хвост «в процессе» — та же формула, что на экране статистики
+		// (pendingCount): джойн без исхода виден сразу в отчёте.
+		{"pending shown", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Joined: 7, Kicked: 5, Left: 1},
+			"«Бег» — вступило 7, прошло 0, вышли сами 1, кик 5, бан 0, в процессе 1, сообщений: 0"},
+		// Сообщения отчёта идут всегда, даже когда событий воронки нет числами.
+		{"messages always appended", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Joined: 2, Passed: 1, MsgNewcomer: 3, MsgOldtimer: 100},
+			"«Бег» — вступило 2, прошло 1, вышли сами 0, кик 0, бан 0, в процессе 1, сообщений: 103"},
+		// Перевычитка (кик старожила) даёт отрицательный pending — молчит.
+		{"negative pending suppressed", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Passed: 1, ModKicked: 3},
+			"«Бег» — вступило 0, прошло 1, вышли сами 0, кик 0, бан 0, админ-команды 3, сообщений: 0"},
+		{"aborted closes funnel", storage.ChatInfo{ChatID: -5, Title: "Бег"},
+			storage.Stats{Joined: 2, Aborted: 1, MsgOldtimer: 5},
+			"«Бег» — вступило 2, прошло 0, вышли сами 0, кик 0, бан 0, не проверено 1, в процессе 1, сообщений: 5"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -23,6 +23,9 @@ import (
 //	menu:add                — инструкция «как добавить меня в группу»
 //	menu:chats              — список чатов
 //	menu:stats:<chat>:<p>   — статистика чата за период p ∈ {day,yesterday,daybefore,week,month,all}
+//	menu:welcome:<chat>     — подэкран «После капчи» (режимы + правка текста)
+//	menu:wset:<chat>:<mode> — выбор режима после капчи, mode ∈ {none,greet,reply}
+//	menu:wtxt:<chat>        — ввод своего текста «после капчи» (род — по режиму)
 //	menu:leave:<chat>       — владелец: экран подтверждения выхода из чата
 //	menu:leavec:<chat>      — владелец: выход подтверждён, вывести бота из чата
 const (
@@ -141,55 +144,58 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 			return nil
 		}
 		return b.renderChatSettings(ctx, query, chatID)
-	case "gr":
-		// Тоггл приветствия. Хвост легаси-формата menu:gr:chat:period со
-		// устаревших inline-кнопок игнорируется (см. chatCallbackTarget).
+	case "gr", "rpl":
+		// Легаси-тумблеры «Приветствие» / «Ждать ответ» со старых клавиатур:
+		// в новой модели режим один и живёт в подэкране «После капчи», поэтому
+		// кнопка ничего не переключает, а просто перерисовывает настройки —
+		// админ видит актуальный режим и вход в подэкран.
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
 			return nil
 		}
-		return b.toggleChatSetting(ctx, query, chatID,
-			func(s storage.ChatSettings) bool { return s.GreetingEnabled },
-			b.db.SetGreetingEnabled, "greeting_enabled")
-	case "grtxt":
-		// Взводим флоу «пришли мне новый текст приветствия»: следующее личное
-		// сообщение юзера станет шаблоном приветствия чата.
+		return b.renderChatSettings(ctx, query, chatID)
+	case "welcome":
+		// Подэкран «После капчи»: выбор режима + правка текста.
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
 		if !ok {
 			return nil
 		}
-		// Экран настроек: читаем напрямую и прерываемся на ошибке, иначе
-		// покажем «стандартный» вместо реально сохранённого текста. Арм
-		// состояния — только после удачных чтения И отправки промпта:
-		// упавшая отправка (429, сеть) оставила бы взведённый ввод без
-		// промпта, и следующее обычное ЛС админа молча стало бы шаблоном.
-		s, err := b.db.GetChatSettings(ctx, chatID)
-		if err != nil {
-			b.log.Warn("get chat settings", "err", err, "chat", chatID)
+		return b.renderWelcomeMenu(ctx, query, chatID)
+	case "wset":
+		// Выбор режима «после капчи»: none | greet | reply.
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
+		if !ok {
 			return nil
 		}
-		current := "стандартный"
-		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
-			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
-		}
-		text := fmt.Sprintf(
-			"✏️ Пришли мне текст приветствия для чата <b>%s</b> одним сообщением.\n\n"+
-				"Подстановка: <code>{name}</code> — имя новичка.\n"+
-				"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n"+
-				"Запрос действует 15 минут.\n\n"+
-				"Текущий текст: %s",
-			html.EscapeString(b.chatTitle(ctx, chatID)), current)
-		if _, serr := b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
-			WithParseMode(telego.ModeHTML)); serr != nil {
-			b.log.Warn("send greeting input prompt", "err", serr, "chat", chatID)
-			// На query уже ответили в начале хендлера — второй Answer
-			// Telegram отбросил бы молча, поэтому объясняем сообщением.
-			_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
-				"⚠️ Не получилось отправить запрос — попробуй ещё раз."))
+		mode := welcomeMode(parts[3])
+		// Подделанный callback не должен записать произвольную строку: пишем
+		// только константы, остальное тихо игнорируем (как битые пресеты).
+		if mode != welcomeNone && mode != welcomeGreet && mode != welcomeReply {
 			return nil
 		}
-		b.setGreetingInputPending(query.From.ID, chatID)
-		return nil
+		if err := b.db.SetWelcomeMode(b.runCtx, chatID, string(mode)); err != nil {
+			b.log.Warn("set welcome_mode", "err", err, "chat", chatID)
+			// Режим не записался — живое требование не снимаем (оно всё ещё
+			// обещано) и показываем старое состояние.
+			return b.renderWelcomeMenu(ctx, query, chatID)
+		}
+		// Уход из «с ответом» снимает живые серии: требование больше не
+		// обещано, и молчание не должно докарать киком — та же дисциплина,
+		// что у /mute (см. disarmReplyWaits). Страховка на крэш в этом окне
+		// — проверка режима в restorePendingReplies.
+		if mode != welcomeReply {
+			b.disarmReplyWaits(chatID)
+		}
+		return b.renderWelcomeMenu(ctx, query, chatID)
+	case "grtxt", "wtxt":
+		// Флоу «пришли мне новый текст»: род (приветствие или проверка)
+		// берётся из ТЕКУЩЕГО режима чата. grtxt — легаси-кнопка со старых
+		// клавиатур, обрабатывается тем же путём (контекстно по режиму).
+		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
+		if !ok {
+			return nil
+		}
+		return b.startWelcomeTextInput(ctx, query, chatID)
 	case "max":
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 4)
 		if !ok {
@@ -227,15 +233,6 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		return b.toggleChatSetting(ctx, query, chatID,
 			func(s storage.ChatSettings) bool { return s.DailyStatsEnabled },
 			b.db.SetDailyStatsEnabled, "daily_stats_enabled")
-	case "rpl":
-		// Тоггл режима «требовать ответа на приветствие».
-		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
-		if !ok {
-			return nil
-		}
-		return b.toggleChatSetting(ctx, query, chatID,
-			func(s storage.ChatSettings) bool { return s.ReplyCheckEnabled },
-			b.db.SetReplyCheckEnabled, "reply_check_enabled")
 	case "eph":
 		// Тоггл эфемерных служебных сообщений (капча и ответы мод-команд).
 		chatID, ok := b.chatCallbackTarget(ctx, query, parts, 3)
@@ -797,9 +794,10 @@ func (b *Bot) renderChatStats(ctx *th.Context, query telego.CallbackQuery, chatI
 		return nil
 	}
 
-	title := b.chatTitle(ctx, chatID)
+	// Заголовок — ссылкой (как в ЛС-отчёте и остальных экранах): тап открывает
+	// чат. chatLink экранирует титул сам.
 	text := fmt.Sprintf("<b>%s</b>\n\n%s",
-		html.EscapeString(title),
+		b.chatLink(ctx, chatID),
 		renderStats(p, periodLabel(p), v.s, b.cfg.NewcomerDays,
 			5, v.newMembers, v.topWriters, v.topFailers, v.banned, v.infos))
 
@@ -850,11 +848,10 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	digestHourUTC := b.effectiveDailyHour(s)
 	captchaMode := effectiveCaptchaMode(s)
 	qrHours := int(b.effectiveQuarantineDuration(s).Hours())
+	mode := effectiveWelcomeMode(s)
 
-	greetingText := "стандартный"
-	if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
-		greetingText = "свой"
-	}
+	// «Текст: свой/стандартный» — по паре, которую читает текущий режим.
+	modeTextState := welcomeTextState(s, mode)
 
 	spamWhitelist := effectiveSpamWhitelist(s)
 	spamMargin := effectiveSpamVoteMargin(s)
@@ -863,24 +860,21 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		spamLabel = "нет ключа 🔑"
 	}
 
-	title := b.chatTitle(ctx, chatID)
 	text := fmt.Sprintf(
 		"⚙️ <b>Настройки: %s</b>\n\n"+
 			"🧩 Капча: <b>%s</b>\n"+
 			"🔄 Попыток до бана: <b>%d</b>\n"+
 			"⏱ Интервал напоминаний: <b>%d мин</b> (3 сообщения: капча → напоминание → последнее предупреждение)\n"+
-			"🎉 Приветствие: <b>%s</b> (текст: %s)\n"+
-			"💬 Требовать ответа на приветствие: <b>%s</b> (серия как у капчи, интервал ⏱ выше)\n"+
+			"✉️ После капчи: <b>%s</b>%s\n"+
 			"📊 Ежедневная сводка в чат: <b>%s</b> в <b>%s МСК</b>\n"+
 			"😴 Анонс вернувшихся молчунов: <b>%s</b>\n"+
 			"🤖 ИИ-антиспам: <b>%s</b> (белый список после %d сообщ., перевес %d)\n"+
 			"👻 Эфемерные сообщения (капча и мод-ответы видны только адресату): <b>%s</b>\n"+
 			"🧫 Карантин новичков (только текст, без ссылок и пересылок): <b>%s</b> (длительность: <b>%s</b>)",
-		html.EscapeString(title),
+		b.chatLink(ctx, chatID),
 		captchaModeLabel(captchaMode),
 		maxAttempts, intervalMin,
-		onOffLabel(s.GreetingEnabled), greetingText,
-		onOffLabel(s.ReplyCheckEnabled),
+		welcomeModeLabel(mode), modeTextState,
 		onOffLabel(s.DailyStatsEnabled),
 		mskHourLabel(digestHourUTC),
 		onOffLabel(s.SilentAnnounceEnabled),
@@ -894,18 +888,12 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 		captchaModeRow(chatID, captchaMode),
 		intPresetRow(chatID, "max", maxAttempts, []int{2, 3, 5, 10}, "х"),
 		intPresetRow(chatID, "tmo", intervalMin, []int{1, 2, 3}, "мин"),
-		// Ряд из 3 кнопок даёт бюджет 10 единиц, а «✅ 🎉Приветствие» = 16 —
-		// не влезало. Делим: переключатель приветствия + правка его текста
-		// рядом (бюджет 17, подписи 16 и 13), сводка — отдельным рядом
-		// (бюджет 33, подпись 12). Пробел после 🎉 убран — как в ряду капчи,
-		// иначе подпись была 17, ровно в лимит.
+		// Вход в подэкран «После капчи»: три режима и правка текста не влезают
+		// в бюджет ряда, поэтому живут отдельным экраном. Подпись одиночной
+		// кнопки: «✉️ После капчи: с ответом» = 25 при бюджете 33.
 		{
-			tu.InlineKeyboardButton(toggleLabel("🎉Приветствие", s.GreetingEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:gr:%d", chatID)),
-			// «Текст» ничего не говорил; «Свой текст» = можно написать своё
-			// приветствие вместо стандартного.
-			tu.InlineKeyboardButton("✏️ Свой текст").
-				WithCallbackData(fmt.Sprintf("menu:grtxt:%d", chatID)),
+			tu.InlineKeyboardButton(welcomeEntryLabel(mode)).
+				WithCallbackData(fmt.Sprintf("menu:welcome:%d", chatID)),
 		},
 		{
 			tu.InlineKeyboardButton(toggleLabel("📊 Сводка", s.DailyStatsEnabled)).
@@ -943,11 +931,6 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 	}
 	rows = append(rows,
 		[]telego.InlineKeyboardButton{
-			// «Требовать ответ» = 21 при бюджете ряда 17 — не влезало.
-			// «Ждать ответ» = 17, ровно в лимит; пробел после 💬 убран → 16,
-			// чтобы был запас.
-			tu.InlineKeyboardButton(toggleLabel("💬Ждать ответ", s.ReplyCheckEnabled)).
-				WithCallbackData(fmt.Sprintf("menu:rpl:%d", chatID)),
 			tu.InlineKeyboardButton(toggleLabel("👻 Эфемерно", s.EphemeralEnabled)).
 				WithCallbackData(fmt.Sprintf("menu:eph:%d", chatID)),
 		},
@@ -976,6 +959,110 @@ func (b *Bot) renderChatSettings(ctx *th.Context, query telego.CallbackQuery, ch
 			WithCallbackData(fmt.Sprintf("menu:stats:%d:%s", chatID, b.lastStatsPeriod(ctx, query.From.ID))),
 	})
 	return b.editWithMenu(ctx, query, text, &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+// renderWelcomeMenu — подэкран «После капчи»: выбор режима, контекстная
+// правка текста и живой предпросмотр того, что увидит новичок. Читает
+// настройки напрямую (не через кэш), ошибка чтения — лучше ничего не
+// перерисовывать, чем показать дефолты вместо реального состояния.
+func (b *Bot) renderWelcomeMenu(ctx *th.Context, query telego.CallbackQuery, chatID int64) error {
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err != nil {
+		b.log.Warn("get chat settings", "err", err, "chat", chatID)
+		return nil
+	}
+	mode := effectiveWelcomeMode(s)
+	intervalMin := int(b.effectiveStageInterval(s).Minutes())
+
+	textState := welcomeTextState(s, mode)
+
+	var sb strings.Builder
+	sb.WriteString("✉️ <b>После капчи</b>\n\n")
+	sb.WriteString("🚫 <b>Ничего</b> — капча пройдена, и всё.\n")
+	sb.WriteString("🎉 <b>Приветствие</b> — бот тепло здоровается с новичком.\n")
+	fmt.Fprintf(&sb, "⏳ <b>Приветствие с ответом</b> — бот здоровается и ждёт ответ: тишина в течение %d мин — напоминание, потом последнее предупреждение и кик.\n\n", intervalMin)
+	fmt.Fprintf(&sb, "Сейчас: <b>%s</b>%s", welcomeModeLabel(mode), textState)
+	if mode != welcomeNone {
+		// Предпросмотр ровно того, что увидит чат на стадии 1: с строкой-
+		// требованием (reply), карантинной сноской и подстановкой {name} —
+		// именем самого админа.
+		sb.WriteString("\n\nТак увидит новичок:\n")
+		sb.WriteString(welcomeAnchorText(s, mode, 1, intervalMin, b.previewMention(&query.From)))
+	}
+
+	rows := welcomeModeButtons(chatID, mode)
+	if mode != welcomeNone {
+		textBtn := "✏️ Свой текст приветствия"
+		if mode == welcomeReply {
+			textBtn = "✏️ Свой текст проверки"
+		}
+		// Кнопка одна в ряду (бюджет 33): «✏️ Свой текст приветствия» = 24.
+		rows = append(rows, []telego.InlineKeyboardButton{
+			tu.InlineKeyboardButton(textBtn).
+				WithCallbackData(fmt.Sprintf("menu:wtxt:%d", chatID)),
+		})
+	}
+	rows = append(rows, []telego.InlineKeyboardButton{
+		tu.InlineKeyboardButton("⬅️ Назад к настройкам").
+			WithCallbackData(fmt.Sprintf("menu:settings:%d", chatID)),
+	})
+	return b.editWithMenu(ctx, query, sb.String(), &telego.InlineKeyboardMarkup{InlineKeyboard: rows})
+}
+
+// startWelcomeTextInput взводит флоу «пришли мне новый текст» и шлёт промпт.
+// Род текста (приветствие или проверка) берётся из ТЕКУЩЕГО режима чата.
+func (b *Bot) startWelcomeTextInput(ctx *th.Context, query telego.CallbackQuery, chatID int64) error {
+	// Экран настроек: читаем напрямую и прерываемся на ошибке, иначе
+	// покажем «стандартный» вместо реально сохранённого текста.
+	s, err := b.db.GetChatSettings(ctx, chatID)
+	if err != nil {
+		b.log.Warn("get chat settings", "err", err, "chat", chatID)
+		return nil
+	}
+	kind := effectiveWelcomeMode(s)
+	if kind == welcomeNone {
+		// Режим «ничего»: текста нет — свежая клавиатура такой кнопки не
+		// рисует; старые/подделанные колбэки просто возвращают в подэкран.
+		return b.renderWelcomeMenu(ctx, query, chatID)
+	}
+
+	current := "стандартный"
+	switch kind {
+	case welcomeGreet:
+		if s.GreetingText.Valid && strings.TrimSpace(s.GreetingText.String) != "" {
+			current = "<code>" + html.EscapeString(s.GreetingText.String) + "</code>"
+		}
+	case welcomeReply:
+		if s.ReplyText.Valid && strings.TrimSpace(s.ReplyText.String) != "" {
+			current = "<code>" + html.EscapeString(s.ReplyText.String) + "</code>"
+		}
+	}
+	extra := ""
+	if kind == welcomeReply {
+		extra = "Строка «напиши что-нибудь…» и кнопки для админов добавятся сами.\n"
+	}
+	text := fmt.Sprintf(
+		"✏️ Пришли мне текст %s для чата <b>%s</b> одним сообщением.\n\n"+
+			"Подстановка: <code>{name}</code> — имя новичка.\n"+
+			extra+
+			"Отправь «-», чтобы вернуть стандартный текст. /cancel — отмена.\n"+
+			"Запрос действует 15 минут.\n\n"+
+			"Текущий текст: %s",
+		welcomeTextKindNoun(kind), html.EscapeString(b.chatTitle(ctx, chatID)), current)
+	if _, serr := b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID), text).
+		WithParseMode(telego.ModeHTML)); serr != nil {
+		b.log.Warn("send welcome input prompt", "err", serr, "chat", chatID)
+		// На query уже ответили в начале хендлера — второй Answer
+		// Telegram отбросил бы молча, поэтому объясняем сообщением.
+		_, _ = b.api.SendMessage(ctx, tu.Message(tu.ID(query.Message.GetChat().ID),
+			"⚠️ Не получилось отправить запрос — попробуй ещё раз."))
+		return nil
+	}
+	// Арм — только после удачных чтения И отправки промпта: упавшая отправка
+	// оставила бы взведённый ввод без промпта, и следующее обычное ЛС админа
+	// молча стало бы шаблоном.
+	b.setGreetingInputPending(query.From.ID, chatID, kind)
+	return nil
 }
 
 func captchaModeRow(chatID int64, current captcha.Mode) []telego.InlineKeyboardButton {
@@ -1169,6 +1256,9 @@ func (b *Bot) editWithMenu(ctx *th.Context, query telego.CallbackQuery, text str
 		Text:        text,
 		ParseMode:   telego.ModeHTML,
 		ReplyMarkup: kb,
+		// Заголовки-ссылки на чат не должны разворачиваться в превью: строка
+		// статистики начинается с имени чата, t.me-превью съедало бы пол-экрана.
+		LinkPreviewOptions: &telego.LinkPreviewOptions{IsDisabled: true},
 	})
 	if err != nil && !isNotModified(err) {
 		b.log.Warn("edit menu", "err", err)
@@ -1277,8 +1367,7 @@ func (b *Bot) handleExtendedStatsCallback(ctx *th.Context, query telego.Callback
 	}
 
 	var sb strings.Builder
-	title := b.chatTitle(ctx, chatID)
-	fmt.Fprintf(&sb, "<b>%s</b>\n\n%s\n\n", html.EscapeString(title), header)
+	fmt.Fprintf(&sb, "<b>%s</b>\n\n%s\n\n", b.chatLink(ctx, chatID), header)
 
 	if len(items) == 0 {
 		sb.WriteString("<i>Пусто за выбранный период.</i>")

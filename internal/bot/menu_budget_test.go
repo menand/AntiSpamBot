@@ -92,21 +92,35 @@ func TestSettingsRowsFitBudget(t *testing.T) {
 	//
 	// Полноценной выемки в чистую функцию-строитель здесь не делаем — ряды
 	// собираются из состояния БД, которое тянет за собой Bot и контекст, а
-	// перед пушем это лишний рефакторинг. Динамические ряды (капча, пресеты)
-	// покрыты выше по-настоящему.
+	// перед пушем это лишний рефакторинг. Динамические ряды (капча, пресеты,
+	// «После капчи») покрыты выше по-настоящему.
 	for _, on := range []bool{true, false} {
-		// Ряд из 2 (бюджет 17): переключатель приветствия + правка текста.
-		checkLabel("toggleLabel(Приветствие)", toggleLabel("🎉Приветствие", on), 2)
-		// Ряд из 2 (бюджет 17): ответ + эфемерность.
-		checkLabel("toggleLabel(Ждать ответ)", toggleLabel("💬Ждать ответ", on), 2)
-		checkLabel("toggleLabel(Эфемерно)", toggleLabel("👻 Эфемерно", on), 2)
+		checkLabel("toggleLabel(Эфемерно)", toggleLabel("👻 Эфемерно", on), 1)
 		// Одиночные (бюджет 33).
 		checkLabel("toggleLabel(Сводка)", toggleLabel("📊 Сводка", on), 1)
 		checkLabel("toggleLabel(Анонс молчунов)", toggleLabel("😴 Анонс молчунов", on), 1)
 		checkLabel("toggleLabel(ИИ-антиспам)", toggleLabel("🤖 ИИ-антиспам", on), 1)
 		checkLabel("toggleLabel(Карантин)", toggleLabel("🧫 Карантин новичков", on), 1)
 	}
-	checkLabel("Свой текст", "✏️ Свой текст", 2)
+	// Вход в подэкран «После капчи» — одиночная кнопка (бюджет 33); сама
+	// подпись строится реальным билдером welcomeEntryLabel.
+	for _, m := range []welcomeMode{welcomeNone, welcomeGreet, welcomeReply} {
+		checkLabel("welcomeEntryLabel("+string(m)+")", welcomeEntryLabel(m), 1)
+	}
+	// Кнопки режимов — реальные ряды подэкрана (2 кнопки + 1 кнопка): каждый
+	// режим по очереди как текущий, активный получает маркер «• ».
+	for _, m := range []welcomeMode{welcomeNone, welcomeGreet, welcomeReply} {
+		rows := welcomeModeButtons(chatID, m)
+		if len(rows) != 2 {
+			t.Fatalf("welcomeModeButtons(%v): %d рядов, ожидалось 2", m, len(rows))
+		}
+		for i, row := range rows {
+			checkRow(fmt.Sprintf("welcomeModeButtons(%v)[%d]", m, i), row)
+		}
+	}
+	checkLabel("Свой текст приветствия", "✏️ Свой текст приветствия", 1)
+	checkLabel("Свой текст проверки", "✏️ Свой текст проверки", 1)
+	checkLabel("Назад к настройкам", "⬅️ Назад к настройкам", 1)
 	checkLabel("Выйти из чата", "🚪 Выйти из чата", 1)
 	checkLabel("К статистике", "⬅️ К статистике", 1)
 

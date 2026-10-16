@@ -229,6 +229,21 @@ func hasMoreItems(lists ...[]storage.UserCount) bool {
 	return false
 }
 
+// pendingCount — «В процессе»: новички окна без исхода. Командные кики/баны и
+// спам-баны тоже вычитаются: новичок, убранный в том же окне командой или
+// вердиктом (executeSpamBan гасит капчу без pass), не должен остаться
+// «в процессе». Перевычитка (событие по старожилу вне Joined) даёт
+// отрицательное — вызывающие гасят условием > 0.
+//
+// Одна формула на два места: экран статистики (renderStats) и строку ЛС-отчёта
+// (reportLine) — расхождение «1» между ними и было вопросом «в процессе»
+// у владельца: это не баг счёта, а джойны около полуночи, чей кик приземлился
+// в следующие сутки (проверено на проде — так и должно быть).
+func pendingCount(s storage.Stats) int {
+	return s.Joined - s.Passed - s.Kicked - s.Banned -
+		s.SpamBanned - s.ModKicked - s.ModBanned - s.Left - s.Aborted
+}
+
 func renderStats(
 	p statsPeriod,
 	label string,
@@ -259,9 +274,7 @@ func renderStats(
 		// без pass), не должен остаться «в процессе». Перевычитка (событие
 		// по старожилу вне Joined) даёт отрицательное — гасится условием
 		// pending > 0 (то же, что у Mod*).
-		pending := s.Joined - s.Passed - s.Kicked - s.Banned -
-			s.SpamBanned - s.ModKicked - s.ModBanned - s.Left - s.Aborted
-		if pending > 0 {
+		if pending := pendingCount(s); pending > 0 {
 			fmt.Fprintf(&sb, "• В процессе: %d\n", pending)
 		}
 	}

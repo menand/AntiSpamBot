@@ -191,6 +191,9 @@ type ChatSettings struct {
 	CaptchaMode            sql.NullString // NULL = дефолт (circles)
 	GreetingText           sql.NullString // NULL = встроенное приветствие по умолчанию
 	GreetingEntities       sql.NullString // JSON entities шаблона; NULL = плоский текст
+	WelcomeMode            sql.NullString // none|greet|reply; NULL = деривация из легаси-флагов
+	ReplyText              sql.NullString // NULL = встроенный текст проверки (режим reply)
+	ReplyEntities          sql.NullString // JSON entities текста проверки; NULL = плоский
 	SilentAnnounceEnabled  bool           // по умолчанию true, когда строки нет
 	SpamCheckEnabled       bool           // по умолчанию false, когда строки нет
 	SpamThreshold          sql.NullInt64  // легаси, не читается
@@ -218,7 +221,9 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	err := d.sql.QueryRowContext(ctx, `
 		SELECT greeting_enabled, max_attempts, captcha_interval_minutes,
 		       daily_stats_enabled, daily_stats_utc_hour, last_daily_stats_day,
-		       captcha_mode, greeting_text, greeting_entities, silent_announce_enabled,
+		       captcha_mode, greeting_text, greeting_entities,
+		       welcome_mode, reply_text, reply_entities,
+		       silent_announce_enabled,
 		       spam_check_enabled, spam_threshold, spam_whitelist_msgs,
 		       spam_vote_margin, reply_check_enabled,
 		       ephemeral_enabled, quarantine_enabled, quarantine_hours
@@ -226,7 +231,9 @@ func (d *DB) GetChatSettings(ctx context.Context, chatID int64) (ChatSettings, e
 	`, chatID).Scan(&greetingInt,
 		&s.MaxAttempts, &s.CaptchaIntervalMinutes,
 		&dailyInt, &s.DailyStatsUTCHour, &s.LastDailyStatsDay,
-		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities, &silentInt,
+		&s.CaptchaMode, &s.GreetingText, &s.GreetingEntities,
+		&s.WelcomeMode, &s.ReplyText, &s.ReplyEntities,
+		&silentInt,
 		&spamInt, &s.SpamThreshold, &s.SpamWhitelistMsgs,
 		&s.SpamVoteMargin, &replyInt,
 		&ephInt, &qrInt, &s.QuarantineHours)
@@ -276,7 +283,13 @@ func (d *DB) SetEphemeralEnabled(ctx context.Context, chatID int64, enabled bool
 	return d.setChatSetting(ctx, chatID, "ephemeral_enabled", boolToInt(enabled))
 }
 
-// SetReplyCheckEnabled тогглит режим «требовать ответа на приветствие».
+// SetReplyCheckEnabled пишет легаси-флаг «требовать ответа на приветствие».
+// UI его больше не переключает (режим хранится в welcome_mode), флаг остаётся
+// источником деривации effectiveWelcomeMode и миграции текстов; используется
+// тестами и разовыми скриптами.
+// SetReplyCheckEnabled — легаси-флаг (тумблер «Требовать ответа» до режима
+// «После капчи»): UI его больше не переключает; остаётся источником деривации
+// welcome_mode (NULL) и участником разовой миграции текстов.
 func (d *DB) SetReplyCheckEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	return d.setChatSetting(ctx, chatID, "reply_check_enabled", boolToInt(enabled))
 }
@@ -292,6 +305,13 @@ func (d *DB) SetQuarantineHours(ctx context.Context, chatID int64, hours *int) e
 	return d.setChatSetting(ctx, chatID, "quarantine_hours", nullableInt(hours))
 }
 
+// SetGreetingEnabled пишет легаси-флаг «приветствие включено». UI его больше
+// не переключает (режим хранится в welcome_mode), флаг остаётся источником
+// деривации effectiveWelcomeMode и строкой миграции текстов; DEFAULT 1 —
+// поэтому у чата без строки настроек деривация даёт greet.
+// SetGreetingEnabled — легаси-флаг (тумблер «Приветствие» до появления режима
+// «После капчи»): UI его больше не переключает, но деривация welcome_mode,
+// когда он NULL, читает его, и им пользуются тесты для сборки легаси-состояний.
 func (d *DB) SetGreetingEnabled(ctx context.Context, chatID int64, enabled bool) error {
 	return d.setChatSetting(ctx, chatID, "greeting_enabled", boolToInt(enabled))
 }
@@ -364,6 +384,37 @@ func (d *DB) SetGreetingText(ctx context.Context, chatID int64, text, entitiesJS
 	`, chatID, v, ve)
 	if err != nil {
 		return fmt.Errorf("set greeting_text: %w", err)
+	}
+	return nil
+}
+
+// SetWelcomeMode сохраняет явный режим «после капчи» (none|greet|reply).
+// Известные значения бот валидирует до вызова; неизвестная строка не сломает
+// резолвинг — effectiveWelcomeMode откатится к деривации из легаси-флагов.
+func (d *DB) SetWelcomeMode(ctx context.Context, chatID int64, mode string) error {
+	return d.setChatSetting(ctx, chatID, "welcome_mode", mode)
+}
+
+// SetReplyText сохраняет кастомный шаблон ПРОВЕРКИ (режим reply) — второе
+// сообщение модели, отличное от приветствия. Семантика та же, что у
+// SetGreetingText: {name}, entitiesJSON, nil возвращает встроенный дефолт.
+func (d *DB) SetReplyText(ctx context.Context, chatID int64, text, entitiesJSON *string) error {
+	var v, ve any
+	if text != nil {
+		v = *text
+	}
+	if entitiesJSON != nil {
+		ve = *entitiesJSON
+	}
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO chat_settings (chat_id, reply_text, reply_entities)
+		VALUES (?, ?, ?)
+		ON CONFLICT(chat_id) DO UPDATE SET
+			reply_text = excluded.reply_text,
+			reply_entities = excluded.reply_entities
+	`, chatID, v, ve)
+	if err != nil {
+		return fmt.Errorf("set reply_text: %w", err)
 	}
 	return nil
 }

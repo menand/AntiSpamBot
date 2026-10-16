@@ -392,6 +392,11 @@ func TestRestoreRepliesServiceabilityAndLiveness(t *testing.T) {
 	t.Run("истёкшее, юзер вышел офлайн — left без наказания", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
+		// Режим «с ответом» — иначе restore снимет строку пассом ещё до
+		// liveness-пробы (проверка режима в restorePendingReplies).
+		if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+			t.Fatal(err)
+		}
 		fc.resp["getChatMember"] =
 			`{"status":"left","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
@@ -619,7 +624,7 @@ func TestDisarmGreetInputOnCommand(t *testing.T) {
 
 	t.Run("/help отменяет ввод", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)
-		b.setGreetingInputPending(testUserID, testChatID)
+		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet)
 
 		b.cancelGreetingInputOnCommand(context.Background(), privateMsg("/help"))
 
@@ -634,7 +639,7 @@ func TestDisarmGreetInputOnCommand(t *testing.T) {
 
 	t.Run("обычный текст не трогает состояние", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)
-		b.setGreetingInputPending(testUserID, testChatID)
+		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet)
 
 		b.cancelGreetingInputOnCommand(context.Background(), privateMsg("привет"))
 
@@ -649,7 +654,7 @@ func TestDisarmGreetInputOnCommand(t *testing.T) {
 	t.Run("истёкший запрос — честное «устарел»", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)
 		b.greetInput[testUserID] = greetInputState{
-			chatID: testChatID, armedAt: time.Now().Add(-greetInputTTL - time.Minute),
+			chatID: testChatID, kind: welcomeGreet, armedAt: time.Now().Add(-greetInputTTL - time.Minute),
 		}
 
 		b.cancelGreetingInputOnCommand(context.Background(), privateMsg("/stats"))
