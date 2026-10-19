@@ -47,10 +47,19 @@ func TestPendingCancelIsIdempotent(t *testing.T) {
 func TestBeginKickoffExclusive(t *testing.T) {
 	s := NewStore()
 
+	// Первый kickoff держим до конца забега конкурентов: эксклюзивность —
+	// это «никто не прошёл, пока один в полёте», а не «ровно один за всё
+	// время». Старый вариант (победитель отпускал замок через sleep, пока
+	// остальные ещё стартовали) позволял поздно проснувшейся на загруженном
+	// CI горутине честно выиграть уже ПОСЛЕ FinishKickoff — «got 2», гонка
+	// расписания, а не логики.
+	if !s.BeginKickoff(1, 2) {
+		t.Fatal("first kickoff must win")
+	}
 	const workers = 50
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	var won int32
+	var won int
 	var mu sync.Mutex
 	for range workers {
 		go func() {
@@ -59,20 +68,36 @@ func TestBeginKickoffExclusive(t *testing.T) {
 				mu.Lock()
 				won++
 				mu.Unlock()
-				// имитируем подготовительную работу перед Put или очисткой
-				time.Sleep(time.Millisecond)
+				// Эксклюзивность нарушена — фиксируем и снимаем флаг для
+				// чистоты (фаза всё равно упадёт; BeginKickoff неблокирующий).
 				s.FinishKickoff(1, 2)
 			}
 		}()
 	}
 	wg.Wait()
-	if won != 1 {
-		t.Fatalf("expected exactly 1 kickoff to win, got %d", won)
+	if won != 0 {
+		t.Fatalf("no kickoff may win while one is in flight, got %d extra winners", won)
 	}
+	s.FinishKickoff(1, 2)
 
-	// Когда все закончили, следующий kickoff должен пройти.
-	if !s.BeginKickoff(1, 2) {
-		t.Fatal("kickoff should succeed after all previous ones finished")
+	// Финальный забег: после Finish снова ровно один победитель, и он НЕ
+	// отпускает замок до конца проверки — иначе поздно проснувшийся выиграл
+	// бы после освобождения, и тест снова стал бы гоночным.
+	wg.Add(workers)
+	won = 0
+	for range workers {
+		go func() {
+			defer wg.Done()
+			if s.BeginKickoff(1, 2) {
+				mu.Lock()
+				won++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if won != 1 {
+		t.Fatalf("exactly one racer must win after release, got %d", won)
 	}
 	s.FinishKickoff(1, 2)
 }
