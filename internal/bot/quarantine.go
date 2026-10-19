@@ -323,7 +323,7 @@ func (b *Bot) escalateQuarantine(chatID, userID int64) {
 		b.log.Warn("quarantine escalation mute", "err", err, "chat", chatID, "user", userID)
 		return
 	}
-	// Замьюченный физически не может выполнить «напиши что-нибудь» —
+	// Замьюченный физически не может выполнить «напиши пару слов по делу» —
 	// снимаем ожидание реплая тихо (прецедент /mute в modcmd.go). Иначе
 	// сиротский replyWaitLoop добавил бы свой kick/noreply поверх эскалации,
 	// а неписанный «прошёл» (reply-check) оставил бы юзера в «В процессе».
