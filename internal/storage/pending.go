@@ -120,6 +120,21 @@ func (d *DB) DeletePendingReplyIf(ctx context.Context, chatID, userID int64, sta
 	return nil
 }
 
+// ExtendPendingReplyIf — guard-продление ожидания ответа по СТАДИИ (прецедент
+// DeletePendingReplyIf): мусорный ответ отодвигает дедлайн текущей стадии, но
+// не должен переписать строку следующей (переход персистится ДО отправки
+// напоминания) или воскресить удалённую (ответ/выход/кара уже разобрались).
+// Продление «вхолостую» (0 строк) — норма: кто-то другой успел первым.
+func (d *DB) ExtendPendingReplyIf(ctx context.Context, chatID, userID int64, stage int, expiresAt time.Time) error {
+	_, err := d.sql.ExecContext(ctx,
+		`UPDATE pending_replies SET expires_at = ? WHERE chat_id = ? AND user_id = ? AND stage = ?`,
+		expiresAt.Unix(), chatID, userID, stage)
+	if err != nil {
+		return fmt.Errorf("extend pending reply (guarded): %w", err)
+	}
+	return nil
+}
+
 // DeletePendingRepliesChat сносит все ожидания чата (бот покинул чат).
 func (d *DB) DeletePendingRepliesChat(ctx context.Context, chatID int64) error {
 	_, err := d.sql.ExecContext(ctx,

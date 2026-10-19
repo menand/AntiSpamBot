@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mymmrac/telego"
 	tu "github.com/mymmrac/telego/telegoutil"
@@ -23,6 +25,14 @@ type replyPending struct {
 	ThreadID      int // топик форума для повторных отправок якоря; 0 = без топика
 	Stage         int // стадия серии напоминаний (1..captchaStages)
 	GreetingMsgID int // message_id текущего якоря-приветствия (для stale-guard кнопки «Впустить»)
+
+	// postponed — серия уже получила разовые «+5 минут» за мусорный ответ;
+	// hintedStage — стадия, на которой автору уже показана подсказка о мусоре.
+	// Оба поля — под мьютексом стора (Postpone/ClaimJunkHint), переживают
+	// переходы стадий через Replace; при рестарте теряются (лишний раз щедро —
+	// не несправедливо: после рестарта юзер максимум ещё раз получит +5).
+	postponed   bool
+	hintedStage int
 
 	cancelOnce sync.Once
 	cancelCh   chan struct{}
@@ -69,6 +79,66 @@ func (s *replyStore) Get(chatID, userID int64) (*replyPending, bool) {
 	return p, ok
 }
 
+// Deadline — текущий дедлайн ожидания под мьютексом стора: Postpone может
+// отодвинуть его в любой момент, читать поле напрямую нельзя (гонка с
+// таймером цикла серии).
+func (s *replyStore) Deadline(p *replyPending) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return p.ExpiresAt
+}
+
+// Postpone отодвигает дедлайн ожидания до at (если тот позже текущего) — «+5
+// минут» за мусорный ответ — и только ОДИН РАЗ за серию: повторный вызов —
+// no-op, иначе мусорными сообщениями можно было бы продлевать проверку
+// бесконечно. Ожидание НЕ изымается: гонок с ответом/выходом/карой нет, кто
+// первым решил, тот и разобрался с ним (identity-гвард под мьютексом).
+// Возвращает (новый дедлайн, выдано ли продление этим вызовом); false также
+// когда двигать некуда (at не позже текущего срока — продление не тратится).
+func (s *replyStore) Postpone(chatID, userID int64, p *replyPending, at time.Time) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.items[chatUser{chatID, userID}]; !ok || cur != p {
+		return time.Time{}, false
+	}
+	if p.postponed || !at.After(p.ExpiresAt) {
+		return p.ExpiresAt, false
+	}
+	p.postponed = true
+	p.ExpiresAt = at
+	return p.ExpiresAt, true
+}
+
+// ClaimJunkHint — атомарный claim разовой (на стадию) подсказки автору
+// мусорного ответа: параллельные мусорные сообщения не должны поднять шторм
+// эфемерных отправок (прецедент ClaimWarned у карантина). На новой стадии
+// серии подсказка снова разрешена: старое приветствие к тому времени удалено,
+// прежнее объяснение в чате не висит.
+func (s *replyStore) ClaimJunkHint(chatID, userID int64, p *replyPending) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.items[chatUser{chatID, userID}]; !ok || cur != p {
+		return false
+	}
+	if p.hintedStage >= p.Stage {
+		return false
+	}
+	p.hintedStage = p.Stage
+	return true
+}
+
+// ReleaseJunkHint — откат claim'а, если подсказку не удалось доставить:
+// следующее мусорное сообщение объяснит заново (тот же трейд-офф, что у
+// ClearWarned карантина: лучше повторное объяснение, чем подсказка, которую
+// никто не увидел).
+func (s *replyStore) ReleaseJunkHint(chatID, userID int64, p *replyPending) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.items[chatUser{chatID, userID}]; ok && cur == p && p.hintedStage == p.Stage {
+		p.hintedStage = p.Stage - 1
+	}
+}
+
 // Take атомарно забирает ожидание: победитель (сообщение юзера, его выход,
 // таймаут) разбирается с ним, проигравшие гонку получают ok=false.
 func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
@@ -80,6 +150,24 @@ func (s *replyStore) Take(chatID, userID int64) (*replyPending, bool) {
 		delete(s.items, k)
 	}
 	return p, ok
+}
+
+// TakeExpired — Take с проверкой срока под ОДНИМ мьютексом: финальная кара не
+// должна изъять ожидание, которому только что выдали «+5 минут» (Postpone мог
+// приземлиться между отдельной проверкой дедлайна в цикле и Take — иначе кара
+// убила бы юзера, которому подсказка уже пообещала время). Проигравший
+// возвращает false НЕ трогая store: либо ожидание уже разрешил кто-то другой
+// (identity не сошлась), либо срок ещё не истёк (продлён — цикл перезаведёт сон).
+func (s *replyStore) TakeExpired(chatID, userID int64, p *replyPending, now time.Time) (*replyPending, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := chatUser{chatID, userID}
+	cur, ok := s.items[k]
+	if !ok || cur != p || cur.ExpiresAt.After(now) {
+		return nil, false
+	}
+	delete(s.items, k)
+	return cur, true
 }
 
 // SetGreetingMsgID обновляет message_id текущего якоря-приветствия в
@@ -110,9 +198,22 @@ func (s *replyStore) Replace(chatID, userID int64, old *replyPending,
 	if stage < 1 {
 		stage = 1
 	}
-	next := &replyPending{ChatID: chatID, UserID: userID, ExpiresAt: expiresAt,
+	// «+5 минут» могло приземлиться в окно перехода (Postpone правит
+	// old.ExpiresAt под этим же мьютексом): срок следующей стадии — max
+	// предложенного и текущего, иначе обещание подсказки потерялось бы, а
+	// одноразовое продление сгорело. Обратный порядок (Postpone после Replace)
+	// гвардится identity-проверкой Postpone и сюда не доходит.
+	installed := expiresAt
+	if old.ExpiresAt.After(installed) {
+		installed = old.ExpiresAt
+	}
+	next := &replyPending{ChatID: chatID, UserID: userID, ExpiresAt: installed,
 		ThreadID: threadID, Stage: stage, GreetingMsgID: greetingMsgID,
-		cancelCh: make(chan struct{})}
+		// «+5 минут» — свойство СЕРИИ, а не стадии: переход не должен его
+		// терять, иначе вторая порция мусора снова продлевала бы проверку.
+		// hintedStage сбрасывается: подсказка на новой стадии снова уместна.
+		postponed: old.postponed,
+		cancelCh:  make(chan struct{})}
 	s.items[k] = next
 	return next, true
 }
@@ -233,9 +334,159 @@ func messageHasUserContent(m *telego.Message) bool {
 		attachmentKindRU(*m) != ""
 }
 
+// junkReplyExtend — сколько добавляется к текущей стадии за первый мусорный
+// ответ серии (один раз за серию: дальше мусор только тихо удаляется).
+const junkReplyExtend = 5 * time.Minute
+
+// contentWordMinRunes — минимум букв в слове, которое может считаться
+// содержательным. Порог калиброван по живому вопросу-вызову чатов («Привет! …
+// а ты точно не спамер? Уже бегал(а) с нами или только планируешь?»):
+// «бегаю», «планирую», «присоединиться» — ответы; «бег», «иду» — нет
+// (подсказка и требование честно просят пару слов по делу).
+const contentWordMinRunes = 4
+
+// emptyReplyWords — стоп-список «пустышек»: приветствия, вежливость, реакции
+// и служебные слова, которыми формальная заглушка маскируется под ответ.
+// Слово из списка НИКОГДА не содержательное, сколько бы в нём ни было букв
+// («здравствуйте» — 11 букв, но ответом не является). Список умышленно
+// пополняемый, но безопасный: он лишь понижает слово до «пустышки», а тонуть
+// в нём может только сообщение ЦЕЛИКОМ из пустышек — слова живых ответов
+// («бегала», «планирую», «присоединиться», «завтра»...) здесь не должны
+// появляться никогда. Ключи — :lower + ё→е; слова короче contentWordMinRunes
+// можно не перечислять (они и так не содержательные).
+var emptyReplyWords = map[string]struct{}{
+	// русские приветствия (хвосты форм добивают префиксы ниже; «здрасте»/
+	// «здраствуйте» — частые опечатки, их префиксы не ловят, поэтому точные)
+	"привет": {}, "приветик": {}, "приветики": {}, "превед": {}, "прив": {},
+	"здрасти": {}, "здрасьте": {}, "здрасте": {}, "здравствуй": {}, "здравствуйте": {},
+	"здраствуйте": {}, "здарова": {}, "здаров": {}, "здоровенько": {}, "хелло": {},
+	// пожелания дня
+	"добро": {}, "доброе": {}, "добрый": {}, "доброго": {}, "пожаловать": {},
+	"утро": {}, "утра": {}, "утречка": {}, "день": {}, "денек": {}, "денечек": {},
+	"вечер": {}, "вечера": {}, "ночи": {}, "ночь": {},
+	// коллективные обращения («все» вне списка: 3 буквы — и так не слова)
+	"всем": {}, "всех": {}, "ребята": {}, "ребят": {}, "ребятки": {},
+	"друзья": {}, "други": {}, "народ": {}, "люди": {}, "камрады": {}, "коллеги": {},
+	"товарищи": {}, "господа": {}, "бегуны": {}, "бегунов": {}, "бегунам": {},
+	// вежливость
+	"спасибо": {}, "спасибки": {}, "спасибочки": {}, "пасиб": {}, "пасиба": {},
+	"благодарю": {}, "пожалуйста": {}, "пжлст": {}, "плиз": {},
+	// согласие и реакции
+	"окей": {}, "ладно": {}, "давай": {}, "давайте": {},
+	"отлично": {}, "классно": {}, "круто": {}, "супер": {}, "клево": {},
+	"здорово": {}, "зачет": {}, "молодцы": {}, "молодец": {},
+	// служебные и филлеры
+	"меня": {}, "тебе": {}, "тебя": {}, "вами": {}, "нами": {},
+	"свой": {}, "свои": {}, "своя": {}, "свое": {}, "наше": {}, "ваши": {},
+	"этот": {}, "такой": {}, "такая": {}, "такое": {}, "тута": {}, "здесь": {},
+	"пока": {}, "только": {}, "очень": {}, "просто": {}, "вообще": {}, "короче": {},
+	"тоже": {}, "также": {}, "вроде": {}, "типа": {}, "кажется": {}, "наверное": {},
+	"когда": {}, "почему": {}, "зачем": {}, "откуда": {}, "какой": {}, "какая": {},
+	"какие": {}, "куда": {}, "чего": {},
+	"дела": {}, "дело": {}, "делишки": {}, "настроение": {}, "жизнь": {},
+	// «хочу/хотел(а)/спамер/спам/тест/капча» умышленно ВНЕ списка: «очень
+	// хочу», «хочу к вам», «я не спамер» — живые ответы-намерения, а не
+	// заглушки; цена ложного мусора (удаление + серия кары) выше цены
+	// пропущенного «хочу» (реакция продукт-ревью).
+	"поздравляю": {}, "поздравляем": {},
+	// иностранные приветствия/вежливость
+	"hello": {}, "hallo": {}, "hola": {}, "ciao": {}, "bonjour": {}, "salut": {},
+	"okay": {}, "welcome": {}, "thanks": {}, "thank": {}, "please": {}, "merci": {},
+	"guys": {}, "everyone": {}, "everybody": {}, "good": {}, "nice": {}, "cool": {},
+	"morning": {}, "evening": {}, "night": {},
+}
+
+// emptyReplyWordPrefixes — корни-пустышки, у которых форм больше, чем хочется
+// перечислять поимённо («привет»/«приветики»/«приветствую», «здравствуй»/
+// «здравствуйте», «спасибо»/«спасибки»/«спасибочки»): слово с таким началом
+// не содержательное.
+var emptyReplyWordPrefixes = []string{"привет", "здравств", "здаров", "спасиб", "благодар"}
+
+// isCommandText — сообщение похоже на команду: первый непробельный символ «/».
+// Telegram помечает такие первым словом как bot_command, но строковой проверки
+// достаточно: она не зависит от наличия entities и одинакова для «/ban» и
+// «/help@OtherBot».
+func isCommandText(m *telego.Message) bool {
+	return strings.HasPrefix(strings.TrimSpace(m.Text), "/")
+}
+
+// replyCountsAsAnswer — проходит ли сообщение ступень осмысленности: ответом
+// на приветствие-проверку считается только текст/подпись хотя бы с одним
+// содержательным словом. Задача фильтра — отсечь формальные заглушки («+»,
+// «привет», смайлик, стикер, голая ссылка), НЕ задевая короткие живые ответы
+// на вопрос-вызов («ещё не бегала», «хочу присоединиться»). Лексика, без LLM:
+// детерминированно, не жжёт квоты и одинаково для всех чатов.
+func replyCountsAsAnswer(m *telego.Message) bool {
+	if isCommandText(m) {
+		// Команда — не ответ на вопрос-вызов: «/start» не должен закрывать
+		// проверку, и «/ban»/«/del» — тем более (мод-команды уходят в свои
+		// хендлеры, ожидание остаётся взведённым: молчаливое «/help» — не
+		// ответ на «уже бегал(а)?»).
+		return false
+	}
+	text := m.Text
+	if strings.TrimSpace(text) == "" {
+		// Подпись медиа: фото с осмысленной подписью — полноценный ответ;
+		// голый стикер/кружок/фото без текста — нет.
+		text = m.Caption
+	}
+	return textHasContentWord(text)
+}
+
+// textHasContentWord — есть ли в тексте хоть одно содержательное слово.
+// Токен со служебным знаком (ссылка, домен, @упоминание, #хэштег, время) и
+// цифры/символы словами не считаются: их «буквы» осмысленности не доказывают.
+// Маркеры середины токена — только «.» и «:»: «t.me/x» и «http://…» ловятся
+// ими, а слэш умышленно НЕ маркер — «бегаю/бегала» остаётся живой фразой
+// (команды вида «/ban» отсекает isCommandText выше, до лексики).
+func textHasContentWord(text string) bool {
+	for _, raw := range strings.Fields(text) {
+		// @упоминания и #хэштеги — не слова, даже после срезания краевых
+		// знаков; проверяем маркеры на СЫРОМ токене: TrimFunc ниже съел бы
+		// ведущие «@»/«#» и превратил «@ivan_ivanov» в «ivan_ivanov».
+		if strings.ContainsAny(raw, "@#") {
+			continue
+		}
+		// Знаки по краям (точка, скобка, восклицание) — обычная пунктуация:
+		// «Бегаю.» — слово, «t.me/x» — ссылка. Смотрим только середину токена.
+		tok := strings.TrimFunc(raw, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		})
+		if tok == "" || strings.ContainsAny(tok, ".:") {
+			continue
+		}
+		for _, w := range strings.FieldsFunc(tok, func(r rune) bool { return !unicode.IsLetter(r) }) {
+			norm := strings.ReplaceAll(strings.ToLower(w), "ё", "е")
+			if utf8.RuneCountInString(norm) < contentWordMinRunes {
+				continue
+			}
+			if _, empty := emptyReplyWords[norm]; empty {
+				continue
+			}
+			if hasEmptyReplyPrefix(norm) {
+				continue
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// hasEmptyReplyPrefix — слово с корнем-пустышкой («приветствующий»,
+// «здравствуйте», «спасибки», «благодарствую»).
+func hasEmptyReplyPrefix(w string) bool {
+	for _, pre := range emptyReplyWordPrefixes {
+		if strings.HasPrefix(w, pre) {
+			return true
+		}
+	}
+	return false
+}
+
 // replyWaitSatisfied снимает ожидание, когда юзер написал сообщение.
 // Вызывается из middleware (bot.go) на каждое групповое сообщение с контентом,
-// ДО маршрутизации — быстрый in-memory промах для всех, у кого ожидания нет.
+// ДО маршрутизации (быстрый in-memory промах для всех, у кого ожидания нет),
+// и из handleEditedGroupMessage: дописанный правкой ответ тоже засчитывается.
 // Возвращает изъятое ожидание (nil, если его не было / не наш — обычный юзер
 // без reply-check): middleware использует не-nil как признак «прошёл 2-й
 // уровень» и шлёт владельцам форвард ответа (notifyReplyAnswered).
@@ -282,6 +533,133 @@ func (b *Bot) replyWaitSatisfied(chatID, userID int64) *replyPending {
 	}
 	b.log.Info("reply check passed", "chat", chatID, "user", userID, "stage", p.Stage)
 	return p
+}
+
+// handleJunkReply — мусорный ответ на приветствие-проверку: сообщение
+// удаляется (в чате чисто; апдейт уже заглотан middleware — в счётчики,
+// архив и ИИ-чек удалённый мусор не идёт), автору уходит разовая (на стадию)
+// эфемерная подсказка, а серия один раз за серию получает +5 минут. Человеку,
+// машинально написавшему «+», даётся шанс ответить нормально, но формальная
+// заглушка проверку НЕ проходит — молчание в конце серии карается как раньше.
+// Вызывается из goSafe: сетевые вызовы не должны тормозить цепочку хендлеров,
+// а мутации — умереть с ctx апдейта (liveCtx).
+func (b *Bot) handleJunkReply(m *telego.Message, p *replyPending) {
+	ctx, cancel := b.liveCtx()
+	defer cancel()
+	chatID, userID := m.Chat.ID, m.From.ID
+
+	// +5 минут — один раз за серию; персистим новый дедлайн CAS'ом по стадии:
+	// рестарт не должен воскресить старый, более ранний срок (переход стадии
+	// персистится ДО исполнения, так что чужую строку N+1 гвард не тронет).
+	deadline, granted := b.replies.Postpone(chatID, userID, p, time.Now().Add(junkReplyExtend))
+	if granted {
+		if err := b.db.ExtendPendingReplyIf(ctx, chatID, userID, p.Stage, deadline); err != nil {
+			b.log.Warn("junk reply: persist extended deadline", "err", err,
+				"chat", chatID, "user", userID)
+		}
+	}
+
+	// Удаляем через короткую лестницу (прецедент цензора карантина): мусор
+	// не должен пережить один сетевой чих/429. Флаг честности — подсказка не
+	// должна врать «Сообщение удалено», если удалить не удалось.
+	// Флаг заводим от «удаление вообще возможно»: при нулевом id (теоретический
+	// случай) попытки не было, и «Сообщение удалено.» стало бы ложью — гейт
+	// честности не должен пропускать этот случай.
+	deleted := m.MessageID != 0
+	if deleted {
+		if err := retryWith(ctx, kickUnbanBackoffs, func() error {
+			return b.deleteMessage(ctx, chatID, m.MessageID)
+		}); err != nil {
+			deleted = false
+			b.log.Warn("junk reply: delete message", "err", err, "chat", chatID, "user", userID)
+		}
+	}
+
+	// Подсказка — один раз на стадию (claim под мьютом стора): флуд мусором не
+	// поднимает шторм эфемерных отправок. Второй мусор стадии — тихое удаление.
+	if !b.replies.ClaimJunkHint(chatID, userID, p) {
+		b.log.Info("reply check: junk answer", "chat", chatID, "user", userID,
+			"stage", p.Stage, "extended", granted, "deleted", deleted)
+		return
+	}
+	if err := b.sendJunkReplyHint(ctx, m, granted, deleted); err != nil {
+		// Подсказка не доставлена — откатываем claim: следующее мусорное
+		// сообщение объяснит заново (прецедент ClearWarned у карантина).
+		b.replies.ReleaseJunkHint(chatID, userID, p)
+		b.log.Warn("junk reply: send hint", "err", err, "chat", chatID, "user", userID)
+		return
+	}
+	b.log.Info("reply check: junk answer", "chat", chatID, "user", userID,
+		"stage", p.Stage, "extended", granted, "deleted", deleted)
+}
+
+// junkReplyHintText — текст эфемерной подсказки автору мусорного ответа.
+// extended говорит, что серия РЕАЛЬНО получила +5 минут: обещать время,
+// которого не будет (продление уже тратилось или двигать было некуда), нельзя.
+// deleted — что сообщение действительно удалили (сбой удаления честнее не
+// упоминать вовсе). Тексты просят «пару слов», фильтр принимает и одно
+// содержательное слово — запас в щедрую сторону: пропустить слабый ответ
+// дешевле, чем удалить настоящий. Пример в тексте — чтобы правило было
+// исполнимым: человек, машинально написавший «+», должен увидеть, как
+// выглядит валидный ответ.
+func junkReplyHintText(extended, deleted bool) string {
+	text := "🙈 Это не считается ответом: нужен текст с парой слов по делу — «+», смайлики, стикеры и медиа без подписи не засчитываются. Например: «планирую бегать» или «ещё не бегала»."
+	if deleted {
+		text += " Сообщение удалено."
+	}
+	if extended {
+		text += fmt.Sprintf(" ⏱ Даю ещё %d минут.", int(junkReplyExtend/time.Minute))
+	}
+	return text
+}
+
+// sendJunkReplyHint шлёт подсказку эфемерно (видит только адресат; прецедент
+// цензора карантина — без привязки к эфемерному режиму чата) и в тот же
+// форум-топик, где было сообщение. Best effort: публичного фолбэка нет —
+// удалённый мусор не повод шуметь на весь чат.
+func (b *Bot) sendJunkReplyHint(ctx context.Context, m *telego.Message, extended, deleted bool) error {
+	notice := tu.Message(tu.ID(m.Chat.ID), junkReplyHintText(extended, deleted)).
+		WithEphemeralMessageParameters(&telego.EphemeralMessageParameters{ReceiverUserID: int(m.From.ID)})
+	if m.MessageThreadID != 0 {
+		notice = notice.WithMessageThreadID(m.MessageThreadID)
+	}
+	_, err := b.api.SendMessage(ctx, notice)
+	return err
+}
+
+// replyWaitMiddleware — обработка входящего группового сообщения с контентом в
+// middleware (ДО маршрутизации): настоящий ответ снимает ожидание, мусор
+// удаляется. Возвращает true, если апдейт надо заглотить (мусор: удалён и в
+// счётчики/архив/ИИ-чек не идёт); false — сообщение уходит дальше по цепочке.
+// Вынесено из замыкания middleware ради тестируемости (сам middleware лишь
+// вызывает метод — см. bot.go).
+func (b *Bot) replyWaitMiddleware(m *telego.Message) bool {
+	p, ok := b.replies.Get(m.Chat.ID, m.From.ID)
+	if !ok {
+		return false
+	}
+	if replyCountsAsAnswer(m) {
+		// не-nil — юзер реально прошёл 2-й уровень (ответил на приветствие):
+		// подписчикам mod_notify уходит форвард его сообщения + карточка
+		// (goSafe — не тормозим хендлер).
+		if taken := b.replyWaitSatisfied(m.Chat.ID, m.From.ID); taken != nil {
+			b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(m, taken) })
+		}
+		return false
+	}
+	// Команда — не ответ и не мусор: «/ban», «/del», «/start» короче порога
+	// фильтра, но удалять и глотать их нельзя — они уходят в свои хендлеры
+	// (ожидание при этом остаётся взведённым: replyCountsAsAnswer команды не
+	// засчитывает, напоминание/кара по сроку идут как шли). Гейт сервисности —
+	// defense-in-depth: арм уже требует обслуживаемого чата, но удалять
+	// сообщение в брошенном чате бот не должен.
+	if isCommandText(m) || !b.chatServiceable(m.Chat.ID) {
+		return false
+	}
+	// Мусорный ответ: удаление + подсказка + разовые +5 минут — в фоне
+	// (сетевые лестницы ретраев не должны тормозить цепочку хендлеров).
+	b.goSafe("junkReply", func() { b.handleJunkReply(m, p) })
+	return true
 }
 
 // cancelReplyWait тихо снимает ожидание (юзер вышел/кикнут/забанен/замьючен) —
@@ -368,7 +746,10 @@ func (b *Bot) disarmReplyWait(ctx context.Context, chatID, userID int64, p *repl
 func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 	ctx := b.runCtx
 	for {
-		timer := time.NewTimer(time.Until(p.ExpiresAt))
+		// Дедлайн читается методом стора (под мьютексом): мусорный ответ
+		// мог отодвинуть его (+5 минут) в любой момент — прямое чтение поля
+		// гонялось бы с Postpone.
+		timer := time.NewTimer(time.Until(b.replies.Deadline(p)))
 		select {
 		case <-p.Done():
 			timer.Stop()
@@ -385,6 +766,14 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// настоящий победитель (ответ юзера, его выход, финальная кара ниже).
 		if cur, ok := b.replies.Get(chatID, userID); !ok || cur != p {
 			return
+		}
+
+		// Дедлайн мог отодвинуться (+5 минут за мусорный ответ) ровно в
+		// момент срабатывания старого таймера: стадия та же — не напоминаем и
+		// не караем, просто перезаводим сон на новый срок. Гонки с Postpone
+		// нет: срок читается под тем же мьютексом стора.
+		if b.replies.Deadline(p).After(time.Now()) {
+			continue
 		}
 
 		// Страховка от устаревшего арма и гонок со сменой режима: серия могла
@@ -411,8 +800,18 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		// pending_replies удаляем только после успеха — рестарт повторит
 		// наказание иначе.
 		if p.Stage >= captchaStages {
-			taken, ok := b.replies.Take(chatID, userID)
-			if !ok || taken != p {
+			// TakeExpired — изъятие и проверка срока под ОДНИМ мьютексом:
+			// мусорный ответ мог продлить серию (обещание «+5 минут» в
+			// подсказке) в микроокне между проверкой дедлайна выше и Take —
+			// кара не должна убить того, кому подсказка только что пообещала
+			// время.
+			if _, ok := b.replies.TakeExpired(chatID, userID, p, time.Now()); !ok {
+				// Либо ожидание уже разрешил кто-то другой (выход, ответ,
+				// /mute — он и записал исход), либо его продлили («+5») —
+				// тогда просто перезаводим сон на новый срок.
+				if _, mine := b.replies.Get(chatID, userID); mine {
+					continue
+				}
 				return
 			}
 			b.deleteReplyAnchor(ctx, chatID, userID)
@@ -441,6 +840,12 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 		//    прилетевший в секунды ретраев отправки, обязан застать pending
 		//    в store (replyWaitSatisfied), иначе серия дожала бы написавшего.
 		nextExpires := time.Now().Add(b.effectiveStageInterval(s))
+		// «+5 минут» могло приземлиться между проверкой дедлайна выше и этой
+		// строкой: переносим его в следующую стадию — обещание подсказки не
+		// должно потеряться на переходе.
+		if d := b.replies.Deadline(p); d.After(nextExpires) {
+			nextExpires = d
+		}
 		if err := b.db.PutPendingReply(ctx, storage.PendingReply{
 			ChatID: chatID, UserID: userID, ExpiresAt: nextExpires,
 			Stage: p.Stage + 1, ThreadID: p.ThreadID,
@@ -449,8 +854,8 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 				"chat", chatID, "user", userID, "stage", p.Stage+1)
 		}
 
-		// Якорь текущей стадии сносим: «напиши что-нибудь» без сообщения,
-		// к которому оно прикреплено, — мусор в ленте.
+		// Якорь текущей стадии сносим: «напиши пару слов по делу» без
+		// сообщения, к которому оно прикреплено, — мусор в ленте.
 		b.deleteReplyAnchor(ctx, chatID, userID)
 
 		msgID, sent := b.sendGreetingAnchor(ctx, s, welcomeReply, chatID, userID, p.ThreadID, p.Stage+1)
@@ -508,6 +913,21 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 					"err", err, "chat", chatID, "user", userID)
 			}
 			return
+		}
+		// Replace под тем же мьютексом мог поднять срок выше предложенного
+		// («+5 минут» приземлилось в окно перехода — см. Replace). Строку
+		// N+1 выше писали ДО этого момента, с предложенным сроком: досылаем
+		// фактический, иначе рестарт откатил бы продление к более раннему.
+		// Guard-UPDATE по стадии, НЕ upsert (прецедент ExtendPendingReplyIf
+		// мусорной ветки): победитель (ответ/выход/кара), приземлившийся
+		// между чтением Deadline и этой записью, уже снёс строку N+1 — upsert
+		// воскресил бы её, и рестарт зарядил бы фантомную серию ответившему.
+		// 0 строк (строки уже нет / стадия ушла дальше) — норма.
+		if d := b.replies.Deadline(next); d.After(nextExpires) {
+			if err := b.db.ExtendPendingReplyIf(ctx, chatID, userID, next.Stage, d); err != nil {
+				b.log.Warn("persist extended reply deadline after transition", "err", err,
+					"chat", chatID, "user", userID, "stage", next.Stage)
+			}
 		}
 		p = next
 	}
@@ -643,20 +1063,22 @@ func (b *Bot) restoredReplyUserDeparted(ctx context.Context, row storage.Pending
 	return true
 }
 
-// replyRequirementLine — строка-требование для стадии stage серии (владелец
-// выбрал «любое сообщение», не строгий reply). Стадия 1 — нейтральная, 2 —
-// напоминание, 3 — последнее предупреждение. minutesStr — интервал в родительном
-// падеже («в течение 2 минут»), готовит minutesGen.
+// replyRequirementLine — строка-требование для стадии stage серии. Стадия 1 —
+// нейтральная, 2 — напоминание, 3 — последнее предупреждение. Текст честно
+// называет фильтр осмысленности (см. replyCountsAsAnswer): «+», смайлик или
+// стикер ответом не считаются, а требование без оговорки обманывало бы: юзер
+// «выполнил» его формальной заглушкой, а серия продолжала бы идти. minutesStr —
+// интервал в родительном падеже («в течение 2 минут»), готовит minutesGen.
 func replyRequirementLine(stage int, minutesStr string) string {
 	switch stage {
 	case 2:
-		return fmt.Sprintf("\n\n⏳ Напоминание: напиши что-нибудь в чат в течение %s — иначе придётся зайти заново.",
+		return fmt.Sprintf("\n\n⏳ Напоминание: напиши пару слов по делу в течение %s — иначе придётся зайти заново. «+», смайлики, стикеры и медиа без подписи не засчитываются.",
 			minutesStr)
 	case 3:
-		return fmt.Sprintf("\n\n⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: напиши что-нибудь в чат в течение %s — иначе тебя исключат из чата.",
+		return fmt.Sprintf("\n\n⚠️ ПОСЛЕДНЕЕ ПРЕДУПРЕЖДЕНИЕ: напиши пару слов по делу в течение %s — иначе тебя исключат из чата. «+», смайлики, стикеры и медиа без подписи не засчитываются.",
 			minutesStr)
 	default:
-		return fmt.Sprintf("\n\n⏱ Напиши что-нибудь в чат в течение %s — иначе придётся зайти заново.",
+		return fmt.Sprintf("\n\n⏱ Напиши пару слов по делу в течение %s — иначе придётся зайти заново. «+», смайлики, стикеры и медиа без подписи не засчитываются.",
 			minutesStr)
 	}
 }

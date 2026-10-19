@@ -354,18 +354,18 @@ func (b *Bot) Run(ctx context.Context) error {
 	// Снятие ожидания «ответь на приветствие» — в middleware, ДО маршрутизации:
 	// иначе команда (/start и т.п.) первым сообщением новичка ушла бы в свой
 	// хендлер мимо handleGroupMessage, и юзера кикнуло бы за молчание, хотя он
-	// написал. Дёшево (in-memory Take-промах для всех, у кого ожидания нет).
+	// написал. Дёшево (in-memory Get-промах для всех, у кого ожидания нет).
 	// Только НАСТОЯЩИЙ контент (текст/медиа): сервисное сообщение (новичок
 	// добавил участника — тоже с From) не должно засчитываться за ответ.
+	// Фильтр осмысленности и судьба мусора («+», «привет», смайлик, стикер,
+	// голая ссылка → удаление, эфемерная подсказка, разовые +5 минут, апдейт
+	// глотается) — в replyWaitMiddleware (replywait.go).
 	bh.Use(func(ctx *th.Context, update telego.Update) error {
 		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot {
 			if (m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
 				messageHasUserContent(m) {
-				// не-nil — юзер реально прошёл 2-й уровень (ответил на
-				// приветствие): подписчикам mod_notify уходит форвард его
-				// сообщения + карточка (goSafe — не тормозим хендлер)
-				if p := b.replyWaitSatisfied(m.Chat.ID, m.From.ID); p != nil {
-					b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(m, p) })
+				if b.replyWaitMiddleware(m) {
+					return nil
 				}
 			}
 			// ЛС-команда перехватывается своим хендлером мимо handlePrivateText

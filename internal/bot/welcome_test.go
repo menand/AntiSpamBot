@@ -90,7 +90,7 @@ func TestSendGreetingAnchorModes(t *testing.T) {
 		if !strings.Contains(body, "Ласково") {
 			t.Errorf("greeting body expected, got: %s", body)
 		}
-		if strings.Contains(body, "Напиши что-нибудь") {
+		if strings.Contains(body, "пару слов по делу") {
 			t.Errorf("greet must not carry the requirement line: %s", body)
 		}
 		if strings.Contains(body, "rpok:") || strings.Contains(body, "reply_markup") {
@@ -112,7 +112,7 @@ func TestSendGreetingAnchorModes(t *testing.T) {
 		if !strings.Contains(body, "Проверочка") {
 			t.Errorf("reply body expected, got: %s", body)
 		}
-		if !strings.Contains(body, "Напиши что-нибудь") {
+		if !strings.Contains(body, "пару слов по делу") || !strings.Contains(body, "не засчитываются") {
 			t.Errorf("requirement line expected: %s", body)
 		}
 		if !strings.Contains(body, "rpok:") {
@@ -199,7 +199,7 @@ func TestOnSuccessWelcomeModes(t *testing.T) {
 			t.Fatal("reply wait must be armed")
 		}
 		bodies := fc.callBodies("sendMessage")
-		if len(bodies) != 1 || !strings.Contains(bodies[0], "Напиши что-нибудь") {
+		if len(bodies) != 1 || !strings.Contains(bodies[0], "пару слов по делу") {
 			t.Fatalf("anchor with the requirement expected, bodies = %v", bodies)
 		}
 		// Гасим серию, чтобы её таймер не пострелял после закрытия БД.

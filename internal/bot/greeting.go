@@ -351,7 +351,7 @@ func (b *Bot) welcomeInputPromptText(ctx context.Context, chatID int64, s storag
 	}
 	extra := ""
 	if kind == welcomeReply {
-		extra = "Строка «напиши что-нибудь…» и кнопки для админов добавятся сами.\n"
+		extra = "Строка «напиши пару слов по делу…» и кнопки для админов добавятся сами.\n"
 	}
 	if lead != "" {
 		lead += "\n\n"
