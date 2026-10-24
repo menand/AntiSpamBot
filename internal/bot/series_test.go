@@ -168,12 +168,13 @@ func waitForWithin(t *testing.T, within time.Duration, cond func() bool) {
 	}
 }
 
-// TestReplyWaitLatePassDeletesReminder — поздний ответ (стадия 2+) сносит
-// напоминание-якорь и пишет пасс; ответ на первой стадии приветствие хранит.
-func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
+// TestReplyWaitLatePassKeepsReminder — поздний ответ (стадия 2+) ОБЯЗАН
+// оставлять якорь в чате (чтобы у ответа новичка был контекст), но снимать
+// с него клавиатуру админов; ответ на первой стадии приветствие тоже хранит.
+func TestReplyWaitLatePassKeepsReminder(t *testing.T) {
 	ctx := context.Background()
 
-	t.Run("поздний ответ — напоминание удалено", func(t *testing.T) {
+	t.Run("поздний ответ — якорь остаётся, клавиатура снята", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
@@ -187,11 +188,15 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 
 		b.replyWaitSatisfied(testChatID, testUserID)
 
-		if n := fc.callCount("deleteMessage"); n != 1 {
-			t.Fatalf("deleteMessage calls = %d, want 1 (якорь стадии 2)", n)
+		if n := fc.callCount("deleteMessage"); n != 0 {
+			t.Fatalf("deleteMessage calls = %d, want 0 (якорь стадии 2 остаётся)", n)
 		}
-		if _, ok, err := db.TakeGreetingMsg(ctx, testChatID, testUserID); err != nil || ok {
-			t.Fatalf("greeting row must be consumed (ok=%v err=%v)", ok, err)
+		if n := fc.callCount("editMessageReplyMarkup"); n != 1 {
+			t.Fatalf("editMessageReplyMarkup calls = %d, want 1 (сняли клавиатуру)", n)
+		}
+		// Строка greetings НЕ消耗ется: она нужна cleanupTargetTraces при спам-бане.
+		if _, ok, err := db.GetGreetingMsg(ctx, testChatID, testUserID); err != nil || !ok {
+			t.Fatalf("greeting row must remain (ok=%v err=%v)", ok, err)
 		}
 		kinds := statsKinds(t, db, testChatID, testUserID)
 		if kinds[storage.EventPass] != 1 {
@@ -202,7 +207,7 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 		}
 	})
 
-	t.Run("ответ на первой стадии — приветствие остаётся", func(t *testing.T) {
+	t.Run("ответ на первой стадии — приветствие остаётся, клавиатура снята", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
@@ -218,6 +223,9 @@ func TestReplyWaitLatePassDeletesReminder(t *testing.T) {
 
 		if n := fc.callCount("deleteMessage"); n != 0 {
 			t.Fatalf("deleteMessage calls = %d, want 0 (обычное приветствие)", n)
+		}
+		if n := fc.callCount("editMessageReplyMarkup"); n != 1 {
+			t.Fatalf("editMessageReplyMarkup calls = %d, want 1 (сняли клавиатуру)", n)
 		}
 	})
 }
