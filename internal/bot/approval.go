@@ -36,6 +36,33 @@ func (b *Bot) chatServiceable(chatID int64) bool {
 	return b.chatAllowed(chatID) && b.chatApproved(chatID)
 }
 
+// chatServiceableChecked — вариант для фоновых проб: ошибка чтения статуса
+// возвращается отдельно, чтобы вызывающий отложил работу, а не снял
+// наблюдение навсегда. chatServiceable на ошибке fail-closed (false) — для
+// горячего пути это правильно, но «не смог прочитать» ≠ «чат больше не
+// обслуживается».
+func (b *Bot) chatServiceableChecked(ctx context.Context, chatID int64) (bool, error) {
+	if !b.chatAllowed(chatID) {
+		return false, nil
+	}
+	b.approvalMu.Lock()
+	a, ok := b.approvalCache[chatID]
+	b.approvalMu.Unlock()
+	if ok {
+		return a, nil
+	}
+	status, exists, err := b.db.GetChatApproval(ctx, chatID)
+	if err != nil {
+		return false, fmt.Errorf("get chat approval: %w", err)
+	}
+	if !exists {
+		return false, nil
+	}
+	approved := status == storage.ChatApproved
+	b.setApprovalCache(chatID, approved)
+	return approved, nil
+}
+
 // chatApproved отвечает, подтвердил ли владелец работу бота в чате. Кэш —
 // паттерн adminCache: редкие записи, частые чтения (на каждом групповом
 // сообщении). Кэшируются только существующие строки: незарегистрированный чат

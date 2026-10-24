@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mymmrac/telego"
@@ -54,6 +55,20 @@ type Bot struct {
 	// Активные карантины новичков (зеркало chat_quarantine) — горячий путь
 	// цензора: каждое сообщение ограниченного юзера проверяется из памяти.
 	quar *quarantineStore
+
+	// Отслеживание удаления/правки осмысленного ответа: одноразовое
+	// уведомление о сломанном служебном чате и флаг переключения проб на ЛС
+	// владельца после подтверждённой аварии. replyWatchBlocked — копии не
+	// удаляются (нет права) или право отобрали: пробы выключаются до
+	// перезапуска, иначе текст юзера оседал бы в служебном чате навсегда.
+	// replyWatchChats — дешёвый предфильтр правок: транзакцию открываем
+	// только для чатов, где наблюдение хоть раз создавалось.
+	replyWatchBrokenNotified atomic.Bool
+	replyWatchWarnPending    atomic.Bool
+	replyWatchFallback       atomic.Bool
+	replyWatchBlocked        atomic.Bool
+	replyWatchDeleteFailures atomic.Int32
+	replyWatchChats          sync.Map
 
 	// Write-through-кэши над chats/user_info: пропускаем запись в БД, когда
 	// значение не изменилось. Экономят 2 из 4 SQLite-записей на групповое
@@ -262,6 +277,20 @@ func (b *Bot) Run(ctx context.Context) error {
 		defer b.waitCaptureDone()
 	}
 	b.goSafe("archiveLoop", func() { b.archiveLoop(ctx) })
+	if b.cfg.ReplyWatchEnabled {
+		// Диагностика/свип — в той же горутине, что и цикл: сетевые проверки
+		// (getChat/getChatMember) не должны задерживать приём апдейтов.
+		b.goSafe("replyWatchLoop", func() {
+			b.setupReplyWatch(ctx)
+			b.replyWatchLoop(ctx)
+		})
+	} else if err := b.db.DeleteAllReplyWatches(ctx); err != nil {
+		// Наблюдения — короткоживущее состояние (час). Выключенная фича не
+		// должна оставить «бомбу»: при повторном включении старые строки
+		// разом созрели бы и завалили владельца отчётами о давно прожитых
+		// сообщениях.
+		b.log.Warn("reply watch: clear disabled watches", "err", err)
+	}
 	var providers []string
 	for _, p := range b.aiProviders() {
 		if p.c.Enabled() {
@@ -398,6 +427,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleGreetingCommand, th.CommandEqual("greeting"))
 	bh.HandleMessage(b.handleKickCommand, th.CommandEqual("kick"))
 	bh.HandleMessage(b.handleBanCommand, th.CommandEqual("ban"))
+	bh.HandleMessage(b.handleReplyWithBotCommand, th.CommandEqual("replywithbot"))
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("del"))
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("delete"))
 	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))

@@ -20,6 +20,7 @@ func clearEnv(t *testing.T) {
 		"GIGACHAT_AUTH_KEY", "GIGACHAT_SCOPE", "GIGACHAT_MODEL",
 		"AI_PROVIDER_ORDER",
 		"MESSAGE_CAPTURE_ENABLED", "ARCHIVE_DIR", "MESSAGE_ARCHIVE_HOT_DAYS",
+		"REPLY_WATCH_ENABLED", "REPLY_WATCH_CHAT_ID",
 	} {
 		t.Setenv(name, "")
 	}
@@ -194,6 +195,29 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.ArchiveDir != "" {
 		t.Errorf("archive dir default must be empty (derived from DB path): %q", cfg.ArchiveDir)
 	}
+	if !cfg.ReplyWatchEnabled {
+		t.Error("reply watch must default to on")
+	}
+	if cfg.ReplyWatchChatID != 0 {
+		t.Errorf("reply watch chat id default must be 0 (owner DM): %d", cfg.ReplyWatchChatID)
+	}
+}
+
+func TestReplyWatchConfigParsing(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("BOT_TOKEN", "123:abc")
+	t.Setenv("REPLY_WATCH_ENABLED", "0")
+	t.Setenv("REPLY_WATCH_CHAT_ID", "-100123")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.ReplyWatchEnabled {
+		t.Error("REPLY_WATCH_ENABLED=0 must disable the watch")
+	}
+	if cfg.ReplyWatchChatID != -100123 {
+		t.Errorf("reply watch chat id = %d, want -100123", cfg.ReplyWatchChatID)
+	}
 }
 
 func TestLoadValidation(t *testing.T) {
@@ -216,6 +240,9 @@ func TestLoadValidation(t *testing.T) {
 		{"negative archive hot days", "MESSAGE_ARCHIVE_HOT_DAYS", "-1"},
 		{"bad archive hot days", "MESSAGE_ARCHIVE_HOT_DAYS", "many"},
 		{"bad capture flag", "MESSAGE_CAPTURE_ENABLED", "maybe"},
+		{"bad reply watch flag", "REPLY_WATCH_ENABLED", "maybe"},
+		{"bad reply watch chat id", "REPLY_WATCH_CHAT_ID", "chat"},
+		{"zero reply watch chat id", "REPLY_WATCH_CHAT_ID", "0"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

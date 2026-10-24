@@ -369,10 +369,14 @@ func (b *Bot) banRevoke(ctx context.Context, chatID, userID int64) error {
 
 // kickRevoke — кик со стиранием ВСЕХ сообщений юзера (для админской команды
 // /kick): banRevoke + unban, чтобы юзер мог перезайти. Обе половины ретраятся.
+// Метка наблюдения ставится сразу после удавшейся ban-половины (revoke уже
+// стёр сообщения), до unban: окно, в котором проба может увидеть «not found»,
+// минимизировано (но не закрыто атомарно — метка это отдельный UPDATE).
 func (b *Bot) kickRevoke(ctx context.Context, chatID, userID int64) error {
 	if err := b.banRevoke(ctx, chatID, userID); err != nil {
 		return err
 	}
+	b.markReplyWatchesDeletedByUser(chatID, userID, replyWatchDeletedByKick)
 	return b.unban(ctx, chatID, userID)
 }
 

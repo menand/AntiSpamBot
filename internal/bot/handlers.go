@@ -348,6 +348,9 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
 		b.log.Warn("delete pending replies", "err", err, "chat", chatID)
 	}
+	if err := b.db.DeleteReplyWatchesChat(ctx, chatID); err != nil {
+		b.log.Warn("delete reply watches", "err", err, "chat", chatID)
+	}
 	// Голосования тоже: оставшаяся плашка жила бы до суточного свипа, и
 	// золотой голос в уже не обслуживаемом чате выдал бы глобальный бан.
 	if err := b.db.DeleteChatSpamVotes(ctx, chatID); err != nil {
@@ -573,6 +576,9 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 				return
 			}
 			b.log.Info("banned known spammer on join", "chat", chatID, "user", user.ID)
+			// У спамера мог остаться наблюдаемый ответ с прошлой жизни в
+			// чате — revoke его стёр, отчёт должен сказать «бот».
+			b.markReplyWatchesDeletedByUser(chatID, user.ID, replyWatchDeletedBySpam)
 			if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventSpamBan, time.Now(), storage.ReasonGlobal); err != nil {
 				b.log.Warn("record spamban event (join)", "err", err)
 			}
@@ -1389,6 +1395,9 @@ func (b *Bot) handleGroupMessage(ctx *th.Context, message telego.Message) error 
 		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 			b.log.Warn("delete pre-captcha message",
 				"err", err, "chat", message.Chat.ID, "user", message.From.ID)
+		} else {
+			b.markReplyWatchDeletedByMessage(message.Chat.ID,
+				message.MessageID, replyWatchDeletedByCaptcha)
 		}
 		return nil
 	}
@@ -1463,6 +1472,9 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 		if err := b.deleteMessage(b.runCtx, message.Chat.ID, message.MessageID); err != nil {
 			b.log.Warn("delete edited pre-captcha message",
 				"err", err, "chat", message.Chat.ID, "user", message.From.ID)
+		} else {
+			b.markReplyWatchDeletedByMessage(message.Chat.ID,
+				message.MessageID, replyWatchDeletedByCaptcha)
 		}
 		return nil
 	}
@@ -1479,6 +1491,7 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 		// местах, одно из которых официально стёрто).
 		if b.isOwner(message.From.ID) {
 			b.captureMessage(&message, "edit")
+			b.maybeHandleReplyWatchEdit(&message)
 			return nil
 		}
 		isAdmin, sure := b.isChatAdminVerified(ctx, message.Chat.ID, message.From.ID)
@@ -1487,9 +1500,15 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 		// отбирает льготу (тот же трейд-офф, что у punishNonAdmin).
 		if isAdmin || !sure {
 			b.captureMessage(&message, "edit")
+			b.maybeHandleReplyWatchEdit(&message)
 			return nil
 		}
 		if quarantineViolates(&message) {
+			// Снимок обновляем ДО цензора: удаление пометит строку
+			// bot:quarantine, и отчёт об удалении покажет уже новую
+			// (нарушающую) версию, а не старую. Отчёт о правке уходит
+			// отдельно — владелец видит, во что юзер правил ответ.
+			b.maybeHandleReplyWatchEdit(&message)
 			b.goSafe("quarantineCensorEdited", func() { b.censorQuarantineMessage(&message, e) })
 			return nil
 		}
@@ -1500,6 +1519,10 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	// захват не зависит от квоты ИИ, и серия быстрых правок не должна теряться
 	// из-за editCheckCooldown / уже идущей проверки.
 	b.captureMessage(&message, "edit")
+	// Наблюдаемый ответ на приветствие отредактировали — отчёт «было → стало»
+	// уходит сразу, независимо от reply-wait-фильтра: правка уже прошедшего
+	// ответа не должна теряться из-за осмысленности новой версии.
+	b.maybeHandleReplyWatchEdit(&message)
 	// Правка может быть и «дописал ответ на приветствие»: раньше правки
 	// вообще не снимали ожидание — человек, дописавший ответ в правке,
 	// получал кик за молчание при формально написанном ответе. Тот же фильтр
@@ -1508,6 +1531,7 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	// а версия уже разобранного).
 	if replyCountsAsAnswer(&message) {
 		if p := b.replyWaitSatisfied(message.Chat.ID, message.From.ID); p != nil {
+			b.startReplyWatch(&message)
 			b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(&message, p) })
 		}
 	}

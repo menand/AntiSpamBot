@@ -173,6 +173,12 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		`DELETE FROM pending_replies WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old pending_replies: %w", err)
 	}
+	// reply_watches — message ID сообщений старого чата после апгрейда умерли;
+	// проба по ним вернула бы «not found» и соврала бы об удалении.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM reply_watches WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old reply_watches: %w", err)
+	}
 
 	// spam_votes / spam_ballots / greetings — то же самое: message ID умерли
 	// вместе со старым чатом, переносить нечего.

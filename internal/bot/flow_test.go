@@ -39,6 +39,9 @@ type fakeCaller struct {
 	// (например, свой ephemeral_message_id).
 	respSeq map[string][]string
 	err     map[string]*telegoapi.Error // method → ошибка
+	// errSeq — method → очередь ошибок: вызов берёт следующую запись (nil =
+	// успех). Для сценариев «служебный чат сломан, fallback в ЛС работает».
+	errSeq map[string][]*telegoapi.Error
 	// errWhen — точечный сбой: метод проходит, если fn(data)==false.
 	errWhen func(method string, data *telegoapi.RequestData) bool
 }
@@ -53,6 +56,14 @@ func (f *fakeCaller) Call(_ context.Context, url string, data *telegoapi.Request
 	f.calls = append(f.calls, method)
 	f.bodies = append(f.bodies, body)
 	apiErr := f.err[method]
+	if seq := f.errSeq[method]; len(seq) > 0 {
+		apiErr = seq[0]
+		if len(seq) > 1 {
+			f.errSeq[method] = seq[1:]
+		} else {
+			delete(f.errSeq, method)
+		}
+	}
 	failWhen := f.errWhen != nil && f.errWhen(method, data)
 	want := f.resp[method]
 	if seq := f.respSeq[method]; len(seq) > 0 {
@@ -160,6 +171,7 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 		},
 		respSeq: map[string][]string{},
 		err:     map[string]*telegoapi.Error{},
+		errSeq:  map[string][]*telegoapi.Error{},
 	}
 	api, err := telego.NewBot("110201543:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawX", telego.WithAPICaller(fc), telego.WithDiscardLogger())
 	if err != nil {

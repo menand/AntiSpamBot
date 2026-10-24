@@ -85,6 +85,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"chat_settings", "welcome_mode", `ALTER TABLE chat_settings ADD COLUMN welcome_mode TEXT`},
 		{"chat_settings", "reply_text", `ALTER TABLE chat_settings ADD COLUMN reply_text TEXT`},
 		{"chat_settings", "reply_entities", `ALTER TABLE chat_settings ADD COLUMN reply_entities TEXT`},
+		// reply_watches создана в v1.23.0; ALTER'ы страхуют dev-БД, где таблица
+		// успела появиться до добавления колонок (schema.sql не трогает
+		// существующую таблицу).
+		{"reply_watches", "edit_reports", `ALTER TABLE reply_watches ADD COLUMN edit_reports INTEGER NOT NULL DEFAULT 0`},
+		{"reply_watches", "edit_notified_at", `ALTER TABLE reply_watches ADD COLUMN edit_notified_at INTEGER NOT NULL DEFAULT 0`},
+		{"reply_watches", "report_attempts", `ALTER TABLE reply_watches ADD COLUMN report_attempts INTEGER NOT NULL DEFAULT 0`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}

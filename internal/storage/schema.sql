@@ -217,6 +217,40 @@ CREATE TABLE IF NOT EXISTS pending_replies (
     PRIMARY KEY (chat_id, user_id)
 );
 
+-- Отслеживание осмысленного ответа на «приветствие с ответом»: бот копирует
+-- сообщение в служебный чат через 1/5/15/60 минут и сразу удаляет копию.
+-- «message to copy not found» = сообщение удалено, успех = живо. Текст —
+-- снимок на момент ответа/последней правки (для отчёта «было → стало»).
+-- stage — индекс следующей пробы в replyWatchOffsets (0..3), next_at — её
+-- unix-время. deleted_by: '' = не бот/неизвестно, 'bot:del'|'bot:kick'|
+-- 'bot:ban'|'bot:spam'|'bot:quarantine'|'bot:captcha' = удалил сам бот;
+-- сохраняется первая непустая метка (первый бот-удалитель побеждает).
+-- edit_reports/edit_notified_at — поток правок в ЛС владельца ограничен:
+-- первая карточка сразу, дальше не чаще раза в 5 минут и максимум 3 карточки
+-- на наблюдение (снимок текста при этом обновляется всегда).
+-- report_attempts — сколько раз не удалось доставить карточку об удалении
+-- (строка возвращается с next_at=+5m, максимум 3 попытки).
+CREATE TABLE IF NOT EXISTS reply_watches (
+    chat_id          INTEGER NOT NULL,
+    user_id          INTEGER NOT NULL,
+    message_id       INTEGER NOT NULL,
+    text             TEXT    NOT NULL,
+    answered_at      INTEGER NOT NULL,
+    stage            INTEGER NOT NULL DEFAULT 0,
+    next_at          INTEGER NOT NULL,
+    deleted_by       TEXT    NOT NULL DEFAULT '',
+    edit_reports     INTEGER NOT NULL DEFAULT 0,
+    edit_notified_at INTEGER NOT NULL DEFAULT 0,
+    report_attempts  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, message_id)
+);
+-- Фоновая проба ищет созревшие строки по next_at; свипер — по answered_at.
+-- (chat_id, user_id) — метки «удалил бот» при /kick|/ban|спам-бане (revoke
+-- стирает все сообщения юзера одним вызовом).
+CREATE INDEX IF NOT EXISTS idx_reply_watches_next ON reply_watches(next_at);
+CREATE INDEX IF NOT EXISTS idx_reply_watches_answered ON reply_watches(answered_at);
+CREATE INDEX IF NOT EXISTS idx_reply_watches_chat_user ON reply_watches(chat_id, user_id);
+
 -- Доверенные (chat, user): добавлены админом командой /whitelist — входят в
 -- чат без капчи, reply-ожидания и профиль-чека; доверие в чате перекрывает и
 -- глобальную базу спамеров при входе в ЭТОТ чат. Снимается только вручную

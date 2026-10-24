@@ -280,6 +280,9 @@ func (b *Bot) censorQuarantineMessage(m *telego.Message, e quarantineEntry) {
 		}); err != nil {
 			b.log.Warn("quarantine: delete violation",
 				"err", err, "chat", chatID, "user", userID)
+		} else {
+			b.markReplyWatchDeletedByMessage(chatID, m.MessageID,
+				replyWatchDeletedByQuarantine)
 		}
 	}
 	// Разовое пояснение срезается атомарным claim'ом: снапшот e устаревает

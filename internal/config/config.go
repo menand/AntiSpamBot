@@ -47,6 +47,14 @@ type Config struct {
 	// Это окно БЫСТРОГО доступа, а НЕ срок хранения: сами дневные архивы
 	// не удаляются никогда (удаление/пурж — ручная операция на VDS).
 	ArchiveHotDays int
+
+	// ReplyWatchEnabled — отслеживать ли удаление/правку осмысленного ответа
+	// на «приветствие с ответом» (проба copyMessage через 1/5/15/60 минут).
+	// По умолчанию включено.
+	ReplyWatchEnabled bool
+	// ReplyWatchChatID — служебный чат, куда проба копирует сообщение перед
+	// немедленным удалением. 0 = ЛС владельца (низший по id из OWNER_IDS).
+	ReplyWatchChatID int64
 }
 
 func Load() (*Config, error) {
@@ -150,6 +158,24 @@ func Load() (*Config, error) {
 		return nil, errors.New("MESSAGE_ARCHIVE_HOT_DAYS must be >= 0 (0 archives every elapsed day)")
 	}
 
+	// Отслеживание ответа на «приветствие с ответом»: по умолчанию включено,
+	// служебный чат для проб задаётся явно (пусто = ЛС владельца).
+	replyWatchEnabled, err := parseBool("REPLY_WATCH_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	var replyWatchChatID int64
+	if raw := strings.TrimSpace(os.Getenv("REPLY_WATCH_CHAT_ID")); raw != "" {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid REPLY_WATCH_CHAT_ID %q: %w", raw, err)
+		}
+		if id == 0 {
+			return nil, errors.New("REPLY_WATCH_CHAT_ID must be non-zero (omit it for owner DM)")
+		}
+		replyWatchChatID = id
+	}
+
 	return &Config{
 		Token:                token,
 		CaptchaStageInterval: time.Duration(stageMinutes) * time.Minute,
@@ -175,6 +201,8 @@ func Load() (*Config, error) {
 		MessageCaptureEnabled: messageCapture,
 		ArchiveDir:            os.Getenv("ARCHIVE_DIR"),
 		ArchiveHotDays:        archiveHotDays,
+		ReplyWatchEnabled:     replyWatchEnabled,
+		ReplyWatchChatID:      replyWatchChatID,
 	}, nil
 }
 

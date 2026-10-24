@@ -180,13 +180,29 @@ func (b *Bot) sendModCard(targets []int64, chatID, targetID int64, kind storage.
 // получателей. Best effort: ошибки только Warn. Общий хвост sendModCard и
 // notifyReplyAnswered.
 func (b *Bot) sendNotificationHTML(targets []int64, text, logKey string) {
+	b.sendNotificationHTMLCtx(b.runCtx, targets, text, logKey)
+}
+
+// sendNotificationHTMLCtx — то же с явным контекстом: фоновые пробы после
+// SIGTERM шлют отчёт на liveCtx, а не на уже отменённый runCtx. Возвращает
+// true, если сообщение доставлено хотя бы одному получателю (или получателей
+// нет): вызывающий отличает «ушло» от «все отправки провалились» и решает,
+// повторять ли отчёт.
+func (b *Bot) sendNotificationHTMLCtx(ctx context.Context, targets []int64, text, logKey string) bool {
+	if len(targets) == 0 {
+		return true
+	}
+	delivered := false
 	for _, ownerID := range targets {
-		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), text).
+		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(ownerID), text).
 			WithParseMode(telego.ModeHTML).
 			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
 			b.log.Warn(logKey, "err", err, "owner", ownerID)
+			continue
 		}
+		delivered = true
 	}
+	return delivered
 }
 
 // humanReason разворачивает reason события (см. storage.Reason*) в

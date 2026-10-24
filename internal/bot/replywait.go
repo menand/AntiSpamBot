@@ -643,6 +643,10 @@ func (b *Bot) replyWaitMiddleware(m *telego.Message) bool {
 		// подписчикам mod_notify уходит форвард его сообщения + карточка
 		// (goSafe — не тормозим хендлер).
 		if taken := b.replyWaitSatisfied(m.Chat.ID, m.From.ID); taken != nil {
+			// Наблюдение за удалением/правкой — до асинхронного уведомления:
+			// синхронная запись гарантирует, что следующий /del не опередит
+			// строку и отчёт не соврёт «не бот».
+			b.startReplyWatch(m)
 			b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(m, taken) })
 		}
 		return false

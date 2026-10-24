@@ -9,16 +9,15 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	golang.org/x/image v0.47.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
-	modernc.org/sqlite v1.60.1
+	modernc.org/sqlite v1.61.0
 )
 
 require (
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.4 // indirect
-	github.com/bytedance/sonic/loader v0.5.2 // indirect
+	github.com/bytedance/sonic/loader v0.5.3 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/google/pprof v0.0.0-20261016150608-1facf8f91b50 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grbit/go-json v0.11.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.1 // indirect
@@ -32,9 +31,8 @@ require (
 	github.com/valyala/fastjson v1.6.10 // indirect
 	golang.org/x/arch v0.32.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/tools v0.52.0 // indirect
-	modernc.org/cc/v4 v4.30.3 // indirect
-	modernc.org/libc v1.77.1 // indirect
+	modernc.org/ccgo/v4 v4.38.0 // indirect
+	modernc.org/libc v1.79.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )

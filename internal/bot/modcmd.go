@@ -64,6 +64,9 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	var actErr error
 	if permanent {
 		actErr = b.banRevoke(mctx, chatID, targetID)
+		if actErr == nil {
+			b.markReplyWatchesDeletedByUser(chatID, targetID, replyWatchDeletedByBan)
+		}
 	} else {
 		actErr = b.kickRevoke(mctx, chatID, targetID)
 	}
@@ -130,6 +133,8 @@ func (b *Bot) handleDeleteCommand(ctx *th.Context, message telego.Message) error
 	if r := message.ReplyToMessage; r != nil && r.ForumTopicCreated == nil {
 		if err := b.deleteMessage(b.runCtx, chatID, r.MessageID); err != nil {
 			b.log.Debug("delete target via /del", "err", err, "chat", chatID)
+		} else {
+			b.markReplyWatchDeletedByMessage(chatID, r.MessageID, replyWatchDeletedByDel)
 		}
 	}
 	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
@@ -373,7 +378,9 @@ const groupCommandsList = "/spam — репорт на спамера (репл�
 	"/fullunban — снять баны во всех моих чатах и вычеркнуть из базы спамеров\n" +
 	"/unmute — снять мьют (список или @username)\n" +
 	"/whitelist — впускать без капчи (список или @username)\n" +
-	"/trust — досрочно снять карантин новичка (реплаем или @username)"
+	"/trust — досрочно снять карантин новичка (реплаем или @username)\n" +
+	"\nКоманда владельца бота:\n" +
+	"/replywithbot <текст> — ответить от имени бота на сообщение юзера (реплаем)"
 
 func (b *Bot) groupHelpText() string {
 	t := "🛡 <b>Команды бота</b> (/spam доступна всем участникам с историей сообщений):\n" + groupCommandsList +

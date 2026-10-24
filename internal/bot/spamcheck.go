@@ -1132,6 +1132,11 @@ func (b *Bot) executeSpamBan(v storage.SpamVote, reason, why string) bool {
 		b.log.Warn("spam ban", "err", err, "chat", v.ChatID, "user", v.AuthorID)
 	} else {
 		banned = true
+		// Revoke уже стёр все сообщения автора, включая наблюдаемый ответ
+		// на приветствие. Метка «бот» ставится сразу после бана: окно до
+		// пробы минимизировано, хотя и не закрыто атомарно (метка — отдельный
+		// UPDATE после успешного API-вызова).
+		b.markReplyWatchesDeletedByUser(v.ChatID, v.AuthorID, replyWatchDeletedBySpam)
 		// Гасим активные проверки ПОСЛЕ успешного бана (до записи
 		// события): таймауты не должны добавить свой kick/noreply поверх
 		// spamban. Ответить по старой капче/якорю забаненный больше не
@@ -1158,9 +1163,13 @@ func (b *Bot) executeSpamBan(v storage.SpamVote, reason, why string) bool {
 	// revoke обычно уже стёр сообщение; ручное удаление — страховка на
 	// случай неудавшегося бана (нет прав), поэтому ошибку глушим тихо.
 	// У профильной плашки целевого сообщения нет (TargetMsgID == 0).
+	// Успешное удаление здесь — тоже действие бота: без метки проба
+	// приписала бы его юзеру (banRevoke выше не прошёл, mark-by-user не лёг).
 	if v.TargetMsgID != 0 {
 		if err := b.deleteMessage(b.runCtx, v.ChatID, v.TargetMsgID); err != nil {
 			b.log.Debug("delete spam target (already gone?)", "err", err, "chat", v.ChatID)
+		} else {
+			b.markReplyWatchDeletedByMessage(v.ChatID, v.TargetMsgID, replyWatchDeletedBySpam)
 		}
 	}
 	// Общая база — только при УДАВШЕМСЯ бане: неисполнимый вердикт (нет прав
@@ -1280,6 +1289,9 @@ func (b *Bot) banEverywhere(originChatID, userID int64) []string {
 			b.log.Warn("cross-chat spam ban", "err", err, "chat", c.ChatID, "user", userID)
 			continue
 		}
+		// Кросс-бан тоже с RevokeMessages: наблюдаемый ответ в этом чате
+		// стёрт ботом, а не юзером.
+		b.markReplyWatchesDeletedByUser(c.ChatID, userID, replyWatchDeletedBySpam)
 		// Разоружаем активные проверки этого чата СРАЗУ: сиротский таймаут
 		// капчи при сработке вызвал бы onFail → kick (ban+unban) и СНЯЛ бы
 		// только что поставленный кросс-бан, а reply-wait дал бы фантомный
