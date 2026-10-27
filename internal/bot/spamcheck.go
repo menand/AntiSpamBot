@@ -392,8 +392,9 @@ func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 		msgText = message.Caption
 	}
 
+	threadID := threadOf(message)
 	for _, ownerID := range targets {
-		_, forwardErr := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
+		sent, forwardErr := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
 			ChatID:     tu.ID(ownerID),
 			FromChatID: tu.ID(chatID),
 			MessageID:  message.MessageID,
@@ -408,11 +409,14 @@ func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 			} else {
 				info += "\n\n🔒 <b>Защищённый контент</b> (форвард запрещён, текста нет)"
 			}
+		} else if sent != nil {
+			// Ответ реплаем на форвард = ответ на сообщение нарушителя.
+			b.linkOwnerDMSource(ownerID, sent.MessageID, chatID, threadID, message.MessageID, true)
 		}
-		if _, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), info).
-			WithParseMode(telego.ModeHTML).
-			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
-			b.log.Warn("notify spam suspicion", "err", err, "owner", ownerID)
+		info += ownerDMReplyHint
+		if card := b.sendNotificationOne(b.runCtx, ownerID, info, "notify spam suspicion"); card != nil {
+			// Карточка тоже пригодна для ответа (без частичной цитаты).
+			b.linkOwnerDMSource(ownerID, card.MessageID, chatID, threadID, message.MessageID, false)
 		}
 	}
 }

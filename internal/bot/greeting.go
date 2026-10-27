@@ -39,11 +39,15 @@ const quarantineNoticeLine = "\n🧫 Карантин новичка: пока �
 const greetInputTTL = 15 * time.Minute
 
 // greetInputState — взведённый запрос: для какого чата текст, какого рода
-// (приветствие или проверка — род фиксируется в момент арма) и когда взведён.
+// (приветствие или проверка — род фиксируется в момент арма), id последнего
+// промпта/переспроса и когда взведён. promptMsgID нужен мосту «ответ из ЛС в
+// чат»: ответ реплаем ровно на этот промпт — штатный ответ флоу, а не
+// «протухшая связка» (промпт — сообщение бота без owner_dm_links).
 type greetInputState struct {
-	chatID  int64
-	kind    welcomeMode // welcomeGreet | welcomeReply
-	armedAt time.Time
+	chatID      int64
+	kind        welcomeMode // welcomeGreet | welcomeReply
+	promptMsgID int
+	armedAt     time.Time
 }
 
 // maybeSendGreeting шлёт якорь стадии 1 серии (или просто приветствие, когда
@@ -163,11 +167,40 @@ func (b *Bot) handleGreetingCommand(_ *th.Context, _ telego.Message) error {
 }
 
 // setGreetingInputPending взводит для юзера состояние «следующее личное
-// сообщение — новый текст (kind) для чата chatID».
-func (b *Bot) setGreetingInputPending(userID, chatID int64, kind welcomeMode) {
+// сообщение — новый текст (kind) для чата chatID». promptMsgID — id
+// отправленного промпта: ответ реплаем именно на него обрабатывается как
+// текст флоу, а не как ответ на уведомление без связки.
+func (b *Bot) setGreetingInputPending(userID, chatID int64, kind welcomeMode, promptMsgID int) {
 	b.greetMu.Lock()
 	defer b.greetMu.Unlock()
-	b.greetInput[userID] = greetInputState{chatID: chatID, kind: kind, armedAt: time.Now()}
+	b.greetInput[userID] = greetInputState{
+		chatID:      chatID,
+		kind:        kind,
+		promptMsgID: promptMsgID,
+		armedAt:     time.Now(),
+	}
+}
+
+// greetingInputPromptMatch сообщает, что сообщение msgID — промпт (или
+// переспрос) взведённого ввода. fresh — арм живой; expired — это тот самый
+// промпт, но запрос уже провисел дольше greetInputTTL. Мост DM→чат по fresh
+// пропускает ответ в флоу, по expired — тоже (флоу сам честно скажет «запрос
+// устарел, текст не сохранён»), а вот «связка устарела» здесь была бы ложным
+// диагнозом: связки у промпта нет и не должно быть.
+func (b *Bot) greetingInputPromptMatch(userID int64, msgID int) (fresh, expired bool) {
+	if msgID <= 0 {
+		return false, false
+	}
+	b.greetMu.Lock()
+	defer b.greetMu.Unlock()
+	st, ok := b.greetInput[userID]
+	if !ok || st.promptMsgID != msgID {
+		return false, false
+	}
+	if time.Since(st.armedAt) > greetInputTTL {
+		return false, true
+	}
+	return true, false
 }
 
 // takeGreetingInput забирает взведённое состояние ввода. expired=true значит,
@@ -219,16 +252,33 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if message.From == nil {
 		return nil
 	}
+	// Ответ реплаем на пересланное ботом сообщение — публикация в исходном
+	// чате от имени бота. Проверяется ДО флоу ввода текста: это осознанный
+	// жест, а не шаблон; взведённый ввод при этом не сгорает (если владелец
+	// ответил на уведомление, промпт текста приветствия остаётся ждать).
+	// Исключение — ответ ровно на живой промпт флоу: его мост пропускает
+	// дальше (greetingInputPromptMatch), и текст сохраняется шаблоном.
+	if b.handleOwnerDMReply(ctx, message) {
+		return nil
+	}
 	chatID, kind, ok, expired := b.takeGreetingInput(message.From.ID)
 	noun := welcomeTextKindNoun(kind)
 
 	// Все сообщения флоу — один заменяемый экран screenPrompt: переспрос или
 	// подтверждение гасит прошлый промпт, «пришли мне текст» не копится.
 	// Ошибку отправки возвращаем вызывающим: там, где флоу продолжается,
-	// ввод перевзводится только после доставленного промпта.
-	reply := func(text string) error {
-		_, err := b.sendScreen(ctx, message.Chat.ID, screenPrompt, text, true, nil)
-		return err
+	// ввод перевзводится только после доставленного промпта. Возвращаем и
+	// id промпта — по нему мост DM→чат отличает ответ на промпт от ответа
+	// на уведомление без связки.
+	reply := func(text string) (int, error) {
+		sent, err := b.sendScreen(ctx, message.Chat.ID, screenPrompt, text, true, nil)
+		if err != nil {
+			return 0, err
+		}
+		if sent == nil {
+			return 0, nil
+		}
+		return sent.MessageID, nil
 	}
 
 	// rePrompt — переспрос: ПОЛНЫЙ промпт с вводной строкой, а не короткая
@@ -236,7 +286,7 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	// ({name}, «текущий текст», лимит 15 минут). Настройки и заголовок читаем
 	// на runCtx (та же БД-дисциплина, что у setWelcomeText), отправка — на ctx
 	// хендлера. Ошибка чтения — деградация до одной вводной строки.
-	rePrompt := func(lead string) error {
+	rePrompt := func(lead string) (int, error) {
 		s, err := b.db.GetChatSettings(b.runCtx, chatID)
 		if err != nil {
 			b.log.Warn("get chat settings", "err", err, "chat", chatID)
@@ -248,7 +298,7 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if expired {
 		// Единственный abort-путь без ответа был бы здесь — а именно тут
 		// админ мог 20 минут сочинять текст. Честно скажем, что не сохранили.
-		_ = reply(fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.", noun))
+		_, _ = reply(fmt.Sprintf("⌛ Запрос на текст %s устарел (лимит 15 минут) — текст не сохранён. Нажми ✏️ в настройках ещё раз.", noun))
 		return nil
 	}
 	if !ok {
@@ -258,14 +308,14 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	// Перепроверка: права могли отозвать между нажатием кнопки и этим
 	// сообщением.
 	if !b.canManageChat(ctx, message.From.ID, chatID) {
-		_ = reply("У тебя больше нет прав на этот чат — текст не сохранён.")
+		_, _ = reply("У тебя больше нет прав на этот чат — текст не сохранён.")
 		return nil
 	}
 	// Чат мог стать необслуживаемым (отклонён владельцем, выпал из
 	// ALLOWED_CHATS): настройки мёртвого чата не пишем — они бы активировались
 	// при его возврате (та же причина, что у гейта chatCallbackTarget).
 	if !b.chatServiceable(chatID) {
-		_ = reply("Чат больше не обслуживается — текст не сохранён.")
+		_, _ = reply("Чат больше не обслуживается — текст не сохранён.")
 		return nil
 	}
 
@@ -279,23 +329,24 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 		// взвода в startWelcomeTextInput): упавшая подсказка не должна
 		// оставить взведённый ввод без промпта, где следующее обычное ЛС
 		// молча стало бы шаблоном.
-		if err := rePrompt("⚠️ Нужно именно текстовое сообщение — стикеры и медиа не подойдут."); err != nil {
+		promptID, err := rePrompt("⚠️ Нужно именно текстовое сообщение — стикеры и медиа не подойдут.")
+		if err != nil {
 			b.log.Warn("send welcome input re-prompt", "err", err, "chat", chatID)
 			return nil
 		}
-		b.setGreetingInputPending(message.From.ID, chatID, kind)
+		b.setGreetingInputPending(message.From.ID, chatID, kind, promptID)
 		return nil
 	case strings.HasPrefix(text, "/"):
 		// Любая команда (включая /cancel) отменяет флоу ввода.
-		_ = reply(fmt.Sprintf("Ок, ввод текста %s отменён.", noun))
+		_, _ = reply(fmt.Sprintf("Ок, ввод текста %s отменён.", noun))
 		return nil
 	case text == "-":
 		if err := b.setWelcomeText(chatID, kind, nil, nil); err != nil {
 			b.log.Warn("reset welcome text", "err", err, "chat", chatID, "kind", kind)
-			_ = reply("Не получилось сохранить, попробуй ещё раз.")
+			_, _ = reply("Не получилось сохранить, попробуй ещё раз.")
 			return nil
 		}
-		_ = reply(resetLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
+		_, _ = reply(resetLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 		return nil
 	}
 
@@ -314,20 +365,21 @@ func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if len([]rune(saved)) > maxGreetingRunes {
 		// Тот же условный перевзвод, что и в пустой ветке.
 		lead := fmt.Sprintf("⚠️ Слишком длинно (больше %d символов) — сократи и пришли ещё раз.", maxGreetingRunes)
-		if err := rePrompt(lead); err != nil {
+		promptID, err := rePrompt(lead)
+		if err != nil {
 			b.log.Warn("send welcome input re-prompt", "err", err, "chat", chatID)
 			return nil
 		}
-		b.setGreetingInputPending(message.From.ID, chatID, kind)
+		b.setGreetingInputPending(message.From.ID, chatID, kind, promptID)
 		return nil
 	}
 
 	if err := b.setWelcomeText(chatID, kind, &saved, entJSON); err != nil {
 		b.log.Warn("set welcome text", "err", err, "chat", chatID, "kind", kind)
-		_ = reply("Не получилось сохранить, попробуй ещё раз.")
+		_, _ = reply("Не получилось сохранить, попробуй ещё раз.")
 		return nil
 	}
-	_ = reply(savedLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
+	_, _ = reply(savedLine + "\n\n" + b.welcomePreview(chatID, kind, message.From))
 	return nil
 }
 

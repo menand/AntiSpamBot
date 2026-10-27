@@ -624,7 +624,7 @@ func TestDisarmGreetInputOnCommand(t *testing.T) {
 
 	t.Run("/help отменяет ввод", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)
-		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet)
+		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet, 0)
 
 		b.cancelGreetingInputOnCommand(context.Background(), privateMsg("/help"))
 
@@ -639,7 +639,7 @@ func TestDisarmGreetInputOnCommand(t *testing.T) {
 
 	t.Run("обычный текст не трогает состояние", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)
-		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet)
+		b.setGreetingInputPending(testUserID, testChatID, welcomeGreet, 0)
 
 		b.cancelGreetingInputOnCommand(context.Background(), privateMsg("привет"))
 

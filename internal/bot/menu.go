@@ -729,6 +729,9 @@ const helpText = `📖 <b>Справка</b>
 /chats — список твоих чатов
 /info, /logs — аптайм и лог-файл (для владельцев бота)
 
+<b>Ответ из лички в чат (владельцу бота)</b>
+Ответь реплаем на пересланное ботом сообщение (например, на ответ новичка или подозрение на спам) — я опубликую твой текст в исходном чате от своего имени. Команда не нужна. Если выделить часть пересланного текста и нажать «Цитировать», ответ уйдёт с той же частичной цитатой.
+
 <b>Команды в группе</b> (/spam доступна всем с историей сообщений, остальные — админам)
 ` + groupCommandsList + `
 
@@ -1052,7 +1055,8 @@ func (b *Bot) startWelcomeTextInput(ctx *th.Context, query telego.CallbackQuery,
 	}
 
 	text := b.welcomeInputPromptText(ctx, chatID, s, kind, "")
-	if _, serr := b.sendScreen(ctx, query.Message.GetChat().ID, screenPrompt, text, true, nil); serr != nil {
+	sent, serr := b.sendScreen(ctx, query.Message.GetChat().ID, screenPrompt, text, true, nil)
+	if serr != nil {
 		b.log.Warn("send welcome input prompt", "err", serr, "chat", chatID)
 		// На query уже ответили в начале хендлера — второй Answer
 		// Telegram отбросил бы молча, поэтому объясняем сообщением (тот же
@@ -1063,8 +1067,13 @@ func (b *Bot) startWelcomeTextInput(ctx *th.Context, query telego.CallbackQuery,
 	}
 	// Арм — только после удачных чтения И отправки промпта: упавшая отправка
 	// оставила бы взведённый ввод без промпта, и следующее обычное ЛС админа
-	// молча стало бы шаблоном.
-	b.setGreetingInputPending(query.From.ID, chatID, kind)
+	// молча стало бы шаблоном. id промпта запоминаем: ответ реплаем на него —
+	// штатный текст флоу, а не «устаревшая связка» в мосте DM→чат.
+	promptID := 0
+	if sent != nil {
+		promptID = sent.MessageID
+	}
+	b.setGreetingInputPending(query.From.ID, chatID, kind, promptID)
 	return nil
 }
 

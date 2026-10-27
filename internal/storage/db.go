@@ -91,6 +91,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"reply_watches", "edit_reports", `ALTER TABLE reply_watches ADD COLUMN edit_reports INTEGER NOT NULL DEFAULT 0`},
 		{"reply_watches", "edit_notified_at", `ALTER TABLE reply_watches ADD COLUMN edit_notified_at INTEGER NOT NULL DEFAULT 0`},
 		{"reply_watches", "report_attempts", `ALTER TABLE reply_watches ADD COLUMN report_attempts INTEGER NOT NULL DEFAULT 0`},
+		// owner_dm_links создана в v1.23.0 без bot_id; ALTER страхует dev-БД,
+		// где таблица успела появиться в прежнем виде (schema.sql не меняет
+		// существующую таблицу). Старые строки получат bot_id = 0 и просто
+		// перестанут находиться — публиковать по ним нельзя.
+		{"owner_dm_links", "bot_id", `ALTER TABLE owner_dm_links ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}

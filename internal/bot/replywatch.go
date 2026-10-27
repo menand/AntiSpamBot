@@ -867,8 +867,7 @@ func replyWatchQuote(text string) string {
 		return "<blockquote><i>— (текст убран)</i></blockquote>"
 	}
 	esc := html.EscapeString(text)
-	units := utf16.Encode([]rune(esc))
-	if len(units) > replyWatchQuoteLimit {
+	if utf16Units(esc) > replyWatchQuoteLimit {
 		esc = truncateUTF16(esc, replyWatchQuoteLimit)
 		if amp := strings.LastIndex(esc, "&"); amp >= 0 {
 			if semi := strings.LastIndex(esc, ";"); semi < amp {

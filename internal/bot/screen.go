@@ -38,6 +38,14 @@ func (b *Bot) sendScreen(ctx context.Context, userID int64, kind, text string, h
 	if kb != nil {
 		params = params.WithReplyMarkup(kb)
 	}
+	return b.sendScreenParams(ctx, userID, kind, params)
+}
+
+// sendScreenParams — нижняя половина sendScreen для экранов, которым нужны
+// собственные опции сообщения (например, отключённое превью ссылки в
+// служебных отбивках). Замена прошлого экрана — та же.
+func (b *Bot) sendScreenParams(ctx context.Context, userID int64, kind string,
+	params *telego.SendMessageParams) (*telego.Message, error) {
 	sent, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		return nil, err

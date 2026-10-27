@@ -103,6 +103,47 @@ func TestReplyWithBotOwnerSendsPlainReply(t *testing.T) {
 	}
 }
 
+// TestReplyWithBotAliasRwb — алиас /rwb идёт тем же хендлером: текст уходит
+// реплаем от имени бота, сообщение с командой удаляется, статистика не
+// трогается. Отдельный тест фиксирует именно алиас — команду снимает
+// регистрация в bot.go, а разбор аргумента общий.
+func TestReplyWithBotAliasRwb(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	b.cfg.OwnerIDs = map[int64]struct{}{replyWithBotOwnerID: {}}
+
+	msg := replyWithBotMessage("/rwb Привет от бота", replyWithBotTargetMsg())
+	if err := b.handleReplyWithBotCommand(nil, msg); err != nil {
+		t.Fatal(err)
+	}
+
+	sends := fc.callBodies("sendMessage")
+	if len(sends) != 1 {
+		t.Fatalf("sendMessage calls = %d, want 1: %v", len(sends), sends)
+	}
+	body := jsonBody(t, sends[0])
+	if got := body["text"]; got != "Привет от бота" {
+		t.Fatalf("text = %v, want %q", got, "Привет от бота")
+	}
+	if fc.callCount("deleteMessage") != 1 {
+		t.Fatalf("deleteMessage calls = %d, want 1: %v",
+			fc.callCount("deleteMessage"), fc.callList())
+	}
+	for kind, n := range statsKinds(t, db, testChatID, testUserID) {
+		if n != 0 {
+			t.Fatalf("event %s = %d, want 0 (rwb must not touch stats)", kind, n)
+		}
+	}
+}
+
+// TestGroupHelpMentionsRwbAlias — алиас виден в справке (единый источник для
+// группы и ЛС): иначе владелец о нём не узнает.
+func TestGroupHelpMentionsRwbAlias(t *testing.T) {
+	if !strings.Contains(groupCommandsList, "/rwb") {
+		t.Fatalf("group command list must mention the /rwb alias")
+	}
+}
+
 // TestReplyWithBotNonOwnerAdminRefused — админ чата проходит modPrologue, но
 // команда только для владельца: вежливый отказ, команда удалена, мьюта нет.
 func TestReplyWithBotNonOwnerAdminRefused(t *testing.T) {
@@ -326,6 +367,9 @@ func TestReplyWithBotText(t *testing.T) {
 	}{
 		{"/replywithbot привет", "привет"},
 		{"/replywithbot@antispam_bot привет", "привет"},
+		{"/rwb привет", "привет"},
+		{"/rwb@antispam_bot привет", "привет"},
+		{"/rwb", ""},
 		{"/replywithbot\nпривет\nмир", "привет\nмир"},
 		{"/replywithbot\tпривет", "привет"},
 		{"/replywithbot  привет  ", "привет"},

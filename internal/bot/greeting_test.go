@@ -7,7 +7,7 @@ import (
 
 func TestGreetingInputConsumedOnce(t *testing.T) {
 	b := &Bot{greetInput: map[int64]greetInputState{}}
-	b.setGreetingInputPending(1, -100, welcomeReply)
+	b.setGreetingInputPending(1, -100, welcomeReply, 0)
 
 	chatID, kind, ok, expired := b.takeGreetingInput(1)
 	if !ok || expired || chatID != -100 || kind != welcomeReply {
@@ -18,6 +18,42 @@ func TestGreetingInputConsumedOnce(t *testing.T) {
 	}
 	if _, _, ok, expired := b.takeGreetingInput(999); ok || expired {
 		t.Fatal("unknown user must have no armed input")
+	}
+}
+
+// TestGreetingInputPromptMatch — мост DM→чат отличает ответ на промпт флоу от
+// ответа на уведомление без связки: свежий промпт пропускает текст в флоу,
+// протухший — тоже (флоу сам честно скажет «запрос устарел»), а чужой/нулевой
+// id и неизвестный юзер не совпадают вовсе.
+func TestGreetingInputPromptMatch(t *testing.T) {
+	b := &Bot{greetInput: map[int64]greetInputState{}}
+	b.setGreetingInputPending(1, -100, welcomeGreet, 555)
+
+	if fresh, expired := b.greetingInputPromptMatch(1, 555); !fresh || expired {
+		t.Fatalf("fresh prompt: got fresh=%v expired=%v", fresh, expired)
+	}
+	for _, msgID := range []int{556, 0, -1} {
+		if fresh, expired := b.greetingInputPromptMatch(1, msgID); fresh || expired {
+			t.Fatalf("msg %d: got fresh=%v expired=%v, want false/false", msgID, fresh, expired)
+		}
+	}
+	if fresh, expired := b.greetingInputPromptMatch(999, 555); fresh || expired {
+		t.Fatalf("unknown user: got fresh=%v expired=%v, want false/false", fresh, expired)
+	}
+
+	// Протухший арм на тот же промпт — expired, но не «связка устарела».
+	b.greetInput[2] = greetInputState{
+		chatID:      -200,
+		kind:        welcomeGreet,
+		promptMsgID: 777,
+		armedAt:     time.Now().Add(-greetInputTTL - time.Minute),
+	}
+	if fresh, expired := b.greetingInputPromptMatch(2, 777); fresh || !expired {
+		t.Fatalf("stale prompt: got fresh=%v expired=%v, want false/true", fresh, expired)
+	}
+	// Проверка не потребляет арм: его забирает takeGreetingInput.
+	if _, ok := b.greetInput[2]; !ok {
+		t.Fatal("prompt match must not consume the armed input")
 	}
 }
 

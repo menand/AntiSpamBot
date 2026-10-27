@@ -306,7 +306,7 @@ func welcomeFlowBot(t *testing.T, uid int64) (*Bot, *storage.DB, *fakeCaller) {
 	b, db, fc := newFlowBot(t)
 	b.cfg.OwnerIDs = map[int64]struct{}{uid: {}}
 	serviceableChat(t, b, db, testChatID)
-	b.setGreetingInputPending(uid, testChatID, welcomeGreet)
+	b.setGreetingInputPending(uid, testChatID, welcomeGreet, 0)
 	return b, db, fc
 }
 

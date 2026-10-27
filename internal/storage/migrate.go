@@ -163,6 +163,16 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("drop old chat_settings: %w", err)
 	}
 
+	// owner_dm_links — message ID старого basic-чата после апгрейда умерли
+	// (та же причина, что у pending_captchas/reply_watches/greetings): перенос
+	// chat_id оставил бы source_msg_id, который в новой нумерации указывает на
+	// ЧУЖОЕ сообщение — ответ владельца приклеился бы не туда. Карточки
+	// старого чата просто перестают находиться: честное «связка устарела».
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM owner_dm_links WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop old owner_dm_links: %w", err)
+	}
+
 	// pending_captchas — старого чата больше нет, всё «pending» там ссылается
 	// на мёртвые message ID. Удаляем, а не копируем.
 	if _, err := tx.ExecContext(ctx,

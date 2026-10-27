@@ -90,16 +90,24 @@ func (b *Bot) notifyReplyAnswered(m *telego.Message, p *replyPending) {
 		ChatID:   m.Chat.ID,
 		Title:    m.Chat.Title,
 		Username: m.Chat.Username,
-	}, mentionWithUsername(infos, m.From.ID), p.Stage)
+	}, mentionWithUsername(infos, m.From.ID), p.Stage) + ownerDMReplyHint
+	threadID := threadOf(*m)
 	for _, ownerID := range targets {
-		if _, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
+		if sent, err := b.api.ForwardMessage(b.runCtx, &telego.ForwardMessageParams{
 			ChatID:     tu.ID(ownerID),
 			FromChatID: tu.ID(m.Chat.ID),
 			MessageID:  m.MessageID,
 		}); err != nil {
 			b.log.Warn("forward reply-answered message", "err", err, "owner", ownerID)
+		} else if sent != nil {
+			// Ответ реплаем на форвард = ответ на сообщение новичка: линк
+			// нужен, иначе владельцу нечего «процитировать» в чат.
+			b.linkOwnerDMSource(ownerID, sent.MessageID, m.Chat.ID, threadID, m.MessageID, true)
 		}
-		b.sendNotificationHTML([]int64{ownerID}, card, "notify reply-answered")
+		if sent := b.sendNotificationOne(b.runCtx, ownerID, card, "notify reply-answered"); sent != nil {
+			// Карточка тоже пригодна для ответа (без частичной цитаты).
+			b.linkOwnerDMSource(ownerID, sent.MessageID, m.Chat.ID, threadID, m.MessageID, false)
+		}
 	}
 }
 
@@ -183,6 +191,20 @@ func (b *Bot) sendNotificationHTML(targets []int64, text, logKey string) {
 	b.sendNotificationHTMLCtx(b.runCtx, targets, text, logKey)
 }
 
+// sendNotificationOne отправляет одно HTML-сообщение получателю и возвращает
+// его (nil при ошибке). Идентификатор нужен вызывающим, которые связывают
+// сообщение в ЛС с чатом (ответ владельца реплаем публикуется в чате).
+func (b *Bot) sendNotificationOne(ctx context.Context, userID int64, text, logKey string) *telego.Message {
+	sent, err := b.api.SendMessage(ctx, tu.Message(tu.ID(userID), text).
+		WithParseMode(telego.ModeHTML).
+		WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true}))
+	if err != nil {
+		b.log.Warn(logKey, "err", err, "owner", userID)
+		return nil
+	}
+	return sent
+}
+
 // sendNotificationHTMLCtx — то же с явным контекстом: фоновые пробы после
 // SIGTERM шлют отчёт на liveCtx, а не на уже отменённый runCtx. Возвращает
 // true, если сообщение доставлено хотя бы одному получателю (или получателей
@@ -194,13 +216,9 @@ func (b *Bot) sendNotificationHTMLCtx(ctx context.Context, targets []int64, text
 	}
 	delivered := false
 	for _, ownerID := range targets {
-		if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(ownerID), text).
-			WithParseMode(telego.ModeHTML).
-			WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
-			b.log.Warn(logKey, "err", err, "owner", ownerID)
-			continue
+		if b.sendNotificationOne(ctx, ownerID, text, logKey) != nil {
+			delivered = true
 		}
-		delivered = true
 	}
 	return delivered
 }

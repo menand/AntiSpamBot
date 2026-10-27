@@ -347,3 +347,25 @@ CREATE TABLE IF NOT EXISTS dm_screens (
     at         INTEGER NOT NULL,
     PRIMARY KEY (user_id, kind)
 );
+
+-- Связка «служебное сообщение бота в ЛС» → «сообщение в чате»: владелец
+-- отвечает реплаем в личке, бот публикует его текст в исходном чате от своего
+-- имени. Bot API не отдаёт id исходного сообщения для форвардов юзеров
+-- (MessageOriginUser без message_id), поэтому карту строим сами в момент
+-- форварда/отправки карточки. is_forward = 1 — это сам форвард (на него можно
+-- ответить частичной цитатой), 0 — соседняя карточка (цитата была бы
+-- фрагментом карточки, а не исходного сообщения). bot_id в PK: нумерация
+-- сообщений в ЛС своя у каждого бота, а БД переживает смену BOT_TOKEN — без
+-- привязки карточка старого бота увела бы ответ в чужой чат.
+CREATE TABLE IF NOT EXISTS owner_dm_links (
+    bot_id        INTEGER NOT NULL,
+    owner_id      INTEGER NOT NULL,
+    dm_message_id INTEGER NOT NULL,
+    chat_id       INTEGER NOT NULL,
+    thread_id     INTEGER NOT NULL DEFAULT 0,
+    source_msg_id INTEGER NOT NULL,
+    is_forward    INTEGER NOT NULL DEFAULT 0,
+    at            INTEGER NOT NULL,
+    PRIMARY KEY (bot_id, owner_id, dm_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_owner_dm_links_at ON owner_dm_links(at);

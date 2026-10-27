@@ -10,6 +10,12 @@ import (
 	"github.com/mymmrac/telego"
 )
 
+// utf16Units — длина строки в UTF-16 единицах: в них Bot API считает и лимиты
+// сообщений/цитат, и офсеты entities (см. entitiesToHTML).
+func utf16Units(s string) int {
+	return len(utf16.Encode([]rune(s)))
+}
+
 // entitiesToHTML конвертирует текст с Telegram-entities (жирный, курсив,
 // ссылки...) в HTML для отправки с ParseMode HTML. Offset/Length у entities
 // Bot API считает в UTF-16 code units — текст сначала перегоняется в UTF-16,

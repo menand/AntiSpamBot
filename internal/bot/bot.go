@@ -428,6 +428,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleKickCommand, th.CommandEqual("kick"))
 	bh.HandleMessage(b.handleBanCommand, th.CommandEqual("ban"))
 	bh.HandleMessage(b.handleReplyWithBotCommand, th.CommandEqual("replywithbot"))
+	bh.HandleMessage(b.handleReplyWithBotCommand, th.CommandEqual("rwb")) // алиас /replywithbot
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("del"))
 	bh.HandleMessage(b.handleDeleteCommand, th.CommandEqual("delete"))
 	bh.HandleMessage(b.handleMuteCommand, th.CommandEqual("mute"))
@@ -647,6 +648,12 @@ func (b *Bot) attemptsSweepLoop(ctx context.Context) {
 			// столбик не должен расти вечно. Зеркало чистится лениво при чтении.
 			if err := b.db.PruneQuarantines(ctx, time.Now().Unix()); err != nil {
 				b.log.Warn("prune quarantines", "err", err)
+			}
+			// Связки «ЛС-сообщение владельца → сообщение в чате»: месячная
+			// карточка — уже не повод публиковать что-то «от имени бота»
+			// задним числом.
+			if _, err := b.db.PruneOwnerDMLinks(ctx, time.Now().Add(-ownerDMLinkTTL)); err != nil {
+				b.log.Warn("prune owner dm links", "err", err)
 			}
 			// Там же — страхующий свип карантинов выключенных чатов (живой
 			// путь отпуска при тоггл-выключении есть в menu.go; здесь —
