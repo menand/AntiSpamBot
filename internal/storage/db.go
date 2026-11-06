@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"net/url"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -18,8 +19,13 @@ type DB struct {
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)", path)
-	raw, err := sql.Open("sqlite", dsn)
+	u := url.URL{Scheme: "file", Path: path, OmitHost: true}
+	q := url.Values{}
+	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "foreign_keys(on)")
+	u.RawQuery = q.Encode()
+	raw, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

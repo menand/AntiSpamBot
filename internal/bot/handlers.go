@@ -90,7 +90,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	// разбаненного спамера (kicked → administrator) должен успеть и простить
 	// глобальный флаг, и снять карантин.
 	if newStatus == "administrator" {
-		b.releaseQuarantineUser(upd.Chat.ID, user.ID)
+		_, _ = b.releaseQuarantineUser(upd.Chat.ID, user.ID)
 		// Промоушен — терминал и для активных проверок: серия капчи или
 		// reply-wait не должна досчитать до наказания свежего админа
 		// (бэкстоп punishAttempt перепроверяет статус, но только в самом
@@ -336,6 +336,7 @@ func (b *Bot) markBotAddedAt(chatID int64) {
 // в реестр.
 func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	b.log.Info("dropping chat from registry", "chat", chatID, "reason", why)
+	b.store.CancelChatKickoffs(chatID)
 	for _, p := range b.store.TakeChat(chatID) {
 		p.Cancel()
 	}
@@ -916,8 +917,7 @@ func (b *Bot) replySpamFirstClick(ctx *th.Context, query telego.CallbackQuery) e
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 		return nil
 	}
-	if p, ok := b.replies.Get(chatID, targetUserID); !ok ||
-		(p.GreetingMsgID != 0 && p.GreetingMsgID != msg.MessageID) {
+	if !b.replies.MatchesGreeting(chatID, targetUserID, msg.MessageID) {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).
 				WithText("Ожидание уже не активно.").
@@ -982,8 +982,7 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 	if msg != nil {
 		greetingMsgID = msg.MessageID
 	}
-	if p, ok := b.replies.Get(chatID, targetUserID); !ok ||
-		(p.GreetingMsgID != 0 && p.GreetingMsgID != greetingMsgID) {
+	if !b.replies.MatchesGreeting(chatID, targetUserID, greetingMsgID) {
 		text := "Ожидание уже не активно."
 		if _, still := b.replies.Get(chatID, targetUserID); still {
 			text = "Это сообщение устарело — дождитесь следующего."
@@ -1622,10 +1621,17 @@ func (b *Bot) isNewcomer(ctx context.Context, chatID, userID int64, when time.Ti
 // капчу; false — капча для юзера уже активна или уже запускается (дубль
 // доставки входа), и вызов был no-op.
 func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
+	b.leaveMu.Lock()
+	if b.leaveInflight[chatID] {
+		b.leaveMu.Unlock()
+		return false
+	}
 	// Страховка от гонки: chat_member и message.new_chat_members могут
 	// прийти на один и тот же вход. Без kickoff-замка они наперегонки
 	// пробегают фазу до Put (restrict + отправка) и дают два сообщения капчи.
-	if !b.store.BeginKickoff(chatID, user.ID) {
+	started := b.store.BeginKickoff(chatID, user.ID)
+	b.leaveMu.Unlock()
+	if !started {
 		b.log.Debug("captcha already in progress, skipping duplicate kickoff",
 			"chat", chatID, "user", user.ID)
 		return false
@@ -1638,9 +1644,15 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
 }
 
 func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
-	defer b.store.FinishKickoff(chatID, user.ID)
-
-	ctx := b.runCtx
+	kickoff := b.store.KickoffContext(chatID, user.ID)
+	defer b.store.FinishKickoff(chatID, user.ID, kickoff)
+	ctx, cancel := context.WithCancel(b.runCtx)
+	defer cancel()
+	stop := context.AfterFunc(kickoff, cancel)
+	defer stop()
+	if kickoff.Err() != nil {
+		return
+	}
 
 	// Кэшируем display-имя сейчас — оно понадобится приветствию после
 	// успешного прохождения (к тому моменту юзер ещё ничего не писал, и
@@ -1657,6 +1669,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	// push-уведомления уже разлетелись. Сам рестрикт юзеру не виден, поэтому
 	// задержка на отрисовку (ниже) ему не нужна.
 	if err := b.restrict(ctx, chatID, user.ID); err != nil {
+		if kickoff.Err() != nil {
+			return // ручная модерация уже определила новые ограничения
+		}
 		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
 		// Воронку закрываем: join уже записан, а капчи не будет — иначе юзер
 		// навсегда зависнет в «В процессе». Это abort (вина инфраструктуры),
@@ -1675,6 +1690,9 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	if b.cfg.CaptchaDelay > 0 {
 		select {
 		case <-ctx.Done():
+			if kickoff.Err() != nil {
+				return
+			}
 			// Shutdown в окне задержки: рестрикт уже применён, а pending ещё
 			// не записан — рестарт юзера не восстановит. Снимаем мут и
 			// закрываем воронку abort'ом (join уже записан), иначе юзер
@@ -1712,6 +1730,9 @@ const captchaStages = 3
 func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSettings,
 	chatID, userID int64, threadID, stage int,
 ) *captcha.Pending {
+	if b.store.KickoffContext(chatID, userID).Err() != nil {
+		return nil
+	}
 	interval := b.effectiveStageInterval(settings)
 	mode := effectiveCaptchaMode(settings)
 	ch := captcha.New(mode)
@@ -1809,6 +1830,9 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 		// нет, ветка «left mid-captcha» в handleChatMember не сработала).
 		// Не провал капчи: kick не пишем, а EventLeft — чтобы воронка в
 		// статистике сходилась, а не копила «В процессе» навсегда.
+		if b.store.KickoffContext(chatID, userID).Err() != nil {
+			return nil
+		}
 		if isUserNotParticipant(err) {
 			b.recordLeftEvent(ctx, chatID, userID, "user not participant")
 			b.log.Info("captcha aborted — user not participant",
@@ -1876,6 +1900,12 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 
 	expires := time.Now().Add(interval)
 	p := b.store.Put(chatID, userID, msg.MessageID, ch.CorrectIdx, expires, threadID, msg.EphemeralMessageID, stage)
+	if p == nil {
+		dctx, cancel := b.liveCtx()
+		defer cancel()
+		_ = b.deleteBotMessage(dctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID)
+		return nil
+	}
 
 	if err := b.db.PutPending(ctx, storage.PendingRow{
 		ChatID:      chatID,
@@ -1895,7 +1925,7 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 		// ответить за эти миллисекунды, тогда исход уже решён без нас.
 		b.log.Warn("persist pending — dropping captcha, letting user in (fail-open)",
 			"err", err, "chat", chatID, "user", userID, "stage", stage)
-		if taken, ok := b.store.Take(chatID, userID); ok && taken == p {
+		if taken, ok := b.store.TakeMatch(chatID, userID, func(live *captcha.Pending) bool { return live == p }); ok {
 			taken.Cancel()
 			if derr := b.deleteBotMessage(ctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID); derr != nil {
 				b.log.Warn("delete captcha after persist failure",
@@ -1933,21 +1963,32 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 	return p
 }
 
-// sendNextCaptchaStage отправляет следующую стадию серии под замком kickoff
-// (дубль-доставка входа не запустит вторую серию в окне между Take и Put).
-// Замок снимается defer'ом: паника в sendCaptchaStage восстановится goSafe'ом
-// на уровне captchaStageLoop и не дошла бы до ручного FinishKickoff — а
-// навсегда застрявший inflight запретил бы будущие BeginKickoff и через
-// IsCaptchaActive стирал все сообщения юзера до рестарта (см. defer-guard в
-// banKnownSpammer). nil = дубль проигран (замок занят) либо серия оборвалась
-// — обе ветки вызывающий закрывает одинаковым message-id guard'ом.
-func (b *Bot) sendNextCaptchaStage(ctx context.Context, settings storage.ChatSettings,
-	chatID, userID int64, p *captcha.Pending,
+// sendNextCaptchaStage владеет поколением kickoff от атомарной смены стадии
+// до завершения отправки. Отмена модерацией останавливает ретраи и публикацию.
+func (b *Bot) sendNextCaptchaStage(parent context.Context, chatID, userID int64,
+	p *captcha.Pending, kickoff context.Context,
 ) *captcha.Pending {
-	if !b.store.BeginKickoff(chatID, userID) {
+	defer b.store.FinishKickoff(chatID, userID, kickoff)
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	stop := context.AfterFunc(kickoff, cancel)
+	defer stop()
+	if kickoff.Err() != nil {
 		return nil
 	}
-	defer b.store.FinishKickoff(chatID, userID)
+	settings := b.chatSettings(ctx, chatID)
+	// Фиксируем следующую стадию до отправки, чтобы рестарт не счёл старый
+	// дедлайн исчерпанной серией. До успешной отправки message_id остаётся старым.
+	if err := b.db.PutPending(ctx, storage.PendingRow{
+		ChatID: chatID, UserID: userID, MessageID: p.MessageID,
+		CorrectIdx: p.CorrectIdx, ExpiresAt: time.Now().Add(b.effectiveStageInterval(settings)),
+		ThreadID: p.ThreadID, EphemeralID: p.EphemeralID, Stage: p.Stage + 1,
+	}); err != nil {
+		b.log.Warn("persist stage transition", "err", err, "chat", chatID, "user", userID)
+	}
+	if err := b.deleteBotMessage(ctx, chatID, p.MessageID, p.EphemeralID, userID); err != nil {
+		b.log.Debug("delete expired captcha stage", "err", err, "chat", chatID, "user", userID)
+	}
 	return b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
 }
 
@@ -1978,8 +2019,14 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 
 		// Единственный победитель дедлайна: identity-проверка отсекает гонку
 		// «колбэк успел изъять и решить капчу между таймером и Take».
-		taken, ok := b.store.Take(chatID, userID)
-		if !ok || taken != p {
+		var ok bool
+		var kickoff context.Context
+		if p.Stage < captchaStages {
+			_, kickoff, ok = b.store.TakeForKickoff(chatID, userID, p)
+		} else {
+			_, ok = b.store.TakeMatch(chatID, userID, func(live *captcha.Pending) bool { return live == p })
+		}
+		if !ok {
 			return
 		}
 
@@ -2003,43 +2050,7 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 			return
 		}
 
-		// Промежуточная стадия истекла. Переход персистим ДО исполнения:
-		// между Take и следующим PutPending строка в БД описывала бы уже
-		// истёкшую стадию, и крэш в этом окне (деплои тут рутинны) клампил
-		// бы рестарт к финальной стадии с грейс-киком юзера, у которого
-		// оставались стадии. message_id в строке до конца перехода — старый;
-		// после успешной отправки sendCaptchaStage перезапишет его своим.
-		settings := b.chatSettings(ctx, chatID)
-		if err := b.db.PutPending(ctx, storage.PendingRow{
-			ChatID:      chatID,
-			UserID:      userID,
-			MessageID:   p.MessageID,
-			CorrectIdx:  p.CorrectIdx,
-			ExpiresAt:   time.Now().Add(b.effectiveStageInterval(settings)),
-			ThreadID:    p.ThreadID,
-			EphemeralID: p.EphemeralID,
-			Stage:       p.Stage + 1,
-		}); err != nil {
-			b.log.Warn("persist stage transition", "err", err,
-				"chat", chatID, "user", userID, "stage", p.Stage+1)
-		}
-
-		// Убираем истёкшее сообщение и показываем следующее (новый челлендж —
-		// старая клавиатура удалена вместе с сообщением, stale-guard по
-		// message_id не даст решиться живой стадии кликом по мёртвой).
-		if derr := b.deleteBotMessage(ctx, chatID, p.MessageID, p.EphemeralID, userID); derr != nil {
-			b.log.Debug("delete expired captcha stage",
-				"err", derr, "chat", chatID, "user", userID, "msg", p.MessageID)
-		}
-		// Замок kickoff на время отправки: между Take и следующим Put в store
-		// окно, куда дубль-доставка входа (chat_member + new_chat_members)
-		// запустила бы вторую серию с дублем сообщения капчи. Замок снимается
-		// defer'ом ВНУТРИ sendNextCaptchaStage: паника в send (восстановится
-		// goSafe) не должна оставить inflight навсегда — иначе BeginKickoff
-		// всегда false (этот юзер больше не получит ни капчи, ни insta-ban),
-		// а IsCaptchaActive по одним inflight стирал бы все его сообщения до
-		// рестарта (анти-паттерн defer-guard'а в banKnownSpammer).
-		next := b.sendNextCaptchaStage(ctx, settings, chatID, userID, p)
+		next := b.sendNextCaptchaStage(ctx, chatID, userID, p, kickoff)
 		if next == nil {
 			// Дубль-доставка успела раньше (её серия подхватит юзера) ИЛИ
 			// серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
@@ -2080,7 +2091,10 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 // сознательно: человек входит без повторной капчи — миграция редкое админское
 // действие, а перевзвести капчу под новым id нечем (таймеры захвати старый).
 func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
+	preparing := b.store.CancelChatKickoffs(oldID)
+	released := make(map[int64]bool)
 	for _, p := range b.store.TakeChat(oldID) {
+		released[p.UserID] = true
 		p.Cancel()
 		// MigrateChat уже снёс строки старого чата; удаление здесь —
 		// страховка от гонки с параллельным рестартом.
@@ -2094,6 +2108,15 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 		b.releaseOnAbort(b.runCtx, newID, p.UserID)
 		b.log.Info("captcha released across chat migration",
 			"old", oldID, "new", newID, "user", p.UserID)
+	}
+	for _, userID := range preparing {
+		if released[userID] {
+			continue
+		}
+		b.releaseOnAbort(b.runCtx, newID, userID)
+		if err := b.db.RecordEvent(b.runCtx, newID, userID, storage.EventPass, time.Now(), ""); err != nil {
+			b.log.Warn("record pass event (migrated kickoff)", "err", err)
+		}
 	}
 	for _, p := range b.replies.TakeChat(oldID) {
 		p.Cancel()
@@ -2116,9 +2139,10 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 // пассом. Сама функция мьют не снимает (иначе /mute потерял бы свежий
 // рестрикт) и событий не пишет.
 func (b *Bot) cancelCaptchaSilent(chatID, userID int64) bool {
+	cancelled := b.store.CancelKickoff(chatID, userID)
 	p, ok := b.store.Take(chatID, userID)
 	if !ok {
-		return false
+		return cancelled
 	}
 	p.Cancel()
 	// Строка и сообщение — на liveCtx: при SIGTERM удаление строки не должно
@@ -2250,11 +2274,15 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 	// застать ожидание активным (иначе гонка → кик написавшего). В режимах
 	// без проверки взводить нечего — просто шлём приветствие (регрессия
 	// v1.13–v1.19: ветка однофакторного режима теряла приветствие целиком).
+	var replyWait *replyPending
+	if mode == welcomeReply {
+		replyWait = b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID)
+	}
 	switch {
-	case mode == welcomeReply && b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID):
+	case replyWait != nil:
 		greetingID, greetingSent := b.maybeSendGreeting(ctx, s, welcomeReply, p.ChatID, p.UserID, p.ThreadID)
 		if greetingSent {
-			b.replies.SetGreetingMsgID(p.ChatID, p.UserID, greetingID)
+			b.replies.SetGreetingMsgID(replyWait, greetingID)
 		} else {
 			// Приветствие-якорь с требованием не ушёл даже после ретраев
 			// (429-шторм масс-джойна, сеть): требование «напиши пару слов по делу»
@@ -2262,7 +2290,7 @@ func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) 
 			// ожидание и закрываем воронку пассом: невозможность ответить —
 			// не вина юзера (та же логика, что у /mute замьюченного), иначе
 			// таймаут серии кикнул бы его за молчание по вине инфраструктуры.
-			if b.cancelReplyWait(p.ChatID, p.UserID) {
+			if b.cancelReplyWaitIf(p.ChatID, p.UserID, replyWait) {
 				if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
 					b.log.Warn("record pass event", "err", err)
 				}

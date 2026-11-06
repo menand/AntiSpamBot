@@ -206,8 +206,7 @@ func Load() (*Config, error) {
 	}, nil
 }
 
-// DefaultAIProviders — порядок цепочки ИИ-провайдеров, когда AI_PROVIDER_ORDER
-// не задан. Согласован с тем, что написано в CLAUDE.md/README.
+// DefaultAIProviders — порядок цепочки ИИ-провайдеров при пустом AI_PROVIDER_ORDER.
 var DefaultAIProviders = []string{"groq", "gemini", "gigachat"}
 
 // parseAIProviderOrder читает AI_PROVIDER_ORDER: строгий комма-список имён

@@ -173,12 +173,21 @@ func (s *replyStore) TakeExpired(chatID, userID int64, p *replyPending, now time
 // SetGreetingMsgID обновляет message_id текущего якоря-приветствия в
 // активном ожидании. Вызывается после sendGreetingAnchor, когда pending
 // уже взведён (arm стоит ДО отправки приветствия — см. onSuccess).
-func (s *replyStore) SetGreetingMsgID(chatID, userID int64, msgID int) {
+func (s *replyStore) SetGreetingMsgID(expected *replyPending, msgID int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if p, ok := s.items[chatUser{chatID, userID}]; ok {
+	if p := s.items[chatUser{expected.ChatID, expected.UserID}]; p == expected {
 		p.GreetingMsgID = msgID
+		return true
 	}
+	return false
+}
+
+func (s *replyStore) MatchesGreeting(chatID, userID int64, msgID int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.items[chatUser{chatID, userID}]
+	return p != nil && (p.GreetingMsgID == 0 || p.GreetingMsgID == msgID)
 }
 
 // Replace — compare-and-swap перехода стадии: под тем же мьютексом меняет
@@ -247,15 +256,11 @@ func (s *replyStore) TakeChat(chatID int64) []*replyPending {
 	return out
 }
 
-// maybeArmReplyWait — хук после приветствия в onSuccess: при режиме «с
-// ответом» взводит серию напоминаний (стадия 1). Якорь шлёт onSuccess ДО
-// этого вызова — см. комментарий там про порядок release→arm. Возвращает
-// true, если ожидание реально взведено: false (режим без проверки или провал
-// персистентности) говорит onSuccess не рисовать в якоре требование, которое
-// никто не проверяет.
-func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) bool {
+// maybeArmReplyWait взводит ожидание ДО отправки приветствия и возвращает
+// его поколение. nil означает, что требование ответа в приветствии не нужно.
+func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) *replyPending {
 	if effectiveWelcomeMode(s) != welcomeReply {
-		return false
+		return nil
 	}
 	// Снапшот s прочитан до размьюта (секунды ретраев release внутри
 	// onSuccess): админ мог увести чат из «с ответом», пока капча дозревала.
@@ -273,7 +278,7 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 			b.log.Warn("record compensating pass (mode left reply before arm)", "err", rerr,
 				"chat", chatID, "user", userID)
 		}
-		return false
+		return nil
 	}
 	interval := b.effectiveStageInterval(s)
 	deadline := time.Now().Add(interval)
@@ -292,14 +297,14 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 		// серию не запускаем.
 		b.log.Error("persist pending reply — disarming wait", "err", err,
 			"chat", chatID, "user", userID)
-		if armed, ok := b.replies.Take(chatID, userID); ok && armed == p {
+		if armed, ok := b.replies.TakeMatch(chatID, userID, func(live *replyPending) bool { return live == p }); ok {
 			armed.Cancel()
 			if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
 				b.log.Warn("record compensating pass (reply arm failed)", "err", err,
 					"chat", chatID, "user", userID)
 			}
 		}
-		return false
+		return nil
 	}
 	// Пост-персист identity-чек (гонка «решение прилетело между Put в память
 	// и PutPendingReply»): ответ юзера, промоушен или /mute могли изъять
@@ -319,10 +324,10 @@ func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, th
 		dcancel()
 		// Ожидание уже снято: требование-строку в приветствии рисовать
 		// нельзя (enforce'ить её нечем), серию не запускаем.
-		return false
+		return nil
 	}
 	b.goSafe("replyWaitLoop", func() { b.replyWaitLoop(chatID, userID, p) })
-	return true
+	return p
 }
 
 // messageHasUserContent — сообщение несёт реальный ввод юзера (текст, подпись
@@ -665,7 +670,13 @@ func (b *Bot) replyWaitMiddleware(m *telego.Message) bool {
 // иначе юзер навсегда зависнет в «В процессе» — пасс при reply-check пишется
 // только в replyWaitSatisfied, то есть после снятия его уже никто не запишет.
 func (b *Bot) cancelReplyWait(chatID, userID int64) bool {
-	if p, ok := b.replies.Take(chatID, userID); ok {
+	return b.cancelReplyWaitIf(chatID, userID, nil)
+}
+
+func (b *Bot) cancelReplyWaitIf(chatID, userID int64, expected *replyPending) bool {
+	if p, ok := b.replies.TakeMatch(chatID, userID, func(live *replyPending) bool {
+		return expected == nil || live == expected
+	}); ok {
 		p.Cancel()
 		// liveCtx: при SIGTERM строка не должна пережить отмену — рестарт
 		// воскресил бы серию на юзера, которого команда уже разобрала.
@@ -716,8 +727,8 @@ func (b *Bot) disarmReplyWaits(chatID int64) {
 // Строка гасится по СВОЕЙ стадии: предзаписанную N+1 добивает сам цикл после
 // перехода, а сюда попадаем только на исходе стадии.
 func (b *Bot) disarmReplyWait(ctx context.Context, chatID, userID int64, p *replyPending) {
-	taken, ok := b.replies.Take(chatID, userID)
-	if !ok || taken != p {
+	taken, ok := b.replies.TakeMatch(chatID, userID, func(live *replyPending) bool { return live == p })
+	if !ok {
 		return
 	}
 	taken.Cancel()
@@ -862,7 +873,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			// что-нибудь» юзер выполнить не может — он его не видит. Снимаем
 			// ожидание: невозможность ответить — не вина юзера (прецедент
 			// onSuccess / замьюченного /mute).
-			taken, took := b.replies.Take(chatID, userID)
+			taken, took := b.replies.TakeMatch(chatID, userID, func(live *replyPending) bool { return live == p })
 			// Строку стадии N+1 гасим всегда: у satisfier'а и cancelReplyWait
 			// гвард идёт по ИХ стадии (p.Stage), предзаписанную следующую
 			// она не достаёт — без этой очистки рестарт воскресил бы фантомную
@@ -870,7 +881,7 @@ func (b *Bot) replyWaitLoop(chatID, userID int64, p *replyPending) {
 			if err := b.db.DeletePendingReplyIf(ctx, chatID, userID, p.Stage+1); err != nil {
 				b.log.Warn("delete pending reply on disarmed wait", "err", err, "chat", chatID, "user", userID)
 			}
-			if !took || taken != p {
+			if !took {
 				// Пока напоминание уходило в ретраях, ожидание уже разрешил
 				// другой (ответ юзера, выход, /mute) — терминальное событие
 				// записал он. Проигравший гонку — no-op по событиям: второй

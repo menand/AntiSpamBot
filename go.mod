@@ -1,6 +1,6 @@
 module github.com/menand/AntiSpamBot
 
-go 1.26.7
+go 1.27.3
 
 require (
 	github.com/joho/godotenv v1.5.1

@@ -141,7 +141,7 @@ func ListDays(dir string) ([]string, error) {
 
 // ReadDay читает один дневной файл архива.
 func ReadDay(dir, day string) ([]Entry, error) {
-	zb, err := os.ReadFile(filepath.Join(dir, FileNameForDay(day)))
+	zb, err := os.ReadFile(filepath.Join(dir, FileNameForDay(day))) //nolint:gosec // local archive directory and day from DB/ListDays
 	if err != nil {
 		return nil, fmt.Errorf("read archive day %s: %w", day, err)
 	}

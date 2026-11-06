@@ -1,6 +1,7 @@
 package captcha
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +22,48 @@ func TestStorePutAndTake(t *testing.T) {
 	if _, ok := s.Take(1, 2); ok {
 		t.Fatal("Take succeeded twice for the same key")
 	}
+}
+
+func TestCancelledKickoffCannotPublishOrReleaseNextGeneration(t *testing.T) {
+	s := NewStore()
+	if !s.BeginKickoff(1, 2) {
+		t.Fatal("kickoff not started")
+	}
+	old := s.KickoffContext(1, 2)
+	if !s.CancelKickoff(1, 2) || old.Err() != context.Canceled {
+		t.Fatal("kickoff not cancelled")
+	}
+	if got := s.Put(1, 2, 10, 0, time.Now(), 0, 0, 1); got != nil || s.IsCaptchaActive(1, 2) {
+		t.Fatal("cancelled request published a captcha")
+	}
+	if s.BeginKickoff(1, 2) {
+		t.Fatal("cancelled owner must retain its slot until it exits")
+	}
+	s.FinishKickoff(1, 2, old)
+	if !s.BeginKickoff(1, 2) {
+		t.Fatal("new kickoff not started")
+	}
+	s.FinishKickoff(1, 2, old)
+	if !s.IsCaptchaActive(1, 2) {
+		t.Fatal("old owner released a newer kickoff")
+	}
+	s.FinishKickoff(1, 2)
+}
+
+func TestTakeForKickoffHandsOffAtomically(t *testing.T) {
+	s := NewStore()
+	s.BeginKickoff(1, 2)
+	old := s.KickoffContext(1, 2)
+	p := s.Put(1, 2, 10, 0, time.Now(), 0, 0, 1)
+	taken, next, ok := s.TakeForKickoff(1, 2, p)
+	if !ok || taken != p || next == old || old.Err() != context.Canceled {
+		t.Fatal("stage did not acquire a distinct kickoff generation")
+	}
+	s.FinishKickoff(1, 2, old)
+	if !s.CancelKickoff(1, 2) || next.Err() != context.Canceled {
+		t.Fatal("stage transition was invisible to cancellation")
+	}
+	s.FinishKickoff(1, 2, next)
 }
 
 func TestStorePutCancelsExisting(t *testing.T) {

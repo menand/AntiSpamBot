@@ -9,7 +9,7 @@
 # подхватит готовый образ.
 #
 # Smoke + карантин: после деплоя проверяем, что контейнер жив (Running,
-# RestartCount стабилен, getMe отвечает). Жёсткий провал — возвращаем прежний
+# RestartCount стабилен, heartbeat свежий, getMe отвечает). Жёсткий провал — возвращаем прежний
 # образ и кладём ID в карантин (QUARANTINE). Петли нет: пока упавший образ
 # (тот же ID) в карантине, тик молчит; новый ID (реальный фикс) проходит.
 # Карантин живёт ВНЕ репо и volume контейнера — переживает git-pull и рестарты.
@@ -73,7 +73,7 @@ notify_owners() {
     for owner in $(parse_env OWNER_IDS | tr ',' ' '); do
         [ -z "$owner" ] && continue
         if printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" |
-            curl -s --max-time 10 -o /dev/null -K - \
+            curl -fs --max-time 10 -o /dev/null -K - \
             --data-urlencode "chat_id=${owner}" \
             --data-urlencode "text=${msg}"; then
             sent=1
@@ -136,29 +136,28 @@ if is_quarantined "$after"; then
 fi
 
 echo "=== $(date -Is) deploying image $(short_id "$after") ==="
-if ! docker compose up -d --no-build; then
-    echo "!!! $(date -Is) deploy command failed; container stays on $(short_id "$before")"
-    notify_owners "⚠️ Деплой провалился (up -d): бот остался на $(short_id "$before")" || true
-    exit 0
-fi
-
-# --- Smoke ---
-sleep 10
 SMOKE_FAIL=""
-if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
-    SMOKE_FAIL="container not running"
+if ! docker compose up -d --no-build; then
+    # Compose мог уже остановить старый контейнер до ошибки создания нового.
+    # Поэтому ошибка команды требует той же попытки отката, что и smoke fail.
+    SMOKE_FAIL="compose up failed"
 else
-    r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-    # 25 секунд, а не 5: образ, падающий на t≈20s (первый LLM-вызов, первая
-    # миграция), раньше проскакивал мимо smoke — а следующий тик видел
-    # неизменный image ID и молчал вечно.
-    sleep 25
+    # --- Smoke ---
+    sleep 10
     if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
-        SMOKE_FAIL="container died within smoke window"
+        SMOKE_FAIL="container not running"
     else
-        r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-        if [ "$r1" != "$r2" ]; then
-            SMOKE_FAIL="restart count grew ($r1 -> $r2)"
+        r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
+        sleep 25
+        if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
+            SMOKE_FAIL="container died within smoke window"
+        else
+            r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
+            if [ "$r1" != "$r2" ]; then
+                SMOKE_FAIL="restart count grew ($r1 -> $r2)"
+            elif ! docker exec menand-antispam /usr/local/bin/healthcheck >/dev/null 2>&1; then
+                SMOKE_FAIL="heartbeat healthcheck failed"
+            fi
         fi
     fi
 fi
@@ -176,8 +175,12 @@ if [ -n "$TOKEN" ]; then
 fi
 
 if [ -z "$SMOKE_FAIL" ] && [ "$GETME_OK" -eq 1 ]; then
-    # Вытесненные старые образы (~35MB каждый) — чистим, чтобы не копились.
-    docker image prune -f >/dev/null 2>&1 || true
+    # Удаляем только вытесненный образ бота. На хосте есть другие проекты;
+    # глобальный prune мог бы удалить их образы для отката. Без --force:
+    # Docker сохранит образ, если на него ещё ссылаются контейнеры/теги.
+    if [ -n "$before" ]; then
+        docker image rm "$before" >/dev/null 2>&1 || true
+    fi
     echo "=== $(date -Is) deploy done ($(short_id "$after")) ==="
     notify_owners "✅ Бот обновлён: image $(short_id "$after")" || true
     exit 0
@@ -189,6 +192,11 @@ if [ -n "$SMOKE_FAIL" ]; then
     mkdir -p "$(dirname "$QUARANTINE")" || true
     if ! grep -qxF "$after" "$QUARANTINE" 2>/dev/null; then
         echo "$after" >> "$QUARANTINE" 2>/dev/null || true
+    fi
+    if [ -z "$before" ]; then
+        echo "!!! $(date -Is) SMOKE FAIL ($SMOKE_FAIL); no previous image for rollback"
+        notify_owners "🚨 Первый деплой провалился ($SMOKE_FAIL), предыдущего образа для отката нет. Нужно вмешательство" || true
+        exit 1
     fi
     echo "!!! $(date -Is) SMOKE FAIL ($SMOKE_FAIL); rolling back to $(short_id "$before")"
     if docker tag "$before" "$IMAGE" && docker compose up -d --no-build; then

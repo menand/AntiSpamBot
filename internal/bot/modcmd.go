@@ -507,9 +507,20 @@ func (b *Bot) resolveModTarget(message telego.Message) (targetID int64, targetMs
 		if err != nil {
 			b.log.Warn("resolve target by username", "err", err, "username", uname)
 		}
-		if ok {
-			return id, 0, true
+		if !ok || err != nil {
+			return 0, 0, false
 		}
+		member, err := b.api.GetChatMember(b.runCtx, &telego.GetChatMemberParams{
+			ChatID: tu.ID(message.Chat.ID), UserID: id,
+		})
+		if err != nil || member == nil {
+			return 0, 0, false
+		}
+		user := member.MemberUser()
+		if user.ID != id || user.IsBot || !strings.EqualFold(user.Username, uname) {
+			return 0, 0, false
+		}
+		return id, 0, true
 	}
 	// 3/4. reply: на сообщение цели или на приветствие бота о цели.
 	// ForumTopicCreated: в форумах сообщение без явного реплая несёт неявный

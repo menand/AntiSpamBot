@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mymmrac/telego"
 	"github.com/mymmrac/telego/telegoapi"
 )
 
@@ -91,6 +92,44 @@ func TestLeaveChatAndCleanup(t *testing.T) {
 			t.Fatalf("expected at least 1 leaveChat call, got %d", fc.callCount("leaveChat"))
 		}
 	})
+}
+
+func TestLeaveChatPreservesUnfinishedCaptcha(t *testing.T) {
+	for _, preparing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preparing=%v", preparing), func(t *testing.T) {
+			b, db, fc := newFlowBot(t)
+			serviceableChat(t, b, db, testChatID)
+			if preparing {
+				b.store.BeginKickoff(testChatID, testUserID)
+			} else {
+				putCaptcha(b, db, testChatID, testUserID, 77)
+			}
+			done := make(chan error, 1)
+			b.leaveChatAndCleanup(testChatID, "test leave", func(err error) { done <- err })
+			select {
+			case err := <-done:
+				if err == nil {
+					t.Fatal("leaving with an unfinished captcha must be refused")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("leave result timed out")
+			}
+			if fc.callCount("leaveChat") != 0 || !b.store.IsCaptchaActive(testChatID, testUserID) {
+				t.Fatal("leave discarded an active captcha and its permanent mute")
+			}
+		})
+	}
+}
+
+func TestCaptchaCannotStartDuringChatLeave(t *testing.T) {
+	b, _, fc := newFlowBot(t)
+	b.leaveInflight[testChatID] = true
+	if b.startCaptcha(testChatID, telego.User{ID: testUserID}, 0) {
+		t.Fatal("new captcha started while leaving")
+	}
+	if n := fc.callCount("restrictChatMember"); n != 0 {
+		t.Fatal("leaving chat must not acquire a new captcha mute")
+	}
 }
 
 func TestLeaveInflightDedup(t *testing.T) {

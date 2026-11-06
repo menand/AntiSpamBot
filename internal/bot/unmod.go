@@ -241,7 +241,7 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		// ссылок/форвардов и счётчик эскалации — половинчатый карантин.
 		// Для реально забаненного release идемпотентен и безвреден: бан
 		// рестрикт не снимает, отсутствие юзера даст максимум Warn.
-		b.releaseQuarantineUser(chatID, targetID)
+		_, _ = b.releaseQuarantineUser(chatID, targetID)
 		return "♻️ " + mention + " разбанен — может зайти заново.", nil
 	case "f":
 		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
@@ -257,7 +257,7 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 			b.log.Warn("fullunban: reset attempts", "err", err, "chat", chatID, "user", targetID)
 		}
 		// Карантин — как в ветке «u» (полный release; список исторический).
-		b.releaseQuarantineUser(chatID, targetID)
+		_, _ = b.releaseQuarantineUser(chatID, targetID)
 		// Остальные чаты и их attempts — в фоне: обход реестра с ретраями
 		// не должен висеть на хендлере/кнопке (прецедент spamVerdictFanout).
 		b.goSafe("fullunbanFanout", func() {
@@ -295,7 +295,7 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		// Полный release (в отличие от u/f/m): доверенный войдёт БЕЗ капчи —
 		// подменить старый текст-рестрикт будет нечем. Если карантин активен
 		// (юзер в чате), снимаем и серверный рестрикт сразу.
-		b.releaseQuarantineUser(chatID, targetID)
+		_, _ = b.releaseQuarantineUser(chatID, targetID)
 		return "🤝 " + mention + " в доверенных — войдёт без капчи.", nil
 	}
 	return "", fmt.Errorf("unknown unmod action %q", action)

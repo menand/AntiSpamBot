@@ -22,7 +22,7 @@ import (
 
 // TestDeleteBotMessageBranching — пин диспатча deleteBotMessage: ephID == 0
 // обязан идти обычным deleteMessage по msgID, ephID != 0 — через
-// DeleteEphemeralMessage с receiver'ом (CLAUDE.md: «branches on ephID != 0»).
+// DeleteEphemeralMessage с receiver'ом, когда ephemeral ID ненулевой.
 func TestDeleteBotMessageBranching(t *testing.T) {
 	t.Run("обычное сообщение", func(t *testing.T) {
 		b, _, fc := newFlowBot(t)

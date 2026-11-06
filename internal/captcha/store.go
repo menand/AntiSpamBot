@@ -1,6 +1,7 @@
 package captcha
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -36,13 +37,18 @@ type capKey struct {
 type Store struct {
 	mu       sync.Mutex
 	items    map[capKey]*Pending
-	inflight map[capKey]bool // кикоффы в процессе подготовки (до Put)
+	inflight map[capKey]*kickoff // подготовка/смена стадии до Put
+}
+
+type kickoff struct {
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewStore() *Store {
 	return &Store{
 		items:    make(map[capKey]*Pending),
-		inflight: make(map[capKey]bool),
+		inflight: make(map[capKey]*kickoff),
 	}
 }
 
@@ -58,19 +64,66 @@ func (s *Store) BeginKickoff(chatID, userID int64) bool {
 	if _, ok := s.items[k]; ok {
 		return false
 	}
-	if s.inflight[k] {
+	if s.inflight[k] != nil {
 		return false
 	}
-	s.inflight[k] = true
+	s.beginKickoff(k)
 	return true
+}
+
+func (s *Store) beginKickoff(k capKey) context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	s.inflight[k] = &kickoff{ctx: ctx, cancel: cancel}
+	return ctx
+}
+
+func (s *Store) KickoffContext(chatID, userID int64) context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k := s.inflight[capKey{chatID, userID}]; k != nil {
+		return k.ctx
+	}
+	return context.Background()
+}
+
+// CancelKickoff отменяет подготовку, сохраняя занятый слот до завершения
+// владельца: старый сетевой запрос не должен пережить новую серию.
+func (s *Store) CancelKickoff(chatID, userID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := s.inflight[capKey{chatID, userID}]
+	if k == nil || k.ctx.Err() != nil {
+		return false
+	}
+	k.cancel()
+	return true
+}
+
+// CancelChatKickoffs останавливает ещё не опубликованные проверки чата.
+// Слоты остаются занятыми до выхода владельцев сетевых запросов.
+func (s *Store) CancelChatKickoffs(chatID int64) []int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var users []int64
+	for key, k := range s.inflight {
+		if key.chatID == chatID && k.ctx.Err() == nil {
+			k.cancel()
+			users = append(users, key.userID)
+		}
+	}
+	return users
 }
 
 // FinishKickoff снимает флаг in-flight. Безопасно вызывать несколько раз.
 // Вызывать должен тот же, кто получил `true` от BeginKickoff.
-func (s *Store) FinishKickoff(chatID, userID int64) {
+func (s *Store) FinishKickoff(chatID, userID int64, expected ...context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.inflight, capKey{chatID, userID})
+	key := capKey{chatID, userID}
+	if k := s.inflight[key]; k != nil && (len(expected) == 0 || k.ctx == expected[0]) {
+		k.cancel()
+		delete(s.inflight, key)
+	}
 }
 
 func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt time.Time, threadID, ephemeralID, stage int) *Pending {
@@ -78,6 +131,9 @@ func (s *Store) Put(chatID, userID int64, messageID, correctIdx int, expiresAt t
 	defer s.mu.Unlock()
 
 	k := capKey{chatID, userID}
+	if prep := s.inflight[k]; prep != nil && prep.ctx.Err() != nil {
+		return nil
+	}
 	if old, ok := s.items[k]; ok {
 		old.Cancel()
 	}
@@ -110,7 +166,28 @@ func (s *Store) IsCaptchaActive(chatID, userID int64) bool {
 	if _, ok := s.items[k]; ok {
 		return true
 	}
-	return s.inflight[k]
+	prep := s.inflight[k]
+	return prep != nil && prep.ctx.Err() == nil
+}
+
+// TakeForKickoff атомарно передаёт истёкшую стадию её следующей отправке:
+// между Take и BeginKickoff не остаётся окна, невидимого для отмены.
+func (s *Store) TakeForKickoff(chatID, userID int64, expected *Pending) (*Pending, context.Context, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := capKey{chatID, userID}
+	p, ok := s.items[key]
+	if !ok || p != expected {
+		return nil, nil, false
+	}
+	if prev := s.inflight[key]; prev != nil {
+		if prev.ctx.Err() != nil {
+			return nil, nil, false
+		}
+		prev.cancel()
+	}
+	delete(s.items, key)
+	return p, s.beginKickoff(key), true
 }
 
 // Get подсматривает активную капчу, не изымая её. Нужен, чтобы проверить
@@ -167,4 +244,20 @@ func (s *Store) TakeChat(chatID int64) []*Pending {
 		}
 	}
 	return out
+}
+
+func (s *Store) HasChat(chatID int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.items {
+		if key.chatID == chatID {
+			return true
+		}
+	}
+	for key := range s.inflight {
+		if key.chatID == chatID {
+			return true
+		}
+	}
+	return false
 }

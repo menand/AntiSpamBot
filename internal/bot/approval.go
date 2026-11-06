@@ -279,20 +279,20 @@ func (b *Bot) leaveRejectedChat(chatID int64) {
 	b.leaveChatAndCleanup(chatID, "owner rejected chat", nil)
 }
 
-// leaveChatAndCleanup — общий вывод бота из чата по воле владельца: после
-// отклонения (leaveRejectedChat) или прямого запроса из меню (menu:leavec).
-// Сначала отключаем ежедневную сводку — защита от призрачных рассылок после
-// ухода (сводка смотрит на chat_settings напрямую и не заметила бы, что бота
-// в чате больше нет). Затем в goroutine — LeaveChat через retryTG и, только
-// после успеха, dropChat (реестр, кэши, активные капчи). Пока выход не прошёл,
-// реестр не трогаем: строка держит чат известным и оставляет возможность
-// повтора. onDone (может быть nil) вызывается с результатом — nil при успехе
-// (dropChat уже сделан) или ошибкой LeaveChat.
+// leaveChatAndCleanup выводит бота по запросу владельца или после отклонения.
+// Активные капчи блокируют выход, чтобы не оставить людей с бессрочным мутом.
+// Новые капчи на время выхода запрещены. Реестр удаляется после успешного
+// LeaveChat; onDone получает результат. Ошибка оставляет возможность повтора.
 func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) {
-	if err := b.db.SetDailyStatsEnabled(b.runCtx, chatID, false); err != nil {
-		b.log.Warn("disable daily stats on leave", "err", err, "chat", chatID)
-	}
+	b.leaveMu.Lock()
+	b.leaveInflight[chatID] = true
+	b.leaveMu.Unlock()
 	b.goSafe("leaveChatAndCleanup", func() {
+		defer func() {
+			b.leaveMu.Lock()
+			delete(b.leaveInflight, chatID)
+			b.leaveMu.Unlock()
+		}()
 		// onDone обязан прозвучать при любом исходе — включая панику посреди
 		// retryTG/dropChat: иначе защёлкнувшийся leaveInflight навсегда
 		// обезоружил бы кнопку выхода (см. leaveChatByOwner).
@@ -302,6 +302,20 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 				onDone(fmt.Errorf("leaveChatAndCleanup panicked"))
 			}
 		}()
+		pending, err := b.db.HasPendingChat(b.runCtx, chatID)
+		if err != nil || pending || b.store.HasChat(chatID) {
+			if err == nil {
+				err = fmt.Errorf("в чате есть незавершённые капчи: сначала впусти или исключи участников и повтори выход, иначе они останутся в муте")
+			}
+			completed = true
+			if onDone != nil {
+				onDone(err)
+			}
+			return
+		}
+		if err := b.db.SetDailyStatsEnabled(b.runCtx, chatID, false); err != nil {
+			b.log.Warn("disable daily stats on leave", "err", err, "chat", chatID)
+		}
 		if err := retryTG(b.runCtx, func() error {
 			return b.api.LeaveChat(b.runCtx, &telego.LeaveChatParams{ChatID: tu.ID(chatID)})
 		}); err != nil {

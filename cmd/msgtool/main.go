@@ -149,7 +149,7 @@ func main() {
 	}
 
 	// 2) Hot-окно: последние дни в SQLite (read-only, не мешает боту).
-	if _, err := os.Stat(*dbPath); err != nil {
+	if _, err := os.Stat(*dbPath); err != nil { //nolint:gosec // operator-selected local database path
 		// Явный -db указал на несуществующий файл — сообщаем, а не выдаём
 		// пустой вывод с exit 0.
 		fmt.Fprintf(os.Stderr, "warn: db not found, hot window skipped: %s\n", *dbPath)

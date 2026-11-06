@@ -2,8 +2,7 @@ package bot
 
 // Тесты закрытия находок полного ревью (2026-08):
 //  1. проигравший Take disarm-ветки reply-wait не пишет второй пасс;
-//  2. проигранный kickoff-лок при переходе стадии капчи гасит осиротевший
-//     pre-persist строки;
+//  2. переход стадии атомарно удерживает kickoff-лок до сетевых запросов;
 //  3. /unmute вне супергруппы отказывается через refuseAndDelete.
 
 import (
@@ -70,12 +69,8 @@ func TestReplyWaitReminderFailLoserNoSecondPass(t *testing.T) {
 	}
 }
 
-// TestCaptchaTransitionKickoffLostCleansOrphanRow — переход стадии проиграл
-// гонку за kickoff-лок (дубль-дelivery держит его своей серией): pre-persist
-// выше успел записать стадию N+1 под СТАРЫМ message_id, и без очистки здесь
-// рестарт поднял бы призрачную капчу, если дубль-серия оборвётся до своего
-// persist. События не пишутся, следующая стадия не отправляется.
-func TestCaptchaTransitionKickoffLostCleansOrphanRow(t *testing.T) {
+// Смена стадии удерживает kickoff до сетевого удаления старого сообщения.
+func TestCaptchaTransitionHoldsKickoffBeforeDeletingOldMessage(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
@@ -90,34 +85,35 @@ func TestCaptchaTransitionKickoffLostCleansOrphanRow(t *testing.T) {
 		t.Fatalf("restored = %d err=%v, want 1/nil", n, err)
 	}
 
-	// «Дубль-доставка» захватывает kickoff-лок строго в окне между Take'ом
-	// истёкшей стадии и попыткой цикла: синхронно внутри вызова удаления
-	// старого сообщения, который в цикле стоит ровно между ними.
+	// Попытка дубликата попадает точно в прежнее окно Take → BeginKickoff.
 	var dupOnce sync.Once
 	fc.errWhen = func(method string, _ *telegoapi.RequestData) bool {
 		if method == "deleteMessage" {
 			dupOnce.Do(func() {
-				if !b.store.BeginKickoff(testChatID, testUserID) {
-					t.Error("duplicate must win the kickoff lock in this window")
+				if b.store.BeginKickoff(testChatID, testUserID) {
+					t.Error("duplicate acquired the transitioning captcha")
 				}
 			})
 		}
 		return false
 	}
-	defer b.store.FinishKickoff(testChatID, testUserID)
+	defer b.cancelCaptchaSilent(testChatID, testUserID)
 
-	waitFor(t, func() bool { return len(pendingRows(t, db)) == 0 })
-	if _, ok := b.store.Get(testChatID, testUserID); ok {
-		t.Fatal("captcha must be taken by the loop")
+	waitFor(t, func() bool {
+		rows := pendingRows(t, db)
+		return len(rows) == 1 && rows[0].Stage == 2 && fc.callCount("sendMessage") == 1
+	})
+	if _, ok := b.store.Get(testChatID, testUserID); !ok {
+		t.Fatal("next captcha stage must remain active")
 	}
 	k := statsKinds(t, db, testChatID, testUserID)
 	for kind, n := range k {
 		if n != 0 {
-			t.Fatalf("проигранный лок не должен писать события (%s): %v", kind, k)
+			t.Fatalf("смена стадии не должна писать события (%s): %v", kind, k)
 		}
 	}
-	if n := fc.callCount("sendMessage"); n != 0 {
-		t.Fatalf("sendMessage = %d, want 0 — серия продолжит дубль", n)
+	if n := fc.callCount("sendMessage"); n != 1 {
+		t.Fatalf("sendMessage = %d, want one next stage", n)
 	}
 }
 

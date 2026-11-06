@@ -23,7 +23,8 @@ const (
 	// quarantineReleaseMaxPasses — сколько итераций «список→отпуск» догоняет
 	// гонку капча-проход/выключение тоггла; с re-check'ом арма обычно хватает
 	// одного прохода.
-	quarantineReleaseMaxPasses = 3
+	quarantineReleaseMaxPasses  = 3
+	quarantineReconcileInterval = 5 * time.Minute
 )
 
 // quarantineEntry — активный карантин (chat, user) в памяти: зеркало таблицы
@@ -114,6 +115,15 @@ func (s *quarantineStore) BumpViolations(chatID, userID int64) int {
 	e.Violations++
 	e.LastViolation = now
 	return e.Violations
+}
+
+// RetryEscalation разрешает повторить неудачный мут на следующем нарушении.
+func (s *quarantineStore) RetryEscalation(chatID, userID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if e := s.items[chatUser{chatID, userID}]; e != nil && e.Violations >= censorEscalateAfter {
+		e.Violations = censorEscalateAfter - 1
+	}
 }
 
 // Rekey переносит зеркало при миграции basic-группа → супергруппа: Telegram
@@ -240,15 +250,7 @@ func (b *Bot) restoreQuarantine(ctx context.Context) {
 	dctx, dcancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer dcancel()
 	for _, r := range drain {
-		b.quar.Remove(r.ChatID, r.UserID)
-		if err := b.db.DeleteQuarantine(dctx, r.ChatID, r.UserID); err != nil {
-			b.log.Warn("restore: drop disabled-chat quarantine", "err", err,
-				"chat", r.ChatID, "user", r.UserID)
-		}
-		// Release — даже если удаление строки упало: серверный рестрикт
-		// держится до until_date, и пропущенный release оставил бы «только
-		// текст» выключенному чату (строку потом добьёт reconcile-свип).
-		if err := b.release(dctx, r.ChatID, r.UserID); err != nil {
+		if _, err := b.releaseQuarantine(dctx, r.ChatID, r.UserID); err != nil {
 			b.log.Warn("restore: release disabled-chat quarantine", "err", err,
 				"chat", r.ChatID, "user", r.UserID)
 		}
@@ -324,6 +326,7 @@ func (b *Bot) censorQuarantineMessage(m *telego.Message, e quarantineEntry) {
 func (b *Bot) escalateQuarantine(chatID, userID int64) {
 	if err := b.mute(b.runCtx, chatID, userID, censorEscalateMute); err != nil {
 		b.log.Warn("quarantine escalation mute", "err", err, "chat", chatID, "user", userID)
+		b.quar.RetryEscalation(chatID, userID)
 		return
 	}
 	// Замьюченный физически не может выполнить «напиши пару слов по делу» —
@@ -374,16 +377,20 @@ func (b *Bot) dropQuarantineState(chatID, userID int64) bool {
 }
 
 // releaseQuarantineUser снимает карантин с конкретного юзера: обратный
-// рестрикт (дефолтные права чата) + чистка зеркала и БД-строки. false —
+// рестрикт (дефолтные права чата) + чистка зеркала и БД-строки. false, nil —
 // карантина нет (не начинался, истёк или уже снят), release не вызывался —
 // дёргать API на каждого админа при промоушене незачем. Общий путь для
 // /trust, промоушена в админы и reconcile-свипа выключенных чатов.
-func (b *Bot) releaseQuarantineUser(chatID, userID int64) bool {
+func (b *Bot) releaseQuarantineUser(chatID, userID int64) (bool, error) {
 	// liveCtx: вызывается и из хвостов, переживающих SIGTERM (промоушен,
 	// /trust, /whitelist) — на отменённом runCtx release молча не прошёл бы,
 	// и серверный текст-рестрикт остался бы висеть без единого повторителя.
 	ctx, cancel := b.liveCtx()
 	defer cancel()
+	return b.releaseQuarantine(ctx, chatID, userID)
+}
+
+func (b *Bot) releaseQuarantine(ctx context.Context, chatID, userID int64) (bool, error) {
 	_, inMirror := b.quar.Get(chatID, userID)
 	has, err := b.db.HasQuarantine(ctx, chatID, userID, time.Now().Unix())
 	if err != nil {
@@ -394,16 +401,19 @@ func (b *Bot) releaseQuarantineUser(chatID, userID int64) bool {
 	// оставил бы серверный текст-рестрикт висеть (свежий карантин в зеркале
 	// или нечитаемой строке всё равно надо отпускать).
 	if !inMirror && err == nil && !has {
-		return false
+		return false, nil
+	}
+	// Состояние остаётся повторяемым до подтверждённого снятия ограничения.
+	if err := b.release(ctx, chatID, userID); err != nil {
+		b.log.Warn("quarantine: release", "err", err, "chat", chatID, "user", userID)
+		return false, err
 	}
 	b.quar.Remove(chatID, userID)
 	if err := b.db.DeleteQuarantine(ctx, chatID, userID); err != nil {
 		b.log.Warn("quarantine: delete row", "err", err, "chat", chatID, "user", userID)
+		return true, err
 	}
-	if err := b.release(ctx, chatID, userID); err != nil {
-		b.log.Warn("quarantine: release", "err", err, "chat", chatID, "user", userID)
-	}
-	return true
+	return true, nil
 }
 
 // quarantineReleaseChat отпускает всех активных карантинных юзеров чата.
@@ -425,15 +435,7 @@ func (b *Bot) quarantineReleaseChat(chatID int64) {
 			return
 		}
 		for _, r := range rows {
-			b.quar.Remove(r.ChatID, r.UserID)
-			if err := b.db.DeleteQuarantine(b.runCtx, r.ChatID, r.UserID); err != nil {
-				b.log.Warn("quarantine release: delete row",
-					"err", err, "chat", r.ChatID, "user", r.UserID)
-			}
-			// Release — даже если удаление строки упало: серверный рестрикт
-			// держится до until_date, и без отпуска выключенный чат остался
-			// бы «только текст» до конца срока.
-			if err := b.release(b.runCtx, r.ChatID, r.UserID); err != nil {
+			if _, err := b.releaseQuarantine(b.runCtx, r.ChatID, r.UserID); err != nil {
 				b.log.Warn("quarantine release",
 					"err", err, "chat", r.ChatID, "user", r.UserID)
 			}
@@ -453,7 +455,7 @@ func (b *Bot) reconcileQuarantines(ctx context.Context) {
 		return
 	}
 	for _, r := range rows {
-		if b.releaseQuarantineUser(r.ChatID, r.UserID) {
+		if released, err := b.releaseQuarantineUser(r.ChatID, r.UserID); released && err == nil {
 			b.log.Info("quarantine released — feature disabled",
 				"chat", r.ChatID, "user", r.UserID)
 		}

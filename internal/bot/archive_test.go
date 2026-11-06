@@ -129,28 +129,43 @@ func TestArchiveDayWriteFailureKeepsHotRows(t *testing.T) {
 	}
 }
 
-// Путь WriteFile-ошибки: настоящий каталог, но на месте tmp-файла уже стоит
-// КАТАЛОГ → os.WriteFile упадёт с EISDIR. Файл дня не появился, hot-строки целы
-// (раньше этот тест упирался в stat-ветку выше и WriteFile не покрывал).
-func TestArchiveDayTmpWriteFailureKeepsHotRows(t *testing.T) {
+func TestArchiveDayIgnoresStaleTmpPath(t *testing.T) {
 	ctx := context.Background()
 	b, db := newTestBotWithDB(t)
 	dir := t.TempDir()
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, storage.StatsLocation)
 	day := seedDay(t, db, base, -1001, 2)
 
-	// Каталог вместо tmp-файла: WriteFile → EISDIR, Rename ниже — мимо.
+	// Остаток старой реализации не должен мешать уникальной времянке.
 	if err := os.Mkdir(filepath.Join(dir, archive.FileNameForDay(day)+".tmp"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.archiveDay(ctx, dir, day); err == nil {
-		t.Fatal("expected tmp write error")
+	if err := b.archiveDay(ctx, dir, day); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, archive.FileNameForDay(day))); err == nil {
-		t.Fatal("final file must not exist after failed write")
+	if n := len(mustReadDay(t, dir, day)); n != 2 {
+		t.Fatalf("archive entries = %d, want 2", n)
 	}
-	if hot, _ := db.MessagesForDay(ctx, day); len(hot) != 2 {
-		t.Fatalf("hot rows after tmp failure = %d, want 2 (kept)", len(hot))
+	if hot, _ := db.MessagesForDay(ctx, day); len(hot) != 0 {
+		t.Fatalf("hot rows after archive = %d, want 0", len(hot))
+	}
+}
+
+func TestWriteArchiveRenameFailureCleansTmp(t *testing.T) {
+	dir := t.TempDir()
+	final := filepath.Join(dir, "day.jsonl.zst")
+	if err := os.Mkdir(final, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeArchive(final, []byte("archive")); err == nil {
+		t.Fatal("rename over directory must fail")
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].Name() != filepath.Base(final) {
+		t.Fatalf("temporary file left after failure: %v", files)
 	}
 }
 

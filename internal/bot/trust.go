@@ -32,7 +32,13 @@ func (b *Bot) handleTrustCommand(ctx *th.Context, message telego.Message) error 
 	}
 	recv := b.modReceiver(chatID, message)
 	mention := b.mentionFor(targetID)
-	if b.releaseQuarantineUser(chatID, targetID) {
+	released, err := b.releaseQuarantineUser(chatID, targetID)
+	if err != nil {
+		b.sendPlain(chatID, threadOf(message), recv,
+			"Не получилось снять карантин — проверь мои права и попробуй ещё раз.")
+		return nil //nolint:nilerr // the failure is reported to the caller in chat
+	}
+	if released {
 		b.sendHTML(chatID, threadOf(message), recv,
 			"🧫 Карантин снят с "+mention+" — снова можно ссылки и пересылки.")
 		b.log.Info("trust command", "chat", chatID, "target", targetID, "by", message.From.ID)

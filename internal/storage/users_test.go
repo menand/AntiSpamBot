@@ -20,6 +20,31 @@ func TestRecordMessageFirstEver(t *testing.T) {
 	}
 }
 
+func TestRecordMessageOutOfOrderKeepsLatestActivity(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	now := time.Now().Truncate(time.Second)
+	for _, at := range []time.Time{now, now.Add(-60 * 24 * time.Hour)} {
+		if _, err := db.RecordMessage(ctx, 1, 100, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec, err := db.RecordMessage(ctx, 1, 100, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.HasBaseline || rec.Silence != time.Second {
+		t.Fatalf("out-of-order update moved last activity back: %+v", rec)
+	}
+	var first, last int64
+	if err := db.sql.QueryRowContext(ctx, `SELECT first_message_at, last_message_at FROM user_activity WHERE chat_id=1 AND user_id=100`).Scan(&first, &last); err != nil {
+		t.Fatal(err)
+	}
+	if first != now.Add(-60*24*time.Hour).Unix() || last != now.Add(time.Second).Unix() {
+		t.Fatalf("activity range = %d..%d", first, last)
+	}
+}
+
 func TestRecordMessageFirstAfterJoin(t *testing.T) {
 	ctx := context.Background()
 	db := openTest(t)

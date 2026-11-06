@@ -22,10 +22,10 @@ vet:
 	go vet $(JSON_TAGS) ./...
 
 lint:
-	golangci-lint run $(JSON_TAGS)
+	golangci-lint run --build-tags stdjson
 
 vuln:
-	govulncheck ./...
+	govulncheck $(JSON_TAGS) ./...
 
 tidy:
 	go mod tidy

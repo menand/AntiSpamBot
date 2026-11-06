@@ -232,7 +232,7 @@ func (b *Bot) startReplyWatch(m *telego.Message) {
 // replyWatchJitter — до 10 секунд, чтобы пробы волны ответов не совпадали до
 // секунды.
 func replyWatchJitter() time.Duration {
-	return rand.N(10 * time.Second)
+	return rand.N(10 * time.Second) //nolint:gosec // scheduling jitter, not a secret
 }
 
 // maybeHandleReplyWatchEdit — наблюдаемое сообщение отредактировали: атомарно
@@ -240,26 +240,18 @@ func replyWatchJitter() time.Duration {
 // стало». Вызывается из handleEditedGroupMessage до reply-wait-логики: правка
 // уже прошедшего ответа не должна теряться из-за фильтра осмысленности.
 func (b *Bot) maybeHandleReplyWatchEdit(m *telego.Message) {
-	b.log.Info("maybeHandleReplyWatchEdit called", "chat", m.Chat.ID, "msg", m.MessageID, "text", m.Text, "from", m.From.ID)
 	if !b.cfg.ReplyWatchEnabled || m == nil || m.From == nil || m.MessageID == 0 {
-		b.log.Info("early return - basic checks", "enabled", b.cfg.ReplyWatchEnabled, "nilFrom", m.From == nil, "nilMsgID", m.MessageID == 0)
 		return
 	}
-	b.log.Info("passed basic checks")
 	// Дешёвый предфильтр: правки в чатах, где наблюдений не было, не должны
 	// открывать транзакцию (единственное соединение SQLite сериализует все
 	// записи бота).
 	if _, watched := b.replyWatchChats.Load(m.Chat.ID); !watched {
-		b.log.Info("early return - not watched", "chat", m.Chat.ID)
 		return
 	}
-	b.log.Info("chat is watched")
 	if !b.chatServiceable(m.Chat.ID) {
-		b.log.Info("early return: not serviceable", "chat", m.Chat.ID)
-		b.log.Info("early return: not serviceable", "chat", m.Chat.ID)
 		return
 	}
-	b.log.Info("passing all checks, calling ClaimReplyWatchEdit")
 	text := m.Text
 	if text == "" {
 		text = m.Caption
@@ -281,7 +273,6 @@ func (b *Bot) maybeHandleReplyWatchEdit(m *telego.Message) {
 	if !edit.ShouldNotify {
 		// Троттлинг/лимит карточек: снимок уже обновлён, отчёт об удалении
 		// покажет последнюю версию.
-		b.log.Info("REPLYWATCH DEBUG: edit shouldNotify=false, skipping notify")
 		return
 	}
 	b.log.Info("reply watch: edited", "chat", edit.ChatID, "user", edit.UserID,

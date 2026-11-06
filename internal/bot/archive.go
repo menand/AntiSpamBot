@@ -66,7 +66,7 @@ func (b *Bot) archiveOnce(ctx context.Context) {
 		return
 	}
 	dir := b.archiveDir()
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := mkdirArchiveDir(dir); err != nil {
 		b.log.Warn("archive: mkdir", "err", err, "dir", dir)
 		return
 	}
@@ -142,14 +142,8 @@ func (b *Bot) archiveDay(ctx context.Context, dir, day string) error {
 		return fmt.Errorf("encode day: %w", err)
 	}
 
-	// Атомарная запись: времянка рядом с целью + rename.
-	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, zb, 0o640); err != nil {
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename: %w", err)
+	if err := writeArchive(final, zb); err != nil {
+		return err
 	}
 
 	// Файл доехал — теперь удаляем прочитанные hot-строки дня (по границе id,
@@ -159,6 +153,67 @@ func (b *Bot) archiveDay(ctx context.Context, dir, day string) error {
 	}
 	b.log.Info("archive: day packed", "day", day, "messages", len(msgs),
 		"total", len(entries), "compressed", len(zb), "file", final)
+	return nil
+}
+
+// mkdirArchiveDir сохраняет и новые каталоги: fsync самого файла недостаточен,
+// если после сбоя пропадёт запись о его каталоге в родительском каталоге.
+func mkdirArchiveDir(dir string) error {
+	err := os.Mkdir(dir, 0o750)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err := mkdirArchiveDir(filepath.Dir(dir)); err != nil {
+			return err
+		}
+		err = os.Mkdir(dir, 0o750)
+	}
+	if errors.Is(err, fs.ErrExist) {
+		info, statErr := os.Stat(dir)
+		if statErr == nil && info.IsDir() {
+			return nil
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return syncArchiveDir(filepath.Dir(dir))
+}
+
+func syncArchiveDir(dir string) error {
+	f, err := os.Open(dir) //nolint:gosec // operator-configured local archive directory
+	if err != nil {
+		return err
+	}
+	defer f.Close() //nolint:errcheck // cleanup after Sync
+	return f.Sync()
+}
+
+// writeArchive подтверждает запись файла и rename на диск до удаления SQL-строк.
+// Уникальная времянка не затирает остаток предыдущего незавершённого прогона.
+func writeArchive(final string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(final), ".archive-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create archive tmp: %w", err)
+	}
+	defer os.Remove(f.Name()) //nolint:errcheck // absent after successful rename
+	defer f.Close()           //nolint:errcheck // also closes failed writes
+	if err := f.Chmod(0o640); err != nil {
+		return fmt.Errorf("chmod archive tmp: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		return fmt.Errorf("write archive tmp: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("sync archive tmp: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close archive tmp: %w", err)
+	}
+	if err := os.Rename(f.Name(), final); err != nil {
+		return fmt.Errorf("rename archive: %w", err)
+	}
+	if err := syncArchiveDir(filepath.Dir(final)); err != nil {
+		return fmt.Errorf("sync archive directory: %w", err)
+	}
 	return nil
 }
 

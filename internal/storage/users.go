@@ -64,8 +64,8 @@ func (d *DB) RecordMessage(ctx context.Context, chatID, userID int64, at time.Ti
 		INSERT INTO user_activity (chat_id, user_id, first_message_at, last_message_at, message_count)
 		VALUES (?, ?, ?, ?, 1)
 		ON CONFLICT(chat_id, user_id) DO UPDATE SET
-			first_message_at = COALESCE(user_activity.first_message_at, excluded.first_message_at),
-			last_message_at = excluded.last_message_at,
+			first_message_at = MIN(COALESCE(user_activity.first_message_at, excluded.first_message_at), excluded.first_message_at),
+			last_message_at = MAX(COALESCE(user_activity.last_message_at, excluded.last_message_at), excluded.last_message_at),
 			message_count = user_activity.message_count + 1
 	`, chatID, userID, atUnix, atUnix)
 	if err != nil {
@@ -395,6 +395,7 @@ func (d *DB) eventUsersQuery(ctx context.Context, chatID int64, from, until time
 	if limit > 0 {
 		args = append(args, limit, offset)
 	}
+	//nolint:gosec // only placeholder lists are formatted; values stay bound
 	q := fmt.Sprintf(`
 		SELECT e.user_id, COUNT(*) AS n,
 		       (SELECT reason FROM events e2

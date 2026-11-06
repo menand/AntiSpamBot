@@ -1,9 +1,16 @@
 .git
 .gitignore
 .env
-.env.example
+.env.*
 README.md
-CLAUDE.md
+AGENTS.md
+.agents/
+.claude/
+.codex/
+.opencode/
+.aiforopenide/
+.DS_Store
+docs/
 Dockerfile
 docker-compose.yml
 .idea/
@@ -15,5 +22,7 @@ docker-compose.yml
 /archive/
 *.jsonl.zst
 *.jsonl.zst.tmp
+.archive-*.tmp
 /bin
 /out
+/btnprobe

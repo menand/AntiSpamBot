@@ -248,7 +248,7 @@ func TestMaybeArmReplyWaitModeLeftRecordsPass(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true} // снимок ДО смены режима
-	if b.maybeArmReplyWait(s, testChatID, testUserID, 0) {
+	if b.maybeArmReplyWait(s, testChatID, testUserID, 0) != nil {
 		t.Fatal("stale snapshot must not arm against the DB mode")
 	}
 	if _, ok := b.replies.Take(testChatID, testUserID); ok {

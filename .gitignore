@@ -1,17 +1,19 @@
 .env
+.env.*
+!.env.example
+.claude/settings.local.json
+.aiforopenide/
 /bin
 /out
-# Бинарник go build ./cmd/btnprobe в корне модуля.
 /btnprobe
 *.log
 *.db
 *.db-shm
 *.db-wal
-# Дневные архивы сообщений (расширенный сбор статистики): сырые тексты чатов
-# не должны попадать в git.
 /archive/
 *.jsonl.zst
 *.jsonl.zst.tmp
+.archive-*.tmp
 .idea/
 .vscode/
 .DS_Store

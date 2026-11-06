@@ -259,7 +259,7 @@ func (d *DB) ClaimReplyWatchEdit(ctx context.Context, chatID int64, messageID in
 		if erased {
 			// Карточка должна показать «стало: текст убран», а снимок в БД
 			// остаётся прежним (улика для отчёта об удалении).
-			edit.ReplyWatch.Text = ""
+			edit.Text = ""
 		}
 		edit.ShouldNotify = true
 	} else if !erased {

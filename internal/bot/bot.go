@@ -629,10 +629,14 @@ func (b *Bot) notifyOwners(ctx context.Context, text string) {
 func (b *Bot) attemptsSweepLoop(ctx context.Context) {
 	t := time.NewTicker(attemptsTTL / 2)
 	defer t.Stop()
+	quarantineRetry := time.NewTicker(quarantineReconcileInterval)
+	defer quarantineRetry.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-quarantineRetry.C:
+			b.reconcileQuarantines(ctx)
 		case <-t.C:
 			if err := b.db.SweepAttempts(ctx, attemptsTTL); err != nil {
 				b.log.Warn("sweep attempts", "err", err)

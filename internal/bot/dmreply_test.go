@@ -531,10 +531,10 @@ func TestOwnerDMReplyNoticeReplacesPrevious(t *testing.T) {
 	}
 }
 
-// TestOwnerDMLinkTTLPinned — 30 дней из CLAUDE.md: связка живёт ровно месяц.
+// TestOwnerDMLinkTTLPinned — связка сообщения владельца живёт 30 дней.
 func TestOwnerDMLinkTTLPinned(t *testing.T) {
 	if ownerDMLinkTTL != 30*24*time.Hour {
-		t.Fatalf("ownerDMLinkTTL = %v, want 30 дней (CLAUDE.md §Owner reply from DM)", ownerDMLinkTTL)
+		t.Fatalf("ownerDMLinkTTL = %v, want 30 дней", ownerDMLinkTTL)
 	}
 }
 

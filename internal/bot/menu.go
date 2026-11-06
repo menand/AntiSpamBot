@@ -530,11 +530,6 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 	}
 
 	b.leaveChatAndCleanup(chatID, "owner requested leave", func(leaveErr error) {
-		defer func() {
-			b.leaveMu.Lock()
-			delete(b.leaveInflight, chatID)
-			b.leaveMu.Unlock()
-		}()
 		text := fmt.Sprintf("🚪 Бот вышел из чата «%s»", title)
 		kb := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{{
 			tu.InlineKeyboardButton("⬅️ Меню").WithCallbackData(cbMain),
@@ -566,8 +561,8 @@ func (b *Bot) leaveChatByOwner(ctx *th.Context, query telego.CallbackQuery, chat
 
 // toggleChatSetting — общее тело пер-чатовых тогглов настроек: read-modify-write.
 // На ошибке ЧТЕНИЯ прерываемся, иначе записали бы инверсию ДЕФОЛТА вместо
-// инверсии реального значения. Запись — на runCtx (конвенция «DB writes from
-// callbacks» из CLAUDE.md): начатый тоггл не должен теряться на shutdown.
+// инверсии реального значения. Запись — на runCtx, чтобы она не зависела
+// от времени жизни контекста обработчика callback.
 func (b *Bot) toggleChatSetting(ctx *th.Context, query telego.CallbackQuery, chatID int64,
 	get func(storage.ChatSettings) bool, set func(context.Context, int64, bool) error, what string,
 	afterSet ...func(prev bool)) error {
@@ -1308,7 +1303,7 @@ const extendedPageSize = 25
 func (b *Bot) handleExtendedStatsCallback(ctx *th.Context, query telego.CallbackQuery, parts []string) error {
 	chatID, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || chatID == 0 {
-		return nil
+		return nil //nolint:nilerr // malformed callback is ignored
 	}
 	if !b.canManageChat(ctx, query.From.ID, chatID) {
 		return nil

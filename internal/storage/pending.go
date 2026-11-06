@@ -76,6 +76,15 @@ func (d *DB) DeletePendingChat(ctx context.Context, chatID int64) error {
 	return nil
 }
 
+func (d *DB) HasPendingChat(ctx context.Context, chatID int64) (bool, error) {
+	var exists bool
+	err := d.sql.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM pending_captchas WHERE chat_id = ?)`, chatID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("has pending chat: %w", err)
+	}
+	return exists, nil
+}
+
 // PendingReply — ожидание «ответь на приветствие» (режим reply_check).
 type PendingReply struct {
 	ChatID    int64

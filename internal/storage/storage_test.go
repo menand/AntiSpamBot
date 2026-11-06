@@ -364,6 +364,9 @@ func TestEventsAtIndexUsedByPruneShape(t *testing.T) {
 		}
 		plan += detail + "\n"
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(plan, "idx_events_at") || strings.Contains(plan, "TEMP B-TREE") {
 		t.Fatalf("prune shape must use idx_events_at (no temp b-tree):\n%s", plan)
 	}
