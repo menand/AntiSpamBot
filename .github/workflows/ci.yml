@@ -25,7 +25,7 @@ jobs:
         # Dockerfile, чтобы dependabot-бамп базы не рассинхронизировал их
         # (хардкод '1.26' пережил бамп Dockerfile на 1.27 и тихо нарушил
         # этот инвариант).
-        run: echo "go=$(awk '/^FROM golang/{tag=$2; gsub(/-alpine$/, "", tag); sub(/^golang:/, "", tag); print tag; exit}' Dockerfile)" >> "$GITHUB_OUTPUT"
+        run: echo "go=$(awk -F= '/^ARG GOLANG_IMAGE=/{tag=$2; gsub(/-alpine$/, "", tag); sub(/^golang:/, "", tag); print tag; exit}' Dockerfile)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
           go-version: '${{ steps.gotag.outputs.go }}'
@@ -64,10 +64,7 @@ jobs:
         # Теги баз читаем из Dockerfile, а не хардкодим: dependabot меняет
         # только Dockerfile, и хардкод здесь ослеплял дозор после бампа 1.26→1.27.
         run: |
-          GOLANG=$(awk '/^FROM golang/{print $2; exit}' Dockerfile)
-          ALPINE=$(awk '/^FROM alpine/{print $2; exit}' Dockerfile)
-          echo "golang=$(docker buildx imagetools inspect "$GOLANG" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
-          echo "alpine=$(docker buildx imagetools inspect "$ALPINE" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          bash scripts/base-digests.sh >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -81,7 +78,11 @@ jobs:
           tags: |
             ghcr.io/menand/antispambot:latest
             ghcr.io/menand/antispambot:${{ steps.ver.outputs.version }}
-          build-args: VERSION=${{ steps.ver.outputs.version }}
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ steps.ver.outputs.version }}
+            GOLANG_IMAGE=${{ steps.bases.outputs.golang_image }}
+            ALPINE_IMAGE=${{ steps.bases.outputs.alpine_image }}
           labels: |
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}

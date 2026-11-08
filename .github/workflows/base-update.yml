@@ -1,10 +1,8 @@
 name: Base image update check
 
-# Часовой дозор базовых образов прод-контейнера. Каждый час сверяет дайджесты
-# баз из Dockerfile (golang:X.Y-alpine, alpine:Z.W) на Docker Hub с дайджестами,
-# запечёнными в последний ghcr.io/menand/antispambot:latest (labels
-# base.digest.*, их пишет ci.yml при сборке). Разошлись — вышел новый патч
-# Go/Alpine (часто security):
+# Часовой дозор базовых образов прод-контейнера. Сверяет digest manifest
+# linux/amd64 баз из Dockerfile с метками последнего образа бота.
+# При изменении выбранной платформы:
 # триггерим пересборку через workflow_dispatch ci.yml (rebuild_image=true);
 # тесты там прогоняются, VDS подхватит новый образ сам (auto-deploy рестартует
 # только при смене image ID). Совпали — ничего не делаем, бесплатный no-op.
@@ -44,10 +42,7 @@ jobs:
       - name: Current upstream base digests
         id: current
         run: |
-          GOLANG=$(awk '/^FROM golang/{print $2; exit}' Dockerfile)
-          ALPINE=$(awk '/^FROM alpine/{print $2; exit}' Dockerfile)
-          echo "golang=$(docker buildx imagetools inspect "$GOLANG" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
-          echo "alpine=$(docker buildx imagetools inspect "$ALPINE" | awk '/^Digest:/{print $2}')" >> "$GITHUB_OUTPUT"
+          bash scripts/base-digests.sh >> "$GITHUB_OUTPUT"
 
       - name: Base digests baked into the published image
         id: baked
