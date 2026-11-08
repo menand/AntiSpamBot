@@ -26,6 +26,42 @@ image_revision() {
     return 0
 }
 
+# Читаем версию из файловой системы именно установленного образа. Отдельный
+# одноразовый контейнер не получает сеть и volume с данными бота; --pull=never
+# исключает незаметную загрузку другого образа. Таймаут не задерживает деплой.
+alpine_version() {
+    local version
+    [ -n "$1" ] || { printf '%s' 'неизвестна'; return 0; }
+    version=$(timeout 10s docker run --rm --pull=never --network=none --read-only \
+        --tmpfs /data --entrypoint /bin/cat "$1" /etc/alpine-release 2>/dev/null || true)
+    if [[ "$version" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        printf '%s' "$version"
+    else
+        printf '%s' 'неизвестна'
+    fi
+}
+
+alpine_details() {
+    local old_image="$1" new_image="$2" old_digest new_digest old_version new_version
+    old_digest=$(image_label "$old_image" base.digest.alpine)
+    new_digest=$(image_label "$new_image" base.digest.alpine)
+    [ -n "$new_digest" ] || return 0
+    if [ -n "$old_digest" ] && [ "$old_digest" = "$new_digest" ]; then
+        return 0
+    fi
+    old_version=$(alpine_version "$old_image")
+    new_version=$(alpine_version "$new_image")
+    printf 'Alpine: %s → %s\n' "$old_version" "$new_version"
+    if [ "$new_version" = неизвестна ]; then
+        printf '%s\n' 'Выпуски Alpine: https://alpinelinux.org/releases/'
+    else
+        printf 'История выпуска Alpine (все пакеты): https://git.alpinelinux.org/aports/log/?h=v%s\n' "$new_version"
+    fi
+    if [ "$old_version" = "$new_version" ] && [ "$new_version" != неизвестна ]; then
+        printf '%s\n' 'Номер выпуска совпадает; содержимое образа может отличаться.'
+    fi
+}
+
 # Bound whole UTF-8 lines by bytes, without slicing characters. This is also
 # below Telegram's UTF-16 limit, including the rest of the notification.
 bounded_notes() {
@@ -84,13 +120,16 @@ deployment_changes() {
 }
 
 deployment_notice() {
-    local old_version="$1" new_version="$2" image="$3" changes="$4" api_ok="$5"
+    local old_version="$1" new_version="$2" image="$3" changes="$4" api_ok="$5" alpine_info="${6:-}"
     if [ "$api_ok" -eq 1 ]; then
         printf '%s\n' '✅ Обновление бота завершено'
     else
         printf '%s\n' '⚠️ Образ бота установлен; Telegram API недоступен'
     fi
     printf 'Версия: %s → %s\n\n%s\n\n' "$old_version" "$new_version" "$changes"
+    if [ -n "$alpine_info" ]; then
+        printf '%s\n\n' "$alpine_info"
+    fi
     printf '%s\n' 'Проверка запуска: нужный образ работает, heartbeat свежий, перезапусков нет.'
     if [ "$api_ok" -eq 1 ]; then
         printf '%s\n' 'Telegram API: отвечает.'

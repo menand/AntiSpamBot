@@ -53,23 +53,33 @@ func TestDeployNotification(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(filepath.Join(bin, "docker"), `#!/bin/sh
+if [ "$1" = run ]; then
+  printf '%s\n' "$*" >> "$DOCKER_CALLS"
+  for arg in "$@"; do
+    case "$arg" in sha256:old) printf '%s\n' "$OLD_ALPINE_VERSION";; sha256:new) printf '%s\n' "$NEW_ALPINE_VERSION";; esac
+  done
+  exit 0
+fi
 case "$5" in
-  sha256:old) version=$OLD_VERSION; revision=$OLD_REVISION; golang=old-go;;
-  *) version=$NEW_VERSION; revision=$NEW_REVISION; golang=$NEW_GOLANG;;
+  sha256:old) version=$OLD_VERSION; revision=$OLD_REVISION; golang=old-go; alpine=$OLD_ALPINE_DIGEST;;
+  *) version=$NEW_VERSION; revision=$NEW_REVISION; golang=$NEW_GOLANG; alpine=$NEW_ALPINE_DIGEST;;
 esac
 case "$4" in
   *org.opencontainers.image.version*) printf '%s' "$version";;
   *org.opencontainers.image.revision*) printf '%s' "$revision";;
   *base.digest.golang*) printf '%s' "$golang";;
-  *base.digest.alpine*) printf '%s' same-alpine;;
+  *base.digest.alpine*) printf '%s' "$alpine";;
 esac
 `)
-	for _, scenario := range []string{"release", "base-rebuild", "same-code", "unknown", "commit-only", "getme-failed", "long-notes"} {
+	write(filepath.Join(bin, "timeout"), "#!/bin/sh\nshift\nexec \"$@\"\n")
+	for _, scenario := range []string{"release", "base-rebuild", "same-code", "unknown", "commit-only", "getme-failed", "long-notes", "alpine-upgrade", "alpine-repack", "alpine-old-unknown", "alpine-new-unknown", "alpine-invalid"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldVersion, newVersion := "v1.0.0", "v1.1.0"
 			oldRev, newRev := oldRevision, newRevision
 			newGo := "old-go"
 			apiOK := "1"
+			oldAlpineDigest, newAlpineDigest := "same-alpine", "same-alpine"
+			oldAlpineVersion, newAlpineVersion := "3.24.4", "3.24.5"
 			switch scenario {
 			case "base-rebuild", "same-code":
 				oldRev = newRev
@@ -83,6 +93,23 @@ esac
 				oldVersion, newVersion = "v1.0.0-1-gabcdef0", "v1.0.0-2-g1234567"
 			case "getme-failed":
 				apiOK = "0"
+			case "alpine-upgrade", "alpine-repack", "alpine-old-unknown", "alpine-new-unknown", "alpine-invalid":
+				oldRev = newRev
+				oldVersion = newVersion
+				oldAlpineDigest, newAlpineDigest = "old-base", "new-base"
+				if scenario == "alpine-repack" {
+					newAlpineVersion = oldAlpineVersion
+				}
+				if scenario == "alpine-old-unknown" {
+					oldAlpineVersion = ""
+					oldAlpineDigest = ""
+				}
+				if scenario == "alpine-new-unknown" {
+					newAlpineVersion = ""
+				}
+				if scenario == "alpine-invalid" {
+					newAlpineVersion = "3.24.5&unexpected=1"
+				}
 			}
 			body := `set -euo pipefail
 source "$DEPLOY_HELPER"
@@ -91,7 +118,8 @@ new_version=$(image_version sha256:new)
 old_revision=$(image_revision sha256:old)
 new_revision=$(image_revision sha256:new)
 changes=$(deployment_changes sha256:old sha256:new "$old_version" "$new_version" "$old_revision" "$new_revision")
-deployment_notice "$old_version" "$new_version" sha256:new "$changes" "$API_OK"
+alpine_info=$(alpine_details sha256:old sha256:new)
+deployment_notice "$old_version" "$new_version" sha256:new "$changes" "$API_OK" "$alpine_info"
 `
 			if scenario == "long-notes" {
 				body = `set -euo pipefail
@@ -107,6 +135,9 @@ deployment_notice v1.0.0 v1.1.0 sha256:new "$changes" 1
 				"OLD_VERSION=" + oldVersion, "NEW_VERSION=" + newVersion,
 				"OLD_REVISION=" + oldRev, "NEW_REVISION=" + newRev,
 				"NEW_GOLANG=" + newGo, "API_OK=" + apiOK,
+				"OLD_ALPINE_DIGEST=" + oldAlpineDigest, "NEW_ALPINE_DIGEST=" + newAlpineDigest,
+				"OLD_ALPINE_VERSION=" + oldAlpineVersion, "NEW_ALPINE_VERSION=" + newAlpineVersion,
+				"DOCKER_CALLS=" + filepath.Join(dir, "docker-calls-"+scenario),
 				"LONG_NOTES=- " + strings.Repeat("😀", 1200) + "\n- Короткий пункт.\n- Ещё один пункт.",
 				"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
 			}
@@ -148,6 +179,26 @@ deployment_notice v1.0.0 v1.1.0 sha256:new "$changes" 1
 			case "long-notes":
 				if !strings.Contains(text, "Короткий пункт") || !strings.Contains(text, "/whatsnew") {
 					t.Fatalf("oversized Unicode note must leave a readable bounded summary: %s", text)
+				}
+			case "alpine-upgrade", "alpine-old-unknown":
+				old := "3.24.4"
+				if scenario == "alpine-old-unknown" {
+					old = "неизвестна"
+				}
+				if !strings.Contains(text, "Alpine: "+old+" → 3.24.5") || !strings.Contains(text, "https://git.alpinelinux.org/aports/log/?h=v3.24.5") {
+					t.Fatalf("Alpine upgrade must show actual image versions and official release history: %s", text)
+				}
+				calls, err := os.ReadFile(filepath.Join(dir, "docker-calls-"+scenario))
+				if err != nil || !strings.Contains(string(calls), "run --rm --pull=never --network=none --read-only --tmpfs /data --entrypoint /bin/cat sha256:new /etc/alpine-release") {
+					t.Fatalf("version probe must not use network or the bot's data volume: %v\n%s", err, calls)
+				}
+			case "alpine-repack":
+				if !strings.Contains(text, "Alpine: 3.24.4 → 3.24.4") || !strings.Contains(text, "Номер выпуска совпадает") {
+					t.Fatalf("repacked image must not invent a release transition: %s", text)
+				}
+			case "alpine-new-unknown", "alpine-invalid":
+				if !strings.Contains(text, "Alpine: 3.24.4 → неизвестна") || !strings.Contains(text, "https://alpinelinux.org/releases/") || strings.Contains(text, "unexpected=1") {
+					t.Fatalf("unavailable or malformed version must use safe fallback: %s", text)
 				}
 			}
 		})

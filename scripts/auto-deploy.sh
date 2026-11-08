@@ -198,6 +198,7 @@ AFTER_VERSION=$(image_version "$after")
 BEFORE_REVISION=$(image_revision "$before")
 AFTER_REVISION=$(image_revision "$after")
 CHANGES=$(deployment_changes "$before" "$after" "$BEFORE_VERSION" "$AFTER_VERSION" "$BEFORE_REVISION" "$AFTER_REVISION")
+ALPINE_INFO=$(alpine_details "$before" "$after")
 
 echo "=== $(date -Is) deploying image $(short_id "$after") ==="
 SMOKE_FAIL=""
@@ -264,5 +265,5 @@ if [ "$GETME_OK" -eq 1 ]; then
 else
     echo "!!! $(date -Is) getMe failed but container is running; keeping $(short_id "$after")"
 fi
-notify_owners "$(deployment_notice "$BEFORE_VERSION" "$AFTER_VERSION" "$after" "$CHANGES" "$GETME_OK")" || true
+notify_owners "$(deployment_notice "$BEFORE_VERSION" "$AFTER_VERSION" "$after" "$CHANGES" "$GETME_OK" "$ALPINE_INFO")" || true
 exit 0

@@ -21,7 +21,7 @@ func TestBaseDigestsSelectOnlyAMD64(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(dir, "Dockerfile"), "ARG GOLANG_IMAGE=golang:1.27-alpine\nARG ALPINE_IMAGE=alpine:3.24\n")
+	write(filepath.Join(dir, "Dockerfile"), "FROM golang:1.27-alpine AS build\nFROM alpine:3.24\n")
 	write(filepath.Join(bin, "docker"), "#!/bin/sh\ncase \"$*\" in *golang*) cat \"$FIXTURES/go.json\";; *) cat \"$FIXTURES/alpine.json\";; esac\n")
 	script, err := filepath.Abs("base-digests.sh")
 	if err != nil {
@@ -52,7 +52,7 @@ func TestBaseDigestsSelectOnlyAMD64(t *testing.T) {
 	}
 	write(filepath.Join(dir, "alpine.json"), index(digest("f"), digest("e")))
 	changed, err := run()
-	if err != nil || changed == after || !strings.Contains(changed, "alpine="+digest("f")) || !strings.Contains(changed, "alpine_image=alpine:3.24@"+digest("f")) {
+	if err != nil || changed == after || !strings.Contains(changed, "alpine="+digest("f")) || !strings.Contains(changed, "alpine_context=alpine:3.24=docker-image://alpine:3.24@"+digest("f")) {
 		t.Fatalf("amd64 change must select and pin the new manifest: %v\n%s", err, changed)
 	}
 	write(filepath.Join(dir, "alpine.json"), `{"manifests":[{"digest":"sha256:bad","platform":{"os":"linux","architecture":"riscv64"}}]}`)

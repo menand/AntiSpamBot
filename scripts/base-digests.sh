@@ -11,10 +11,10 @@ platform_digest() {
     '
 }
 
-golang=$(awk -F= '/^ARG GOLANG_IMAGE=/{print $2; exit}' Dockerfile)
-alpine=$(awk -F= '/^ARG ALPINE_IMAGE=/{print $2; exit}' Dockerfile)
+golang=$(awk '/^FROM golang/{print $2; exit}' Dockerfile)
+alpine=$(awk '/^FROM alpine/{print $2; exit}' Dockerfile)
 [ -n "$golang" ] && [ -n "$alpine" ]
 golang_digest=$(platform_digest "$golang")
 alpine_digest=$(platform_digest "$alpine")
-printf 'golang=%s\nalpine=%s\ngolang_image=%s@%s\nalpine_image=%s@%s\n' \
-    "$golang_digest" "$alpine_digest" "$golang" "$golang_digest" "$alpine" "$alpine_digest"
+printf 'golang=%s\nalpine=%s\ngolang_context=%s=docker-image://%s@%s\nalpine_context=%s=docker-image://%s@%s\n' \
+    "$golang_digest" "$alpine_digest" "$golang" "$golang" "$golang_digest" "$alpine" "$alpine" "$alpine_digest"

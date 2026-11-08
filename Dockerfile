@@ -1,6 +1,4 @@
-ARG GOLANG_IMAGE=golang:1.27-alpine
-ARG ALPINE_IMAGE=alpine:3.24
-FROM ${GOLANG_IMAGE} AS build
+FROM golang:1.27-alpine AS build
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,7 +11,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
 RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
     -ldflags="-s -w" -o /out/msgtool ./cmd/msgtool
 
-FROM ${ALPINE_IMAGE}
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -H -u 10001 bot && \
     mkdir -p /data && chown bot:bot /data

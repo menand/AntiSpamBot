@@ -25,11 +25,19 @@ jobs:
         # Dockerfile, чтобы dependabot-бамп базы не рассинхронизировал их
         # (хардкод '1.26' пережил бамп Dockerfile на 1.27 и тихо нарушил
         # этот инвариант).
-        run: echo "go=$(awk -F= '/^ARG GOLANG_IMAGE=/{tag=$2; gsub(/-alpine$/, "", tag); sub(/^golang:/, "", tag); print tag; exit}' Dockerfile)" >> "$GITHUB_OUTPUT"
+        run: echo "go=$(awk '/^FROM golang/{tag=$2; gsub(/-alpine$/, "", tag); sub(/^golang:/, "", tag); print tag; exit}' Dockerfile)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@v7
         with:
           go-version: '${{ steps.gotag.outputs.go }}'
           cache: true
+      - name: Check Alpine version probe with Docker
+        run: |
+          ALPINE=$(awk '/^FROM alpine/{print $2; exit}' Dockerfile)
+          printf '%s\n' "FROM $ALPINE" 'USER 10001' 'VOLUME ["/data"]' | docker build -t antispam-alpine-probe -
+          source scripts/deploy-notify.sh
+          version=$(alpine_version antispam-alpine-probe)
+          test "$version" != неизвестна
+          echo "Alpine version probe succeeded: $version"
       - run: go mod download
       - run: test -z "$(gofmt -l .)" || { echo 'gofmt required:'; gofmt -l .; exit 1; }
       - run: go vet -tags stdjson ./...
@@ -79,10 +87,10 @@ jobs:
             ghcr.io/menand/antispambot:latest
             ghcr.io/menand/antispambot:${{ steps.ver.outputs.version }}
           platforms: linux/amd64
-          build-args: |
-            VERSION=${{ steps.ver.outputs.version }}
-            GOLANG_IMAGE=${{ steps.bases.outputs.golang_image }}
-            ALPINE_IMAGE=${{ steps.bases.outputs.alpine_image }}
+          build-args: VERSION=${{ steps.ver.outputs.version }}
+          build-contexts: |
+            ${{ steps.bases.outputs.golang_context }}
+            ${{ steps.bases.outputs.alpine_context }}
           labels: |
             org.opencontainers.image.version=${{ steps.ver.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
