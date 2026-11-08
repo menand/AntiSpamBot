@@ -44,6 +44,8 @@ if ! flock -n 9; then
     exit 0
 fi
 
+source "$REPO_DIR/scripts/deploy-notify.sh"
+
 # Значение ключа из compose-овского .env (KEY=value, `export ` и кавычки снимаем).
 parse_env() {
     local key="$1" v
@@ -60,6 +62,55 @@ is_quarantined() {
 }
 
 short_id() { echo "${1:7:12}"; }
+
+# В classic image store .Image контейнера и image inspect .Id — config ID.
+# В containerd store .Id может быть digest OCI-индекса, а .Image остаётся
+# config ID. Тогда сравниваем manifest контейнера с manifest нужной платформы
+# скачанного образа. Исходный ID сохраняем для карантина и отката.
+running_image_matches() {
+    local expected="$1" current manifest platform target
+    current=$(docker inspect --format '{{.Image}}' menand-antispam 2>/dev/null || true)
+    if [ -n "$current" ] && [ "$current" = "$expected" ]; then
+        return 0
+    fi
+    manifest=$(docker inspect --format '{{with index . "ImageManifestDescriptor"}}{{index . "digest"}}{{end}}' menand-antispam 2>/dev/null || true)
+    [ -n "$manifest" ] || return 1
+    platform=$(docker inspect --format '{{with index . "ImageManifestDescriptor"}}{{with index . "platform"}}{{index . "os"}}/{{index . "architecture"}}{{with index . "variant"}}/{{.}}{{end}}{{end}}{{end}}' menand-antispam 2>/dev/null || true)
+    [ -n "$platform" ] || return 1
+    target=$(docker image inspect --platform "$platform" --format '{{.Id}}' "$expected" 2>/dev/null || true)
+    [ -n "$target" ] && [ "$manifest" = "$target" ]
+}
+
+# Проверяем и новый образ, и результат отката. Успех compose сам по себе
+# ничего не говорит о жизнеспособности запущенного контейнера.
+smoke_image() {
+    local expected="$1" r1 r2
+    SMOKE_FAIL=""
+    sleep 10
+    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != running ]; then
+        SMOKE_FAIL="контейнер не запущен"
+        return 1
+    fi
+    r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || true)
+    if [ "$r1" != 0 ]; then
+        SMOKE_FAIL="контейнер уже перезапускался ($r1)"
+        return 1
+    fi
+    sleep 25
+    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != running ]; then
+        SMOKE_FAIL="контейнер остановился во время проверки"
+        return 1
+    fi
+    r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || true)
+    if [ "$r1" != "$r2" ]; then
+        SMOKE_FAIL="контейнер перезапустился ($r1 → $r2)"
+    elif ! docker exec menand-antispam /usr/local/bin/healthcheck >/dev/null 2>&1; then
+        SMOKE_FAIL="heartbeat не прошёл проверку свежести"
+    elif ! running_image_matches "$expected"; then
+        SMOKE_FAIL="запущен другой образ"
+    fi
+    [ -z "$SMOKE_FAIL" ]
+}
 
 # DM владельцам из OWNER_IDS. Возвращает успех, если хотя бы одна отправка
 # прошла (curl без ошибок) — notify_once держит маркер только при успехе.
@@ -99,12 +150,18 @@ notify_once() {
     fi
 }
 
-# Тихо подтягиваем репо (скрипт/compose); --tags — чтобы git describe на
-# сервере совпадал с релизными тегами. Расхождение репо (локальный хотфикс,
+# Подтягиваем ветку со скриптами/Compose без исторических тегов: несовпадение
+# старого локального тега с origin не должно блокировать обновление ветки.
+# Версию запущенного бота читаем из образа, а не через git describe на VDS.
+# Расхождение репо (локальный хотфикс,
 # правка compose руками) раньше убивало весь скрипт через set -e ДО всякой
 # логики деплоя — и каждый следующий тик умирал там же молча. Теперь: раз в
 # сутки владельцам уходит сигнал, тик завершается с ошибкой в лог.
-git fetch --quiet --tags origin main || true
+if ! git fetch --quiet --no-tags origin main; then
+    echo "!!! $(date -Is) git fetch failed; deploy skipped"
+    notify_once "fetch" "⚠️ Проверка обновления отложена: не удалось получить скрипты и Compose из Git. Контейнер не изменялся. Повторная попытка — автоматически через минуту; предупреждение не чаще раза в сутки. Подробности в журнале автодеплоя." || true
+    exit 1
+fi
 if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
     if ! git merge --ff-only --quiet origin/main; then
         echo "!!! $(date -Is) git merge --ff-only failed (repo diverged); deploy skipped"
@@ -121,12 +178,13 @@ pull_failed=0
 pull_out="$(docker compose pull --quiet bot 2>&1)" || pull_failed=1
 if [ "$pull_failed" -eq 1 ]; then
     echo "!!! $(date -Is) docker compose pull failed: ${pull_out:0:300}"
-    notify_once "pull" "⚠️ Автодеплой: docker compose pull падает — ${pull_out:0:200}. Бот не обновляется." || true
+    notify_once "pull" "⚠️ Обновление отложено: не удалось скачать образ. Контейнер не изменялся. Повторная попытка — автоматически через минуту; предупреждение не чаще раза в сутки. Подробности в журнале автодеплоя." || true
+    exit 1
 fi
 after=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
 
 # Нечего деплоить (или CI ещё не дособрал образ) — молчим, лог не растёт.
-if [ -z "$after" ] || [ "$before" = "$after" ]; then
+if [ -z "$after" ] || [ "$before" = "$after" ] || running_image_matches "$after"; then
     exit 0
 fi
 
@@ -135,55 +193,20 @@ if is_quarantined "$after"; then
     exit 0
 fi
 
+BEFORE_VERSION=$(image_version "$before")
+AFTER_VERSION=$(image_version "$after")
+BEFORE_REVISION=$(image_revision "$before")
+AFTER_REVISION=$(image_revision "$after")
+CHANGES=$(deployment_changes "$before" "$after" "$BEFORE_VERSION" "$AFTER_VERSION" "$BEFORE_REVISION" "$AFTER_REVISION")
+
 echo "=== $(date -Is) deploying image $(short_id "$after") ==="
 SMOKE_FAIL=""
-if ! docker compose up -d --no-build; then
+if ! docker compose up -d --no-build --no-deps bot; then
     # Compose мог уже остановить старый контейнер до ошибки создания нового.
     # Поэтому ошибка команды требует той же попытки отката, что и smoke fail.
-    SMOKE_FAIL="compose up failed"
+    SMOKE_FAIL="команда запуска Compose завершилась ошибкой"
 else
-    # --- Smoke ---
-    sleep 10
-    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
-        SMOKE_FAIL="container not running"
-    else
-        r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-        sleep 25
-        if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != "running" ]; then
-            SMOKE_FAIL="container died within smoke window"
-        else
-            r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || echo 0)
-            if [ "$r1" != "$r2" ]; then
-                SMOKE_FAIL="restart count grew ($r1 -> $r2)"
-            elif ! docker exec menand-antispam /usr/local/bin/healthcheck >/dev/null 2>&1; then
-                SMOKE_FAIL="heartbeat healthcheck failed"
-            fi
-        fi
-    fi
-fi
-
-# getMe — мягкий сигнал (валидность токена/сети); падение само по себе НЕ
-# откатывает живой контейнер (сетевые блипы случаются).
-TOKEN="$(parse_env BOT_TOKEN || true)"
-GETME_OK=0
-if [ -n "$TOKEN" ]; then
-    # Тот же приём, что и в notify_owners: токен не в argv (виден в ps).
-    if printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TOKEN" |
-        curl -s --max-time 5 -K - | grep -q '"ok":true'; then
-        GETME_OK=1
-    fi
-fi
-
-if [ -z "$SMOKE_FAIL" ] && [ "$GETME_OK" -eq 1 ]; then
-    # Удаляем только вытесненный образ бота. На хосте есть другие проекты;
-    # глобальный prune мог бы удалить их образы для отката. Без --force:
-    # Docker сохранит образ, если на него ещё ссылаются контейнеры/теги.
-    if [ -n "$before" ]; then
-        docker image rm "$before" >/dev/null 2>&1 || true
-    fi
-    echo "=== $(date -Is) deploy done ($(short_id "$after")) ==="
-    notify_owners "✅ Бот обновлён: image $(short_id "$after")" || true
-    exit 0
+    smoke_image "$after" || true
 fi
 
 if [ -n "$SMOKE_FAIL" ]; then
@@ -198,18 +221,48 @@ if [ -n "$SMOKE_FAIL" ]; then
         notify_owners "🚨 Первый деплой провалился ($SMOKE_FAIL), предыдущего образа для отката нет. Нужно вмешательство" || true
         exit 1
     fi
-    echo "!!! $(date -Is) SMOKE FAIL ($SMOKE_FAIL); rolling back to $(short_id "$before")"
-    if docker tag "$before" "$IMAGE" && docker compose up -d --no-build; then
-        echo "!!! $(date -Is) rollback done; image $(short_id "$after") quarantined"
-        notify_owners "⚠️ Откат: image $(short_id "$after") провалил smoke ($SMOKE_FAIL), вернулся на $(short_id "$before")" || true
+    DEPLOY_FAIL="$SMOKE_FAIL"
+    echo "!!! $(date -Is) SMOKE FAIL ($DEPLOY_FAIL); rolling back to $(short_id "$before")"
+    ROLLBACK_OK=0
+    if docker tag "$before" "$IMAGE" && docker compose up -d --no-build --no-deps bot; then
+        if smoke_image "$before"; then
+            ROLLBACK_OK=1
+        fi
     else
-        echo "!!! $(date -Is) ROLLBACK FAILED — manual intervention required!"
-        notify_owners "🚨 Откат на $(short_id "$before") НЕ удался! Нужно вмешательство" || true
+        SMOKE_FAIL="команда отката Compose завершилась ошибкой"
+    fi
+    if [ "$ROLLBACK_OK" -eq 1 ]; then
+        echo "!!! $(date -Is) rollback done; image $(short_id "$after") quarantined"
+        notify_owners "⚠️ Обновление $BEFORE_VERSION → $AFTER_VERSION отменено.
+Причина: $DEPLOY_FAIL.
+Восстановлена версия: $BEFORE_VERSION; прежний образ работает, heartbeat свежий, перезапусков нет.
+Отклонённый образ $(short_id "$after") в карантине и повторно не устанавливается." || true
+    else
+        echo "!!! $(date -Is) ROLLBACK FAILED ($SMOKE_FAIL) — manual intervention required!"
+        notify_owners "🚨 Обновление до $AFTER_VERSION не прошло: $DEPLOY_FAIL.
+Откат на $BEFORE_VERSION НЕ подтверждён: $SMOKE_FAIL.
+Нужно вмешательство; работоспособность бота не подтверждена." || true
     fi
     exit 1
 fi
 
-# Контейнер жив, но getMe молчит — предупреждаем, НЕ откатываем.
-echo "!!! $(date -Is) getMe failed but container is running; keeping $(short_id "$after")"
-notify_owners "⚠️ Бот обновлён ($(short_id "$after")), но getMe не отвечает — проверьте" || true
+# getMe — мягкий сигнал: сетевой сбой не откатывает проверенный контейнер.
+TOKEN="$(parse_env BOT_TOKEN || true)"
+GETME_OK=0
+if [ -n "$TOKEN" ]; then
+    if printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TOKEN" |
+        curl -fs --max-time 5 -K - | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+        GETME_OK=1
+    fi
+fi
+if [ "$GETME_OK" -eq 1 ]; then
+    # Без --force и только прежний образ бота; чужие образы не затрагиваем.
+    if [ -n "$before" ]; then
+        docker image rm "$before" >/dev/null 2>&1 || true
+    fi
+    echo "=== $(date -Is) deploy done ($(short_id "$after")) ==="
+else
+    echo "!!! $(date -Is) getMe failed but container is running; keeping $(short_id "$after")"
+fi
+notify_owners "$(deployment_notice "$BEFORE_VERSION" "$AFTER_VERSION" "$after" "$CHANGES" "$GETME_OK")" || true
 exit 0

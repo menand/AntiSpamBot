@@ -83,6 +83,9 @@ jobs:
             ghcr.io/menand/antispambot:${{ steps.ver.outputs.version }}
           build-args: VERSION=${{ steps.ver.outputs.version }}
           labels: |
+            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
             base.digest.golang=${{ steps.bases.outputs.golang }}
             base.digest.alpine=${{ steps.bases.outputs.alpine }}
           cache-from: type=gha
