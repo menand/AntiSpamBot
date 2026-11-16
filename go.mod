@@ -5,7 +5,7 @@ go 1.27.3
 require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.20.4
-	github.com/mymmrac/telego v1.12.1
+	github.com/mymmrac/telego v1.13.0
 	github.com/rivo/uniseg v0.4.7
 	golang.org/x/image v0.48.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
@@ -18,9 +18,9 @@ require (
 	github.com/bytedance/sonic/loader v0.5.3 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
+	github.com/goccy/go-json v0.12.0 // indirect
 	github.com/google/pprof v0.0.0-20261105003125-4bf881d7fb0b // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grbit/go-json v0.11.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/molecule-man/go-brrr v1.3.1 // indirect
