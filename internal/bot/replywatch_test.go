@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -185,6 +186,44 @@ func TestReplyWatchProbeAliveAdvancesAndDeletesCopy(t *testing.T) {
 	}
 	if delBody.ChatID != testProbeChatID || delBody.MessageID != 9001 {
 		t.Fatalf("unexpected delete body: %+v", delBody)
+	}
+}
+
+func TestReplyWatchRetriesCopyDeletionAfterRestart(t *testing.T) {
+	shortAdmissionRetries(t)
+	path := filepath.Join(t.TempDir(), "probe.db")
+	b, fc := replyAnchorBot(t, path)
+	b.cfg.ReplyWatchEnabled = true
+	serviceableChat(t, b, b.db, testChatID)
+	fc.resp["copyMessage"] = `{"message_id":777}`
+	fc.err["deleteMessage"] = &telegoapi.Error{ErrorCode: 502}
+	for _, id := range []int{100, 101} {
+		putReplyWatch(t, b.db, storage.ReplyWatch{
+			ChatID: testChatID, UserID: testUserID, MessageID: id, Text: "ответ",
+			AnsweredAt: time.Now().Add(-2 * time.Minute), NextAt: time.Now().Add(-time.Second),
+		})
+	}
+	b.probeDueReplyWatches(t.Context())
+	if got := fc.callCount("copyMessage"); got != 1 {
+		t.Fatalf("copied %d messages with a pending deletion", got)
+	}
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, recovered := replyAnchorBot(t, path)
+	restarted.cfg.ReplyWatchEnabled = false
+	restarted.cfg.ReplyWatchChatID = -100250
+	recovered.err["deleteMessage"] = &telegoapi.Error{ErrorCode: 400, Description: "Bad Request: message to delete not found"}
+	restarted.probeDueReplyWatches(t.Context())
+	if calls := recovered.callBodies("deleteMessage"); len(calls) != 1 ||
+		!strings.Contains(calls[0], `"message_id":777`) || !strings.Contains(calls[0], `"chat_id":200`) {
+		t.Fatalf("restart did not clean the original destination: %v", calls)
+	}
+	if raw, err := restarted.db.GetMeta(t.Context(), replyProbeCopyKey); err != nil || raw != "" {
+		t.Fatalf("confirmed cleanup was not cleared: %q / %v", raw, err)
+	}
+	if recovered.callCount("copyMessage") != 0 {
+		t.Fatal("disabled reply watch started a new probe")
 	}
 }
 
@@ -509,7 +548,7 @@ func TestReplyWaitMiddlewareStartsWatch(t *testing.T) {
 		From:      &telego.User{ID: testUserID, FirstName: "Иван"},
 		Text:      "планирую бегать",
 	}
-	if b.replyWaitMiddleware(m) {
+	if swallowed, err := b.replyWaitMiddleware(m); err != nil || swallowed {
 		t.Fatal("meaningful answer must not be swallowed")
 	}
 	w, ok, err := db.GetReplyWatch(context.Background(), testChatID, 100)

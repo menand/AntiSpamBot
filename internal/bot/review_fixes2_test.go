@@ -21,9 +21,8 @@ import (
 // TestReplyWaitReminderFailLoserNoSecondPass — напоминание не ушло после
 // ретраев, но пока оно уходило, ожидание разрешил победитель (ответ юзера,
 // прилетевший в окно ретраев): терминальное событие пишет только он. Второй
-// пасс поверх чужого исхода ломал бы воронку. Осиротевшая pre-persist строка
-// стадии N+1 при этом гасится в любом случае — гвард satisfier'а идёт по ЕГО
-// стадии и её не достаёт.
+// пасс поверх чужого исхода ломал бы воронку. Ответ закрывает и строку
+// следующей стадии, записанную перед отправкой напоминания.
 func TestReplyWaitReminderFailLoserNoSecondPass(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
@@ -44,11 +43,7 @@ func TestReplyWaitReminderFailLoserNoSecondPass(t *testing.T) {
 		return false
 	}
 
-	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
-	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 0, 1); !ok {
-		t.Fatal("anchor send failed")
-	}
-	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
+	completeReplyAdmission(t, b, 0)
 
 	// Лестница ретраев 400 (0+1+2+4 c) длиннее стандартных пяти секунд.
 	waitForWithin(t, 20*time.Second, func() bool {

@@ -140,6 +140,7 @@ check_revision() {
 # checkout. The override pins the image and, on an existing install, /data.
 run_bundle() {
     local bundle="$1" override="$1/pinned.yml"
+    shift
     if [ "$first_install" -eq 1 ]; then
         override="$bundle/launch.yml"
         if [ "$resume_first" -eq 1 ] && { [ -f "$bundle/instance" ] || [ -n "$(container_field '{{.Image}}')" ]; }; then
@@ -149,7 +150,7 @@ run_bundle() {
     fi
     docker compose --project-name "$project" --project-directory "$REPO_DIR" \
         --env-file "$ENV_FILE" -f "$bundle/docker-compose.yml" -f "$override" \
-        up -d --no-build --no-deps --pull never bot || return 1
+        up -d --no-build --no-deps --pull never "$@" bot || return 1
     if [ "$first_install" -eq 1 ]; then
         remember_first_instance "$bundle" || return 1
     fi
@@ -266,8 +267,29 @@ rotate_release_bundles() {
 
 first_install=0
 resume_first=0
+resume_rollback=0
 first_instance=""
 rejected_first=0
+if [ -f "$RELEASE_STATE/rollback" ]; then
+    selected=$(cat "$RELEASE_STATE/rollback")
+    confirmed=$(cat "$RELEASE_STATE/current")
+    [[ $selected =~ ^bundle[.][A-Za-z0-9]+$ && $confirmed =~ ^bundle[.][A-Za-z0-9]+$ ]] || exit 1
+    candidate="$RELEASE_STATE/$selected"
+    previous="$RELEASE_STATE/$confirmed"
+    candidate_ref=$(cat "$candidate/image")
+    before_ref=$(cat "$previous/image")
+    project=$(cat "$previous/project")
+    volume=$(cat "$previous/volume")
+    [[ $candidate_ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ &&
+       $before_ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ &&
+       $project =~ ^[a-z0-9][a-z0-9_-]*$ && $volume =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
+    before=$(docker image inspect --format '{{.Id}}' "$before_ref")
+    after=$(docker image inspect --format '{{.Id}}' "$candidate_ref" 2>/dev/null || true)
+    resume_rollback=1
+    # shellcheck source=/dev/null
+    source "$candidate/deploy-release.sh"
+    exit
+fi
 if [ -f "$RELEASE_STATE/pending" ] && [ ! -f "$RELEASE_STATE/current" ]; then
     selected=$(cat "$RELEASE_STATE/pending")
     [[ $selected =~ ^bundle[.][A-Za-z0-9]+$ ]] || exit 1

@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS handled_telegram_updates (
+    bot_id    INTEGER NOT NULL,
+    update_id INTEGER NOT NULL,
+    PRIMARY KEY (bot_id, update_id)
+);
+
 CREATE TABLE IF NOT EXISTS pending_captchas (
     chat_id     INTEGER NOT NULL,
     user_id     INTEGER NOT NULL,

@@ -229,6 +229,22 @@ func completeTestCaptcha(ctx context.Context, b *Bot, p *captcha.Pending) error 
 	return b.onSuccess(ctx, taken, "")
 }
 
+func completeReplyAdmission(t *testing.T, b *Bot, threadID int) {
+	t.Helper()
+	const messageID = 77
+	deadline := time.Now().Add(time.Minute)
+	if err := b.db.PutPending(b.runCtx, storage.PendingRow{
+		ChatID: testChatID, UserID: testUserID, MessageID: messageID,
+		ExpiresAt: deadline, ThreadID: threadID, Stage: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	p := b.store.Put(testChatID, testUserID, messageID, 0, deadline, threadID, 0, 1)
+	if err := completeTestCaptcha(b.runCtx, b, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // serviceableChat регистрирует чат в реестре (rememberChat пишет строку с
 // DEFAULT 'approved') и кэширует статус — гейт chatServiceable открыт.
 func serviceableChat(t *testing.T, b *Bot, db *storage.DB, chatID int64) {

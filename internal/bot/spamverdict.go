@@ -99,7 +99,11 @@ func (b *Bot) prepareSpamVerdict(ctx context.Context, id, chatID, userID int64) 
 		return v, false
 	}
 	if v.IsSpam {
-		current, err := b.db.SpamBanStillCurrent(ctx, chatID, chatID, userID, id)
+		pardonChatID := chatID
+		if v.Outcome == storage.SpamBanApplied {
+			pardonChatID = 0 // Local permission changes do not cancel the cross-chat verdict.
+		}
+		current, err := b.db.SpamBanStillCurrent(ctx, pardonChatID, userID, id)
 		if err != nil {
 			b.log.Warn("check pardon before spam verdict", "err", err, "id", id)
 			return v, false

@@ -462,11 +462,7 @@ func TestReplyWaitLoopHonorsJunkExtension(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
-	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 0, 1); !ok {
-		t.Fatal("anchor send failed")
-	}
-	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
+	completeReplyAdmission(t, b, 0)
 	p, ok := b.replies.Get(testChatID, testUserID)
 	if !ok {
 		t.Fatal("wait must be armed")
@@ -596,7 +592,7 @@ func TestReplyWaitMiddleware(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		armWait(t, b, db)
-		if swallowed := b.replyWaitMiddleware(msg("ещё не бегала")); swallowed {
+		if swallowed, err := b.replyWaitMiddleware(msg("ещё не бегала")); err != nil || swallowed {
 			t.Fatal("meaningful answer must not be swallowed")
 		}
 		if _, ok := b.replies.Get(testChatID, testUserID); ok {
@@ -614,7 +610,7 @@ func TestReplyWaitMiddleware(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		armWait(t, b, db)
-		if swallowed := b.replyWaitMiddleware(msg("+")); !swallowed {
+		if swallowed, err := b.replyWaitMiddleware(msg("+")); err != nil || !swallowed {
 			t.Fatal("junk must be swallowed")
 		}
 		// Удаление идёт в goSafe — дожидаемся асинхронного хвоста.
@@ -631,7 +627,7 @@ func TestReplyWaitMiddleware(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		armWait(t, b, db)
-		if swallowed := b.replyWaitMiddleware(msg("/ban")); swallowed {
+		if swallowed, err := b.replyWaitMiddleware(msg("/ban")); err != nil || swallowed {
 			t.Fatal("command must not be swallowed")
 		}
 		if _, ok := b.replies.Get(testChatID, testUserID); !ok {
@@ -647,7 +643,7 @@ func TestReplyWaitMiddleware(t *testing.T) {
 	t.Run("без ожидания — no-op", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
-		if swallowed := b.replyWaitMiddleware(msg("+")); swallowed {
+		if swallowed, err := b.replyWaitMiddleware(msg("+")); err != nil || swallowed {
 			t.Fatal("no wait — nothing to do")
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -661,7 +657,7 @@ func TestReplyWaitMiddleware(t *testing.T) {
 		// Строки реестра нет → chatServiceable=false (fail-closed апрув):
 		// ожидание взведено, но удалять сообщение в брошенном чате нельзя.
 		b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 0)
-		if swallowed := b.replyWaitMiddleware(msg("+")); swallowed {
+		if swallowed, err := b.replyWaitMiddleware(msg("+")); err != nil || swallowed {
 			t.Fatal("unserviceable chat must not swallow")
 		}
 		time.Sleep(50 * time.Millisecond)

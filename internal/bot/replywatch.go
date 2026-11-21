@@ -59,13 +59,6 @@ const (
 	// replyWatchBatchLimit — сколько наблюдений проверяем за один тик.
 	replyWatchBatchLimit = 20
 
-	// replyWatchDeleteFailureLimit — сколько подряд неудачных удалений копии
-	// терпим. Право на удаление могли не выдать/отобрать: тогда каждая проба
-	// оставляла бы текст юзера в служебном чате навсегда. После лимита
-	// наблюдение останавливается целиком (до перезапуска) — приватность
-	// важнее, чем ещё несколько карточек.
-	replyWatchDeleteFailureLimit = 3
-
 	replyWatchDeletedByDel        = "bot:del"
 	replyWatchDeletedByKick       = "bot:kick"
 	replyWatchDeletedByBan        = "bot:ban"
@@ -157,15 +150,6 @@ func replyWatchCanDeleteCopies(member telego.ChatMember) bool {
 	return false
 }
 
-// notifyReplyWatchDisabled — разовое ЛС владельцам о выключенной фиче.
-func (b *Bot) notifyReplyWatchDisabled(reason string) {
-	ctx, cancel := b.liveCtx()
-	defer cancel()
-	b.sendNotificationHTMLCtx(ctx, b.sortedOwnerIDs(),
-		"\u26a0\ufe0f <b>Наблюдение за ответами выключено</b>\n\n"+html.EscapeString(reason),
-		"reply watch disabled")
-}
-
 // startReplyWatch ставит сообщение на наблюдение. Вызывается ровно в
 // победивший момент «ответ на приветствие засчитан» (middleware обычного
 // сообщения и ветка правки), поэтому снимок текста — это именно та версия,
@@ -173,11 +157,6 @@ func (b *Bot) notifyReplyWatchDisabled(reason string) {
 // должен опередить строку.
 func (b *Bot) startReplyWatch(m *telego.Message) {
 	if !b.cfg.ReplyWatchEnabled || m == nil || m.From == nil || m.MessageID == 0 {
-		return
-	}
-	if b.replyWatchBlocked.Load() {
-		// Служебный чат не даёт удалять копии (или право отобрали): копировать
-		// пользовательский текст без гарантии удаления нельзя.
 		return
 	}
 	if b.replyWatchOwnerID() == 0 {
@@ -283,7 +262,7 @@ func (b *Bot) replyWatchLoop(ctx context.Context) {
 	defer ticker.Stop()
 	lastPrune := time.Now()
 	for {
-		if time.Since(lastPrune) >= replyWatchPruneInterval {
+		if b.cfg.ReplyWatchEnabled && time.Since(lastPrune) >= replyWatchPruneInterval {
 			lastPrune = time.Now()
 			if n, err := b.db.DeleteStaleReplyWatches(ctx,
 				time.Now().Add(-replyWatchStaleAfter)); err != nil {
@@ -302,8 +281,7 @@ func (b *Bot) replyWatchLoop(ctx context.Context) {
 }
 
 func (b *Bot) probeDueReplyWatches(ctx context.Context) {
-	if b.replyWatchBlocked.Load() {
-		// Копии не удаляются (нет права) — пробы остановлены до перезапуска.
+	if !b.cleanupReplyProbeCopy(ctx) || !b.cfg.ReplyWatchEnabled {
 		return
 	}
 	rows, err := b.db.DueReplyWatches(ctx, time.Now(), replyWatchBatchLimit)
@@ -312,7 +290,7 @@ func (b *Bot) probeDueReplyWatches(ctx context.Context) {
 		return
 	}
 	for i := range rows {
-		if ctx.Err() != nil || b.replyWatchBlocked.Load() {
+		if ctx.Err() != nil || b.replyProbeCopy.MessageID != 0 {
 			return
 		}
 		b.probeOneReplyWatch(ctx, rows[i])
@@ -556,6 +534,7 @@ func (b *Bot) copyProbe(ctx context.Context, w storage.ReplyWatch, target int64)
 		FromChatID:          tu.ID(w.ChatID),
 		MessageID:           w.MessageID,
 		DisableNotification: true,
+		ProtectContent:      true,
 	})
 	if err != nil {
 		if ra, ok := retryAfterDelay(err); ok {
@@ -567,25 +546,12 @@ func (b *Bot) copyProbe(ctx context.Context, w storage.ReplyWatch, target int64)
 		}
 		return res, 0, err
 	}
-	if copied != nil && copied.MessageID != 0 {
-		if derr := retryWith(ctx, kickUnbanBackoffs, func() error {
-			return b.deleteMessage(ctx, target, copied.MessageID)
-		}); derr != nil {
-			fails := b.replyWatchDeleteFailures.Add(1)
-			b.log.Warn("reply watch: delete probe copy", "err", derr,
-				"target", target, "msg", copied.MessageID, "fails", fails)
-			if fails >= replyWatchDeleteFailureLimit && !b.replyWatchBlocked.Swap(true) {
-				b.log.Error("reply watch: probe copies are not being deleted — probes disabled until restart",
-					"target", target, "fails", fails)
-				b.notifyReplyWatchDisabled(
-					"Бот не может удалять копии сообщений в служебном чате — " +
-						"пользовательский текст оставался бы там навсегда. " +
-						"Проверки ответов выключены до перезапуска: проверь право " +
-						"«Удалять сообщения» или смени REPLY_WATCH_CHAT_ID.")
-			}
-		} else {
-			b.replyWatchDeleteFailures.Store(0)
-		}
+	if copied != nil && copied.MessageID > 0 {
+		b.replyProbeCopy = replyProbeCopy{ChatID: target, MessageID: copied.MessageID}
+		// The copy already exists. Let its cleanup finish after SIGTERM.
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), replyWatchProbeTimeout)
+		defer cancel()
+		b.cleanupReplyProbeCopy(cleanup)
 	}
 	return replyProbeAlive, 0, nil
 }

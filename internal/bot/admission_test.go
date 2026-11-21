@@ -204,7 +204,9 @@ func TestCaptchaAdmissionSurvivesRestart(t *testing.T) {
 }
 
 func TestManualAdmissionRetriesAfterPartialSuccess(t *testing.T) {
-	for _, action := range []string{storage.AdmissionUnban, storage.AdmissionWhitelist} {
+	for action, storedAction := range map[string]string{
+		"u": storage.AdmissionLocalUnban, "w": storage.AdmissionWhitelist,
+	} {
 		t.Run(action, func(t *testing.T) {
 			shortAdmissionRetries(t)
 			path := filepath.Join(t.TempDir(), "admission.db")
@@ -221,7 +223,7 @@ func TestManualAdmissionRetriesAfterPartialSuccess(t *testing.T) {
 			}
 			ctx := b.runCtx
 			row, ok, err := b.db.GetPendingAdmission(ctx, testChatID, testUserID)
-			if err != nil || !ok || row.Action != action || !row.UnbanDone || !row.ReleaseNeeded {
+			if err != nil || !ok || row.Action != storedAction || !row.UnbanDone || !row.ReleaseNeeded {
 				t.Fatalf("manual admission did not record partial success: %+v, %t, %v", row, ok, err)
 			}
 			if got := fc.callBodies("answerCallbackQuery"); len(got) != 1 || !strings.Contains(got[0], "Разбан подтверждён") || !strings.Contains(got[0], "бот повторит запрос") {

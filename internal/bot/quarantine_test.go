@@ -610,8 +610,8 @@ func TestEscalationDisarmsReplyWait(t *testing.T) {
 }
 
 // TestPromotionForgivesSpamBan — промоушен разбаненного вручную спамера
-// (kicked → administrator, рука человека) успевает И простить глобальный
-// флаг (хук прощения стоит ДО ветки промоушена), И снять карантин: ранний
+// (kicked → administrator, рука человека) успевает И снять спам-бан
+// в этом чате (хук прощения стоит ДО ветки промоушена), И снять карантин: ранний
 // return в промоушене не должен «перекрыть» forgiveness-хук.
 func TestPromotionForgivesSpamBan(t *testing.T) {
 	ctx := context.Background()
@@ -628,9 +628,9 @@ func TestPromotionForgivesSpamBan(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	banned, err := db.IsSpamBanned(ctx, testUserID)
+	banned, err := db.IsSpamBannedInChat(ctx, testChatID, testUserID)
 	if err != nil || banned {
-		t.Fatalf("promotion of unbanned spammer must forgive the global flag: banned=%v err=%v", banned, err)
+		t.Fatalf("promotion of unbanned spammer must forgive the local spam ban: banned=%v err=%v", banned, err)
 	}
 	has, err := db.HasQuarantine(ctx, testChatID, testUserID, time.Now().Unix())
 	if err != nil || has {

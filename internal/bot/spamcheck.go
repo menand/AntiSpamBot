@@ -1280,7 +1280,7 @@ func (b *Bot) reconcileCrossBan(ctx context.Context, v storage.SpamVerdict, chat
 			return b.db.FinishCrossBan(ctx, v, chatID, storage.CrossBanSkipped)
 		}
 	}
-	current, err := b.db.SpamBanStillCurrent(ctx, v.ChatID, chatID, userID, v.ID)
+	current, err := b.db.SpamBanStillCurrent(ctx, chatID, userID, v.ID)
 	if err != nil {
 		return err
 	}

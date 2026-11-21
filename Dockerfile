@@ -21,7 +21,7 @@ COPY --chmod=755 scripts/healthcheck.sh /usr/local/bin/healthcheck
 ENV ANTISPAM_READY_FILE=/run/antispam/heartbeat
 USER bot
 VOLUME ["/data"]
-# Проверяется свежий heartbeat текущего PID 1 после инициализации обработчика.
+# Проверяется свежий heartbeat текущего PID 1 после успешного getUpdates.
 HEALTHCHECK --interval=2m --timeout=10s --start-period=2m --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 ENTRYPOINT ["/usr/local/bin/bot"]

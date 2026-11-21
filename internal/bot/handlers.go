@@ -64,22 +64,26 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	}
 
 	// Ручной разбан админом (kicked → любой другой статус чужой рукой, но не
-	// нашей собственной — kick() бота делает ban+unban) снимает и глобальный
-	// флаг спамера, иначе ошибочный вердикт был бы неисправим: join-хук
-	// банил бы заново при каждом входе. ДО joined-ветки: kicked→member — это
-	// тоже join, и без прощения он тут же упёрся бы в IsSpamBanned.
+	// нашей собственной — кик бота делает ban+unban) прощает спам в этом
+	// чате. ДО joined-ветки: kicked→member — это тоже join, и без прощения
+	// бот тут же забанил бы участника повторно.
 	// Прочие БОТЫ прощения не дарят: их автоматические циклы ban→unban
-	// молча стирали бы глобальный флаг. Исключение — GroupAnonymousBot:
+	// молча снимали бы спам-бан. Исключение — GroupAnonymousBot:
 	// его From означает руку человека-анонимного админа.
 	if oldStatus == "kicked" && newStatus != "kicked" &&
 		upd.From.ID != user.ID && (b.me == nil || upd.From.ID != b.me.ID) &&
 		(!upd.From.IsBot || upd.From.ID == groupAnonymousBotID) {
-		if removed, err := b.db.DeleteSpamBanned(b.runCtx, user.ID); err != nil {
-			b.log.Warn("delete spam banned", "err", err, "user", user.ID)
-		} else if removed {
-			b.log.Info("spam ban forgiven — admin unbanned manually",
-				"chat", upd.Chat.ID, "user", user.ID, "by", upd.From.ID)
+		unlock, err := b.rights.lock(b.runCtx, upd.Chat.ID, user.ID, false)
+		if err != nil {
+			return err
 		}
+		err = b.db.PardonSpamInChat(b.runCtx, upd.Chat.ID, user.ID)
+		unlock()
+		if err != nil {
+			return err
+		}
+		b.log.Info("spam ban forgiven in chat — admin unbanned manually",
+			"chat", upd.Chat.ID, "user", user.ID, "by", upd.From.ID)
 	}
 
 	// Промоушен снимает карантин: серверный текст-рестрикт для админов
@@ -530,7 +534,7 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 		if !b.store.BeginKickoff(chatID, user.ID) {
 			return
 		}
-		b.goSafe("admitTrusted", func() {
+		func() {
 			// Замок снимается сразу после записи joined_at (дедуп-маркер выше
 			// уже перехватывает дубли) и ДО отправки приветствия — окно, где
 			// IsCaptchaActive удаляет сообщения юзера, сжимается до пары
@@ -572,19 +576,18 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			b.log.Info("trusted user admitted without captcha", "chat", chatID, "user", user.ID)
 			st := b.chatSettings(b.runCtx, chatID)
 			b.maybeSendGreeting(b.runCtx, st, effectiveWelcomeMode(st), chatID, user.ID, threadID)
-		})
+		}()
 		return
 	}
 	// Известный спамер (вердикт «спам» в любом чате бота): мгновенный бан
 	// вместо капчи. BeginKickoff гасит дубль-доставку chat_member +
-	// new_chat_members; в горутине — banRevoke с ретраями не должен
-	// блокировать обработку апдейтов.
+	// new_chat_members. Обработчик завершается после бана или постановки капчи.
 	if banned, err := b.db.IsSpamBannedInChat(b.runCtx, chatID, user.ID); err == nil && banned {
 		if !b.store.BeginKickoff(chatID, user.ID) {
 			return
 		}
 		kickoff := b.store.KickoffContext(chatID, user.ID)
-		b.goSafe("banKnownSpammer", func() {
+		startCaptcha := func() bool {
 			// Замок снимается двумя штатными путями ниже (fail — сразу,
 			// success — через минуту в AfterFunc). Паника между ними раньше
 			// роняла процесс и рестарт чистил in-memory карту; с recover в
@@ -599,26 +602,20 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			}()
 			unlock, err := b.rights.lock(b.runCtx, chatID, user.ID, false)
 			if err != nil {
-				return
+				return false
 			}
 			defer unlock()
 			if kickoff.Err() != nil {
-				return
+				return false
 			}
 			if banned, err := b.db.IsSpamBannedInChat(b.runCtx, chatID, user.ID); err != nil || !banned {
-				b.store.FinishKickoff(chatID, user.ID, kickoff)
-				handedOff = true
-				b.startCaptcha(chatID, user, threadID)
-				return
+				return true
 			}
 			if err := b.banRevoke(b.runCtx, chatID, user.ID); err != nil {
 				// Бан не прошёл (обычно нет прав) — не оставляем спамера
 				// без присмотра: обычная капча, как до этой фичи.
 				b.log.Warn("ban known spammer on join", "err", err, "chat", chatID, "user", user.ID)
-				b.store.FinishKickoff(chatID, user.ID, kickoff)
-				handedOff = true // снят вручную ДО startCaptcha — он берёт замок заново
-				b.startCaptcha(chatID, user, threadID)
-				return
+				return true
 			}
 			b.log.Info("banned known spammer on join", "chat", chatID, "user", user.ID)
 			// У спамера мог остаться наблюдаемый ответ с прошлой жизни в
@@ -641,7 +638,11 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 					b.store.FinishKickoff(chatID, user.ID, kickoff)
 				})
 			})
-		})
+			return false
+		}()
+		if startCaptcha {
+			b.startCaptcha(chatID, user, threadID)
+		}
 		return
 	}
 	// Дедуп ПОЗДНЕЙ дубль-доставки: Telegram переигрывает неподтверждённые
@@ -861,9 +862,21 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 	if msg := query.Message.Message(); msg != nil {
 		greetingMsgID = msg.MessageID
 	}
+	saveCtx, cancel := b.liveCtx()
+	defer cancel()
+	var saveErr error
 	p, ok := b.replies.TakeMatch(chatID, targetUserID, func(rp *replyPending) bool {
-		return rp.matchesGreeting(greetingMsgID)
+		if !rp.matchesGreeting(greetingMsgID) {
+			return false
+		}
+		saveErr = b.db.FinishReplyAnswer(saveCtx, chatID, targetUserID, rp.Stage, greetingMsgID)
+		return saveErr == nil
 	})
+	if saveErr != nil {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Не удалось сохранить допуск. Бот повторит попытку.").WithShowAlert())
+		return saveErr
+	}
 	if !ok {
 		text := "Ожидание уже не активно."
 		if _, still := b.replies.Get(chatID, targetUserID); still {
@@ -874,10 +887,6 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 		return nil
 	}
 	p.Cancel()
-	if err := b.db.DeletePendingReplyForGreeting(b.runCtx, chatID, targetUserID, greetingMsgID); err != nil {
-		b.log.Warn("delete pending reply on admin approve", "err", err,
-			"chat", chatID, "user", targetUserID)
-	}
 	b.deleteReplyAnchor(b.runCtx, chatID, targetUserID, greetingMsgID)
 	_ = b.api.AnswerCallbackQuery(ctx,
 		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
@@ -887,9 +896,6 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 	b.log.Info("reply-wait approved by admin",
 		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
 
-	if err := b.db.RecordEvent(b.runCtx, chatID, targetUserID, storage.EventPass, time.Now(), ""); err != nil {
-		b.log.Warn("record pass event (reply admin approve)", "err", err)
-	}
 	return nil
 }
 
@@ -1510,6 +1516,16 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 			return nil
 		}
 	}
+	// Правка может быть первым осмысленным ответом на приветствие.
+	// Сначала фиксируем его, чтобы при повторе апдейта не продублировать правку.
+	var passed *replyPending
+	if replyCountsAsAnswer(&message) {
+		var err error
+		passed, err = b.replyWaitSatisfied(message.Chat.ID, message.From.ID)
+		if err != nil {
+			return err
+		}
+	}
 	// Расширенный сбор статистики: правка сохраняется отдельной записью
 	// (kind='edit') — оригинальное сообщение уже записано при отправке, обе
 	// версии связаны общим tg_msg_id. Стоит ДО бюджет-предохранителя LLM:
@@ -1520,17 +1536,9 @@ func (b *Bot) handleEditedGroupMessage(ctx *th.Context, message telego.Message) 
 	// уходит сразу, независимо от reply-wait-фильтра: правка уже прошедшего
 	// ответа не должна теряться из-за осмысленности новой версии.
 	b.maybeHandleReplyWatchEdit(&message)
-	// Правка может быть и «дописал ответ на приветствие»: раньше правки
-	// вообще не снимали ожидание — человек, дописавший ответ в правке,
-	// получал кик за молчание при формально написанном ответе. Тот же фильтр
-	// осмысленности, что у обычных сообщений; мусорная правка просто не
-	// считается (без удаления/подсказок — правка не новое спам-сообщение,
-	// а версия уже разобранного).
-	if replyCountsAsAnswer(&message) {
-		if p := b.replyWaitSatisfied(message.Chat.ID, message.From.ID); p != nil {
-			b.startReplyWatch(&message)
-			b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(&message, p) })
-		}
+	if passed != nil {
+		b.startReplyWatch(&message)
+		b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(&message, passed) })
 	}
 	// Бюджет-предохранитель: правки не растят счётчик сообщений, поэтому
 	// новичок (total ≤ whitelist) мог бы бесконечными правками одного
@@ -1634,10 +1642,9 @@ func (b *Bot) startCaptcha(chatID int64, user telego.User, threadID int) bool {
 			"chat", chatID, "user", user.ID)
 		return false
 	}
-	// Капча-флоу асинхронный: рестрикт сразу, потом сон CaptchaDelay перед
-	// отправкой сообщения. Всё это окно handleGroupMessage удаляет любые
-	// сообщения юзера (store.IsCaptchaActive true, пока держится inflight).
-	b.goSafe("runCaptcha", func() { b.runCaptcha(chatID, user, threadID) })
+	// Подтверждаем апдейт о входе после постановки первой стадии. Таймер
+	// следующих стадий работает отдельно.
+	b.runCaptcha(chatID, user, threadID)
 	return true
 }
 

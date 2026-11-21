@@ -54,11 +54,11 @@ type Bot struct {
 	quar *quarantineStore
 
 	// Reply-watch проверяет служебный чат перед каждой пробой.
-	// Неудачное удаление копий отключает пробы до перезапуска.
+	// Цикл наблюдения очищает предыдущую копию перед новой пробой.
 	replyWatchBrokenNotified atomic.Bool
-	replyWatchBlocked        atomic.Bool
-	replyWatchDeleteFailures atomic.Int32
 	replyWatchChats          sync.Map
+	replyProbeCopy           replyProbeCopy
+	replyProbeCleanupWarned  bool
 
 	// Write-through-кэши над chats/user_info: пропускаем запись в БД, когда
 	// значение не изменилось. Экономят 2 из 4 SQLite-записей на групповое
@@ -188,10 +188,14 @@ func (b *Bot) Run(parent context.Context) error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	b.db = db
-	var bh *th.BotHandler
 	announced := false
+	var replyWatchDone chan struct{}
 	defer func() {
-		b.stopUpdateHandling(stopRun, bh)
+		stopRun()
+		b.stopCaptureWriter()
+		if replyWatchDone != nil {
+			<-replyWatchDone
+		}
 		if announced {
 			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
@@ -266,20 +270,23 @@ func (b *Bot) Run(parent context.Context) error {
 	// Архиватор работает даже при выключенном захвате, чтобы обработать
 	// накопленные ранее горячие строки.
 	b.goSafe("archiveLoop", func() { b.archiveLoop(ctx) })
-	if b.cfg.ReplyWatchEnabled {
-		// Диагностика/свип — в той же горутине, что и цикл: сетевые проверки
-		// (getChat/getChatMember) не должны задерживать приём апдейтов.
-		b.goSafe("replyWatchLoop", func() {
-			b.setupReplyWatch(ctx)
-			b.replyWatchLoop(ctx)
-		})
-	} else if err := b.db.DeleteAllReplyWatches(ctx); err != nil {
+	if !b.cfg.ReplyWatchEnabled {
 		// Наблюдения — короткоживущее состояние (час). Выключенная фича не
 		// должна оставить «бомбу»: при повторном включении старые строки
 		// разом созрели бы и завалили владельца отчётами о давно прожитых
 		// сообщениях.
-		b.log.Warn("reply watch: clear disabled watches", "err", err)
+		if err := b.db.DeleteAllReplyWatches(ctx); err != nil {
+			b.log.Warn("reply watch: clear disabled watches", "err", err)
+		}
 	}
+	replyWatchDone = make(chan struct{})
+	b.goSafe("replyWatchLoop", func() {
+		defer close(replyWatchDone)
+		if b.cfg.ReplyWatchEnabled {
+			b.setupReplyWatch(ctx)
+		}
+		b.replyWatchLoop(ctx)
+	})
 	var providers []string
 	for _, p := range b.aiProviders() {
 		if p.c.Enabled() {
@@ -293,23 +300,7 @@ func (b *Bot) Run(parent context.Context) error {
 		b.log.Info("AI spam analysis available", "providers", strings.Join(providers, ", "))
 	}
 
-	b.notifyOwners(ctx, fmt.Sprintf(
-		"🟢 <b>Бот запущен</b>\nЮзернейм: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
-		b.Username(), b.version, restored))
-
-	announced = true
-
-	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
-		AllowedUpdates: []string{"message", "edited_message", "callback_query", "chat_member", "my_chat_member"},
-	})
-	if err != nil {
-		return fmt.Errorf("long polling: %w", err)
-	}
-
-	bh, err = th.NewBotHandler(b.api, updates)
-	if err != nil {
-		return fmt.Errorf("bot handler: %w", err)
-	}
+	bh := &th.HandlerGroup{}
 
 	if err := b.setCommands(ctx); err != nil {
 		b.log.Warn("set commands", "err", err)
@@ -377,8 +368,8 @@ func (b *Bot) Run(parent context.Context) error {
 		if m := update.Message; m != nil && m.From != nil && !m.From.IsBot {
 			if (m.Chat.Type == "group" || m.Chat.Type == "supergroup") &&
 				messageHasUserContent(m) {
-				if b.replyWaitMiddleware(m) {
-					return nil
+				if swallowed, err := b.replyWaitMiddleware(m); swallowed || err != nil {
+					return err
 				}
 			}
 			// ЛС-команда перехватывается своим хендлером мимо handlePrivateText
@@ -431,18 +422,18 @@ func (b *Bot) Run(parent context.Context) error {
 	bh.HandleMessage(b.handleGroupMessage)                         // фолбэк: сервис-сообщения + счётчики в группах
 	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
 
-	healthCtx, cancelHealth := context.WithCancel(ctx)
-	defer cancelHealth()
-	b.goSafe("healthbeat", func() { b.healthbeat(healthCtx, bh.IsRunning) })
-	return bh.Start()
-}
-
-func (b *Bot) stopUpdateHandling(stop context.CancelFunc, handler *th.BotHandler) {
-	stop()
-	if handler != nil {
-		_ = handler.Stop()
-	}
-	b.stopCaptureWriter()
+	heartbeat := b.pollHeartbeat()
+	return b.pollUpdates(ctx, bh, func() {
+		heartbeat()
+		if !announced {
+			announced = true
+			b.goSafe("notifyStartup", func() {
+				b.notifyOwners(ctx, fmt.Sprintf(
+					"🟢 <b>Бот запущен</b>\nЮзернейм: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
+					b.Username(), b.version, restored))
+			})
+		}
+	})
 }
 
 // privateMessagePredicate матчит некомандные сообщения в личке, которые

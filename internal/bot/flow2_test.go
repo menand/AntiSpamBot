@@ -340,33 +340,12 @@ func TestGreetingFailureDisarmsReplyWait(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
-	// Свежая проверка режима внутри maybeArmReplyWait читает БД — чат обязан
-	// быть в «с ответом», иначе арм честно откажет и тест проверял бы не то.
+	shortAdmissionRetries(t)
 	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
 		t.Fatal(err)
 	}
 	fc.err["sendMessage"] = &telegoapi.Error{ErrorCode: 429, Description: "Too Many Requests"}
-
-	s := storage.ChatSettings{
-		GreetingEnabled:   true,
-		ReplyCheckEnabled: true,
-	}
-	p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 0)
-	if err := db.PutPendingReply(ctx, storage.PendingReply{
-		ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
-	_, greetingSent := b.maybeSendGreeting(ctx, s, welcomeReply, testChatID, testUserID, 0)
-	if !greetingSent && s.ReplyCheckEnabled {
-		if b.cancelReplyWait(testChatID, testUserID) {
-			if err := b.db.RecordEvent(ctx, testChatID, testUserID, storage.EventPass, time.Now(), ""); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
+	completeReplyAdmission(t, b, 0)
 
 	if _, ok := b.replies.Take(testChatID, testUserID); ok {
 		t.Fatal("reply wait must be disarmed after greeting failure")

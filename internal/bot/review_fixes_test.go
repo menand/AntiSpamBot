@@ -205,10 +205,10 @@ func TestAmbiguousLLMVerdictNeedsValidFallback(t *testing.T) {
 	}
 }
 
-// TestManualUnbanForgivesSpamBase — ручной разбан чужой рукой стирает
-// глобальный флаг спамера; свои события и чужие боты — нет (кроме
+// TestManualUnbanForgivesSpamInChat — ручной разбан чужой рукой снимает
+// спам-бан только в этом чате; свои события и чужие боты — нет (кроме
 // GroupAnonymousBot — рука человека-анонимного админа).
-func TestManualUnbanForgivesSpamBase(t *testing.T) {
+func TestManualUnbanForgivesSpamInChat(t *testing.T) {
 	tests := []struct {
 		name    string
 		from    telego.User
@@ -235,12 +235,15 @@ func TestManualUnbanForgivesSpamBase(t *testing.T) {
 			if err := b.handleChatMember(nil, upd); err != nil {
 				t.Fatal(err)
 			}
-			banned, err := db.IsSpamBanned(ctx, testUserID)
+			banned, err := db.IsSpamBannedInChat(ctx, testChatID, testUserID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if banned == tc.forgive {
-				t.Fatalf("IsSpamBanned=%v, want forgive=%v", banned, tc.forgive)
+				t.Fatalf("IsSpamBannedInChat=%v, want forgive=%v", banned, tc.forgive)
+			}
+			if other, err := db.IsSpamBannedInChat(ctx, testChatID-1, testUserID); err != nil || !other {
+				t.Fatalf("other chat lost spam protection: %v / %v", other, err)
 			}
 		})
 	}

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mymmrac/telego"
+	"github.com/mymmrac/telego/telegoapi"
 	th "github.com/mymmrac/telego/telegohandler"
 
 	"github.com/menand/AntiSpamBot/internal/config"
@@ -253,7 +255,7 @@ func TestCaptureWriterDBErrorDropsBatchAndExits(t *testing.T) {
 }
 
 func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
-	b, _, _ := newFlowBot(t)
+	b, _, fc := newFlowBot(t)
 	path := filepath.Join(t.TempDir(), "capture.db")
 	db, err := storage.Open(t.Context(), path)
 	if err != nil {
@@ -265,11 +267,7 @@ func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
 	b.startCaptureWriter()
 	defer b.stopCaptureWriter()
 
-	updates := make(chan telego.Update, 1)
-	handler, err := th.NewBotHandler(b.api, updates)
-	if err != nil {
-		t.Fatal(err)
-	}
+	handler := &th.HandlerGroup{}
 	polling, stop := context.WithCancel(t.Context())
 	defer stop()
 	started := make(chan struct{})
@@ -289,20 +287,23 @@ func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
 		b.captureMessage(&msg, "text")
 		return nil
 	})
-	updates <- telego.Update{UpdateID: 1, Message: &message}
+	payload, err := json.Marshal([]telego.Update{{UpdateID: 1, Message: &message}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc.resp["getUpdates"] = string(payload)
 	handlerDone := make(chan error, 1)
-	go func() { handlerDone <- handler.Start() }()
+	go func() {
+		err := b.pollUpdates(polling, handler, func() {})
+		b.stopCaptureWriter()
+		handlerDone <- err
+	}()
 	select {
 	case <-started:
 	case <-time.After(3 * time.Second):
 		t.Fatal("capture producer did not start")
 	}
-	shutdownDone := make(chan struct{})
-	go func() {
-		b.stopUpdateHandling(stop, handler)
-		close(shutdownDone)
-	}()
-	<-polling.Done()
+	stop()
 	select {
 	case <-b.captureDone:
 		t.Fatal("writer exited before the active producer")
@@ -310,12 +311,12 @@ func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
 	}
 	close(allowWrite)
 	select {
-	case <-shutdownDone:
+	case err := <-handlerDone:
+		if err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("shutdown did not drain the producer and writer")
-	}
-	if err := <-handlerDone; err != nil {
-		t.Fatal(err)
 	}
 
 	// An accidental call after teardown must not send to a closed channel.
@@ -334,24 +335,23 @@ func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
 	}
 }
 
-func TestCaptureWriterExitsOnEarlyRunReturn(t *testing.T) {
+func TestCaptureWriterExitsOnPollCancellation(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
 		b, _, fc := newFlowBot(t)
 		b.cfg.DBPath = filepath.Join(t.TempDir(), "run.db")
 		b.cfg.MessageCaptureEnabled = enabled
 		fc.resp["getUpdates"] = "[]"
 		polling, stop := context.WithCancel(t.Context())
-		updates, err := b.api.UpdatesViaLongPolling(polling, nil, telego.WithLongPollingUpdateInterval(100*time.Millisecond))
-		if err != nil {
-			stop()
-			t.Fatal(err)
+		fc.errWhen = func(method string, _ *telegoapi.RequestData) bool {
+			if method == "getUpdates" {
+				stop()
+			}
+			return false
 		}
-		err = b.Run(t.Context())
+		err := b.Run(polling)
 		stop()
-		for range updates {
-		}
-		if err == nil || !strings.Contains(err.Error(), "long polling:") || t.Context().Err() != nil {
-			t.Fatalf("expected early polling error with a live parent: %v", err)
+		if err != nil || fc.callCount("getUpdates") != 1 {
+			t.Fatalf("expected a clean exit after poll cancellation: %v", err)
 		}
 		if !enabled {
 			if b.captureDone != nil || b.captureCh != nil {

@@ -63,7 +63,7 @@ broken=dddddddddddddddddddddddddddddddddddddddd
 echo "$*" >> "$FAKE_DIR/git-calls"
 case "$1" in
   fetch)
-    [ "$SCENARIO" != fetch-failed ] || exit 1
+    [ "$SCENARIO" != fetch-failed ] && [ "${OFFLINE:-}" != yes ] || exit 1
     for arg in "$@"; do [ "$arg" != --tags ] || exit 1; done;;
   merge-base) [ "$3" = "$old" ] || [ "$3" = "$new" ] || [ "$3" = "$next" ] || [ "$3" = "$broken" ];;
   show)
@@ -148,6 +148,7 @@ case "$1 $2" in
       *) case "$SCENARIO" in containerd-*) echo "sha256:index-$target";; *) echo "sha256:$target";; esac;;
     esac;;
   "pull $repo:latest")
+    [ "${OFFLINE:-}" != yes ] || exit 1
     case "$SCENARIO" in notification-failed|pull-failed) exit 1;; esac;;
   'compose --project-name')
     [ "$3" = antispambot ] || exit 2
@@ -160,7 +161,7 @@ case "$1 $2" in
     echo "$spec" >> "$FAKE_DIR/applied"
     if [ "$spec" = 'previous compose' ]; then
       grep -F "$repo@sha256:$old" "${11}" >/dev/null || exit 2
-      [ "$SCENARIO" != rollback-up-failed ] || exit 1
+      [ "$SCENARIO:$TICK" != rollback-up-failed:1 ] || exit 1
       touch "$FAKE_DIR/rollback"
       rm -f "$FAKE_DIR/stopped"
       exit 0
@@ -302,6 +303,21 @@ esac
 				if strings.HasPrefix(scenario, "rollback-") {
 					if !strings.Contains(string(out), "ROLLBACK FAILED") || !strings.Contains(string(notifications), "НЕ подтверждён") {
 						t.Fatalf("broken rollback must report unconfirmed recovery: %s\n%s", out, notifications)
+					}
+					if scenario == "rollback-up-failed" {
+						next := exec.CommandContext(t.Context(), "bash", filepath.Join(bin, "auto-deploy.sh"))
+						next.Env = append(cmd.Environ(), "TICK=2", "OFFLINE=yes")
+						out, err := next.CombinedOutput()
+						if err != nil || !strings.Contains(string(out), "rollback done") {
+							t.Fatalf("next tick did not finish the saved rollback: %v / %s", err, out)
+						}
+						if _, err := os.Stat(filepath.Join(dir, "releases", "rollback")); !os.IsNotExist(err) {
+							t.Fatalf("completed rollback left a pointer: %v", err)
+						}
+						applied, err := os.ReadFile(filepath.Join(dir, "applied"))
+						if err != nil || string(applied) != "candidate compose\nprevious compose\nprevious compose\n" {
+							t.Fatalf("recovery applied the wrong release: %q / %v", applied, err)
+						}
 					}
 				} else if !strings.Contains(string(out), "rollback done") || !strings.Contains(string(notifications), "прежний образ работает") {
 					t.Fatalf("rollback must verify the previous image before reporting recovery: %s\n%s", out, notifications)

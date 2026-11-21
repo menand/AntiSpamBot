@@ -14,6 +14,45 @@ import (
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
+func TestReplyAnswerSurvivesShutdownWhileRemovingButtons(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reply.db")
+	b, fc := replyAnchorBot(t, path)
+	ctx, stop := context.WithCancel(t.Context())
+	defer stop()
+	b.runCtx = ctx
+	now := time.Now()
+	if err := b.db.RecordEvent(ctx, testChatID, testUserID, storage.EventJoin, now, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.PutPendingReply(ctx, storage.PendingReply{
+		ChatID: testChatID, UserID: testUserID, ExpiresAt: now.Add(time.Minute), Stage: 1, GreetingMsgID: 17,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.replies.Put(testChatID, testUserID, now.Add(time.Minute), 0, 1, 17)
+	fc.errWhen = func(method string, _ *telegoapi.RequestData) bool {
+		if method == "editMessageReplyMarkup" {
+			stop()
+		}
+		return false
+	}
+	if p, err := b.replyWaitSatisfied(testChatID, testUserID); err != nil || p == nil || ctx.Err() == nil {
+		t.Fatalf("answer or shutdown did not occur: %v / %v / %v", p, err, ctx.Err())
+	}
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, _ := replyAnchorBot(t, path)
+	rows, err := restarted.db.LoadAllPendingReplies(t.Context())
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("answered wait survived restart: %v / %v", rows, err)
+	}
+	s, err := restarted.db.QueryStats(t.Context(), testChatID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil || s.Passed != 1 || s.Pending != 0 {
+		t.Fatalf("answer disappeared from stats: passed=%d pending=%d / %v", s.Passed, s.Pending, err)
+	}
+}
+
 func TestReplyGreetingStageSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "reply.db")
 	b, fc := replyAnchorBot(t, path)
@@ -109,9 +148,9 @@ func TestReplyGreetingReissuesUnboundAnchor(t *testing.T) {
 	if restarted.replies.MatchGreeting(testChatID, testUserID, 103) == nil {
 		t.Fatal("the old greeting changed the wait")
 	}
-	if swallowed := restarted.replyWaitMiddleware(&telego.Message{
+	if swallowed, err := restarted.replyWaitMiddleware(&telego.Message{
 		Chat: old.Chat, MessageID: 104, From: &telego.User{ID: testUserID}, Text: "Всем добрый вечер, я здесь впервые",
-	}); swallowed {
+	}); err != nil || swallowed {
 		t.Fatal("ordinary reply was swallowed")
 	}
 	assertReplyAnchorPassed(t, restarted)
@@ -280,9 +319,9 @@ func TestReplySpamBanFailureLeavesReplyWait(t *testing.T) {
 
 			switch outcome {
 			case "answer":
-				if b.replyWaitMiddleware(&telego.Message{
+				if swallowed, err := b.replyWaitMiddleware(&telego.Message{
 					Chat: chat, MessageID: 110, From: &telego.User{ID: testUserID}, Text: "Всем добрый вечер, я здесь впервые",
-				}) {
+				}); err != nil || swallowed {
 					t.Fatal("ordinary reply was swallowed")
 				}
 				assertReplyAnchorPassed(t, b)

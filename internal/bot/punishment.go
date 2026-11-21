@@ -85,7 +85,7 @@ func (b *Bot) advancePunishment(ctx context.Context, p storage.PendingPunishment
 	chatID, userID := p.ChatID, p.UserID
 	manual := p.Kind == storage.EventKick && p.Attempt == 0
 	if !manual {
-		global, err := b.db.IsSpamBanned(ctx, userID)
+		global, err := b.db.IsSpamBannedInChat(ctx, chatID, userID)
 		if err != nil {
 			return "", err
 		}
@@ -173,7 +173,7 @@ func (b *Bot) advancePunishment(ctx context.Context, p storage.PendingPunishment
 			}
 		}
 		if !manual {
-			global, err := b.db.IsSpamBanned(ctx, userID)
+			global, err := b.db.IsSpamBannedInChat(ctx, chatID, userID)
 			if err != nil {
 				return "", err
 			}

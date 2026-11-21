@@ -10,6 +10,7 @@ services:
         VERSION: ${VERSION:-dev}
     container_name: menand-antispam
     restart: unless-stopped
+    stop_grace_period: 60s
     env_file:
       - .env
     environment:

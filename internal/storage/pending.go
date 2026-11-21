@@ -252,17 +252,13 @@ func (d *DB) DeletePendingReplyIf(ctx context.Context, chatID, userID int64, sta
 	return nil
 }
 
-// DeletePendingReplyForGreeting удаляет только проверку, разрешённую кнопкой
-// конкретного якоря, даже если к моменту записи началась новая проверка.
-func (d *DB) DeletePendingReplyForGreeting(ctx context.Context, chatID, userID int64, msgID int) error {
-	_, err := d.sql.ExecContext(ctx, `
-		DELETE FROM pending_replies
-		WHERE chat_id = ? AND user_id = ? AND greeting_msg_id = ? AND greeting_msg_id > 0
-	`, chatID, userID, msgID)
-	if err != nil {
-		return fmt.Errorf("delete pending reply for greeting: %w", err)
-	}
-	return nil
+// FinishReplyAnswer also covers the next stage while its reminder is being sent.
+func (d *DB) FinishReplyAnswer(ctx context.Context, chatID, userID int64, stage, greetingID int) error {
+	return d.finishPendingCheck(ctx, chatID, userID, EventPass,
+		`DELETE FROM pending_replies WHERE chat_id = ? AND user_id = ? AND suspended = 0
+		AND ((stage = ? AND (greeting_msg_id = ? OR greeting_msg_id = 0))
+			OR (stage = ? AND greeting_msg_id = 0 AND ? = 0))`,
+		stage, greetingID, stage+1, greetingID)
 }
 
 // ExtendPendingReplyIf — guard-продление ожидания ответа по СТАДИИ (прецедент

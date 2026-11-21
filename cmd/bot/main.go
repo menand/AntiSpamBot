@@ -55,7 +55,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// Второй сигнал — принудительный выход: зависший bh.Stop()/db.Close()
+	// Второй сигнал — принудительный выход: зависший обработчик или SQLite
 	// иначе держал бы процесс вечно (вне Docker его некому добить по таймауту).
 	// Единственный в процессе голый go: тело не может запаниковать (только
 	// чтения канала и os.Exit), а b.goSafe недоступен — Bot ещё не создан.

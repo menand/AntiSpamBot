@@ -43,11 +43,28 @@ func (d *DB) BeginDirectSpamDecision(ctx context.Context, v SpamVote, why, reaso
 	return id, tx.Commit()
 }
 
-func (d *DB) SpamBanStillCurrent(ctx context.Context, source, target, userID, id int64) (bool, error) {
+func (d *DB) PardonSpamInChat(ctx context.Context, chatID, userID int64) error {
+	tx, err := d.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	pardon, err := nextSpamDecision(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, rememberSpamDecisionSQL, chatID, userID, 0, pardon); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Chat ID zero is reserved for full pardons. Local pardons affect only their chat.
+func (d *DB) SpamBanStillCurrent(ctx context.Context, chatID, userID, id int64) (bool, error) {
 	var current bool
 	err := d.sql.QueryRowContext(ctx, `SELECT NOT EXISTS(
-		SELECT 1 FROM chat_spam_decisions WHERE chat_id IN (?, ?) AND user_id = ? AND pardon_id >= ?
-	)`, source, target, userID, id).Scan(&current)
+		SELECT 1 FROM chat_spam_decisions WHERE chat_id IN (0, ?) AND user_id = ? AND pardon_id >= ?
+	)`, chatID, userID, id).Scan(&current)
 	return current, err
 }
 
@@ -55,7 +72,7 @@ func (d *DB) IsSpamBannedInChat(ctx context.Context, chatID, userID int64) (bool
 	var banned bool
 	err := d.sql.QueryRowContext(ctx, `SELECT EXISTS(
 		SELECT 1 FROM spam_banned AS s WHERE s.user_id = ? AND NOT EXISTS (
-			SELECT 1 FROM chat_spam_decisions AS c WHERE c.chat_id IN (s.chat_id, ?)
+			SELECT 1 FROM chat_spam_decisions AS c WHERE c.chat_id IN (0, ?)
 			AND c.user_id = s.user_id AND c.pardon_id > 0 AND c.pardon_id >= s.decision_id
 		)
 	)`, userID, chatID).Scan(&banned)
@@ -72,5 +89,5 @@ func (d *DB) NewerSpamDecision(ctx context.Context, chatID, userID, pardonID int
 
 const rememberGlobalSpamBanSQL = `INSERT INTO spam_banned (user_id, chat_id, at, decision_id)
 	SELECT ?, ?, ?, ? WHERE NOT EXISTS (
-		SELECT 1 FROM chat_spam_decisions WHERE chat_id = ? AND user_id = ? AND pardon_id >= ?
+		SELECT 1 FROM chat_spam_decisions WHERE chat_id IN (0, ?) AND user_id = ? AND pardon_id >= ?
 	) ON CONFLICT(user_id) DO UPDATE SET decision_id = max(decision_id, excluded.decision_id)`

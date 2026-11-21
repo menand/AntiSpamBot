@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	AdmissionCaptcha   = "captcha"
-	AdmissionUnban     = "u"
-	AdmissionUnbanChat = "f"
-	AdmissionWhitelist = "w"
+	AdmissionCaptcha    = "captcha"
+	AdmissionUnban      = "u"
+	AdmissionUnbanChat  = "f"
+	AdmissionLocalUnban = "local_unban"
+	AdmissionWhitelist  = "w"
 )
 
 type PendingAdmission struct {
@@ -106,12 +107,16 @@ func (d *DB) AcceptManualAdmission(ctx context.Context, p PendingAdmission, othe
 		p.MessageID, p.EphemeralID = old.MessageID, old.EphemeralID
 		p.UnbanDone = old.UnbanDone && !old.BanPending
 	}
-	if p.Action == AdmissionUnban {
+	if p.Action == AdmissionUnban || p.Action == AdmissionLocalUnban {
 		p.PardonID, err = nextSpamDecision(ctx, tx)
 		if err != nil {
 			return p, err
 		}
-		for _, chatID := range append([]int64{p.ChatID}, otherPardonChats...) {
+		chats := []int64{p.ChatID}
+		if p.Action == AdmissionUnban {
+			chats = append(append(chats, 0), otherPardonChats...)
+		}
+		for _, chatID := range chats {
 			if _, err := tx.ExecContext(ctx, rememberSpamDecisionSQL, chatID, p.UserID, 0, p.PardonID); err != nil {
 				return p, err
 			}

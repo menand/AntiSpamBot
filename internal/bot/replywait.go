@@ -280,80 +280,6 @@ func (s *replyStore) TakeChat(chatID int64) []*replyPending {
 	return out
 }
 
-// maybeArmReplyWait взводит ожидание ДО отправки приветствия и возвращает
-// его поколение. nil означает, что требование ответа в приветствии не нужно.
-func (b *Bot) maybeArmReplyWait(s storage.ChatSettings, chatID, userID int64, threadID int) *replyPending {
-	if effectiveWelcomeMode(s) != welcomeReply {
-		return nil
-	}
-	// Снапшот s прочитан до размьюта (секунды ретраев release внутри
-	// onSuccess): админ мог увести чат из «с ответом», пока капча дозревала.
-	// Свежая проверка сужает окно гонки, но не закрывает его (смена режима
-	// может пройти между ней и Put) — добивает страховка в replyWaitLoop:
-	// серия в чате без режима не напомнит и не накажет, а снимется пассом.
-	// Ошибка чтения — не повод решать за чат: армируем как раньше.
-	// Уверенное «режим ушёл» — серию не взводим И закрываем воронку
-	// компенсирующим пассом: капча пройдена, требование отменено админом, а
-	// в reply-режиме пасс пишет только ответ — без этого юзер навсегда завис
-	// бы в «В процессе» (ожидания нет, и ни disarmReplyWaits, ни цикл его не
-	// увидят).
-	if fresh, err := b.db.GetChatSettings(b.runCtx, chatID); err == nil && effectiveWelcomeMode(fresh) != welcomeReply {
-		if rerr := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); rerr != nil {
-			b.log.Warn("record compensating pass (mode left reply before arm)", "err", rerr,
-				"chat", chatID, "user", userID)
-		}
-		return nil
-	}
-	interval := b.effectiveStageInterval(s)
-	deadline := time.Now().Add(interval)
-	p := b.replies.Put(chatID, userID, deadline, threadID, 1, 0)
-	if err := b.db.PutPendingReply(b.runCtx, storage.PendingReply{
-		ChatID: chatID, UserID: userID, ExpiresAt: deadline,
-		Stage: 1, ThreadID: threadID,
-	}); err != nil {
-		// Прецедент капчи (её pre-persist abort): сбой БД коррелирует с
-		// близким рестартом, а строка pending_replies — единственный механизм
-		// повтора наказания после него. Молчаливая деградация «живём по
-		// памяти» означала бы: рестарт тихо терял ожидание, а живой процесс
-		// карал за молчание, которого после рестарта никто бы не повторил.
-		// Снимаем ожидание с компенсирующим пассом (якорь-то ещё не отправлен:
-		// arming стоит ДО приветствия — юзер останется с обычным welcome),
-		// серию не запускаем.
-		b.log.Error("persist pending reply — disarming wait", "err", err,
-			"chat", chatID, "user", userID)
-		if armed, ok := b.replies.TakeMatch(chatID, userID, func(live *replyPending) bool { return live == p }); ok {
-			armed.Cancel()
-			if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-				b.log.Warn("record compensating pass (reply arm failed)", "err", err,
-					"chat", chatID, "user", userID)
-			}
-		}
-		return nil
-	}
-	// Пост-персист identity-чек (гонка «решение прилетело между Put в память
-	// и PutPendingReply»): ответ юзера, промоушен или /mute могли изъять
-	// ожидание за миллисекунды персиста — тогда только что записанная строка
-	// сирота, и рестарт воскресил бы серию на уже решённого юзера (промоушен-
-	// бэкстоп закрыл бы воронку вторым пассом, а замьюченный получил бы кик
-	// за неответ поверх решения админа). Guard по стадии 1 — не тронем чужой.
-	if cur, ok := b.replies.Get(chatID, userID); !ok || cur != p {
-		// Guard-delete — на liveCtx (как в sendCaptchaStage): SIGTERM в
-		// микроокне персиста не должен оставить сироту, которую рестарт
-		// воскресит для уже решённого юзера.
-		dctx, dcancel := b.liveCtx()
-		if derr := b.db.DeletePendingReplyIf(dctx, chatID, userID, 1); derr != nil {
-			b.log.Warn("delete orphan pending reply (resolved mid-persist)", "err", derr,
-				"chat", chatID, "user", userID)
-		}
-		dcancel()
-		// Ожидание уже снято: требование-строку в приветствии рисовать
-		// нельзя (enforce'ить её нечем), серию не запускаем.
-		return nil
-	}
-	b.goSafe("replyWaitLoop", func() { b.replyWaitLoop(chatID, userID, p) })
-	return p
-}
-
 // messageHasUserContent — сообщение несёт реальный ввод юзера (текст, подпись
 // или вложение), а не сервисное событие (добавление участника, смена
 // названия...). Ответом на приветствие считается только контент.
@@ -519,42 +445,33 @@ func hasEmptyReplyPrefix(w string) bool {
 // Возвращает изъятое ожидание (nil, если его не было / не наш — обычный юзер
 // без reply-check): middleware использует не-nil как признак «прошёл 2-й
 // уровень» и шлёт владельцам форвард ответа (notifyReplyAnswered).
-func (b *Bot) replyWaitSatisfied(chatID, userID int64) *replyPending {
-	p, ok := b.replies.Take(chatID, userID)
+func (b *Bot) replyWaitSatisfied(chatID, userID int64) (*replyPending, error) {
+	ctx, cancel := b.liveCtx()
+	defer cancel()
+	var saveErr error
+	p, ok := b.replies.TakeMatch(chatID, userID, func(p *replyPending) bool {
+		saveErr = b.db.FinishReplyAnswer(ctx, chatID, userID, p.Stage, p.GreetingMsgID)
+		return saveErr == nil
+	})
 	if !ok {
-		return nil
+		return nil, saveErr
 	}
 	p.Cancel()
-	// Строку гасим ДО записи пасса: окно между ними микросекундное, но
-	// рестарт в нём воскресил бы ожидание для уже ответившего — с киком за
-	// «молчание», которого не было. Guard по стадии: переход к следующей
-	// персистится ДО отправки напоминания, так что ответ, прилетевший в окно
-	// пересылки, стирает СВОЮ строку и не трогает уже записанную следующую.
-	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, userID, p.Stage); err != nil {
-		b.log.Warn("delete pending reply on satisfy", "err", err, "chat", chatID, "user", userID)
-	}
 	// Любой ответ на приветствие/проверку (стадии 1, 2 и 3): сообщение бота
 	// остаётся в чате, чтобы у ответа новичка был контекст. Кнопки «Впустить»
 	// / «Спам» больше неактуальны — снимаем клавиатуру. Строку greetings НЕ
 	// удаляем: она нужна cleanupTargetTraces для удаления приветствия при
 	// спам-бане, и само сообщение не мусорит.
 	if msgID := p.GreetingMsgID; msgID > 0 {
-		if _, err := b.api.EditMessageReplyMarkup(b.runCtx, &telego.EditMessageReplyMarkupParams{
+		if _, err := b.api.EditMessageReplyMarkup(ctx, &telego.EditMessageReplyMarkupParams{
 			ChatID:    tu.ID(chatID),
 			MessageID: msgID,
 		}); err != nil {
 			b.log.Debug("remove reply-approve button", "err", err, "chat", chatID, "msg", msgID)
 		}
 	}
-	// Единственный победитель гонки фиксирует «прошёл»: капча уже позади,
-	// ответ на приветствие — финальная проверка. При однофакторной проверке
-	// (reply_check выключен) пасс записан ещё в onSuccess, и здесь Take
-	// просто промахивается — лишний пасс не пишется.
-	if err := b.db.RecordEvent(b.runCtx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-		b.log.Warn("record pass event (reply)", "err", err)
-	}
 	b.log.Info("reply check passed", "chat", chatID, "user", userID, "stage", p.Stage)
-	return p
+	return p, nil
 }
 
 // handleJunkReply — мусорный ответ на приветствие-проверку: сообщение
@@ -655,23 +572,27 @@ func (b *Bot) sendJunkReplyHint(ctx context.Context, m *telego.Message, extended
 // счётчики/архив/ИИ-чек не идёт); false — сообщение уходит дальше по цепочке.
 // Вынесено из замыкания middleware ради тестируемости (сам middleware лишь
 // вызывает метод — см. bot.go).
-func (b *Bot) replyWaitMiddleware(m *telego.Message) bool {
+func (b *Bot) replyWaitMiddleware(m *telego.Message) (bool, error) {
 	p, ok := b.replies.Get(m.Chat.ID, m.From.ID)
 	if !ok {
-		return false
+		return false, nil
 	}
 	if replyCountsAsAnswer(m) {
 		// не-nil — юзер реально прошёл 2-й уровень (ответил на приветствие):
 		// подписчикам mod_notify уходит форвард его сообщения + карточка
 		// (goSafe — не тормозим хендлер).
-		if taken := b.replyWaitSatisfied(m.Chat.ID, m.From.ID); taken != nil {
+		taken, err := b.replyWaitSatisfied(m.Chat.ID, m.From.ID)
+		if err != nil {
+			return false, err
+		}
+		if taken != nil {
 			// Наблюдение за удалением/правкой — до асинхронного уведомления:
 			// синхронная запись гарантирует, что следующий /del не опередит
 			// строку и отчёт не соврёт «не бот».
 			b.startReplyWatch(m)
 			b.goSafe("notifyReplyAnswered", func() { b.notifyReplyAnswered(m, taken) })
 		}
-		return false
+		return false, nil
 	}
 	// Команда — не ответ и не мусор: «/ban», «/del», «/start» короче порога
 	// фильтра, но удалять и глотать их нельзя — они уходят в свои хендлеры
@@ -680,12 +601,12 @@ func (b *Bot) replyWaitMiddleware(m *telego.Message) bool {
 	// defense-in-depth: арм уже требует обслуживаемого чата, но удалять
 	// сообщение в брошенном чате бот не должен.
 	if isCommandText(m) || !b.chatServiceable(m.Chat.ID) {
-		return false
+		return false, nil
 	}
 	// Мусорный ответ: удаление + подсказка + разовые +5 минут — в фоне
 	// (сетевые лестницы ретраев не должны тормозить цепочку хендлеров).
 	b.goSafe("junkReply", func() { b.handleJunkReply(m, p) })
-	return true
+	return true, nil
 }
 
 // cancelReplyWait тихо снимает ожидание (юзер вышел/кикнут/забанен/замьючен) —
@@ -824,15 +745,14 @@ func (b *Bot) advanceReplyWait(ctx context.Context, chatID, userID int64, p *rep
 
 	// Страховка от устаревшего арма и гонок со сменой режима: серия могла
 	// взвестись по снапшоту настроек, пока чат уже уводили из «с ответом»
-	// (disarmReplyWaits снял только прежние ожидания, а maybeArmReplyWait
+	// (disarmReplyWaits снял только прежние ожидания, а допуск по капче
 	// добавил новую пару уже после его TakeChat). Чат больше не обещает
 	// требование — не напоминаем и НЕ караем: снимаем ожидание
 	// компенсирующим пассом (прецедент /mute). Стоит ДО финальной кары,
 	// поэтому и «фантомная» серия никого не кикнет. Настройки читаются
 	// один раз на стадию — переход ниже переиспользует тот же снапшот;
-	// ошибка чтения — не повод решать за чат (та же дисциплина, что у
-	// backstop в restorePendingReplies и у свежей проверки в
-	// maybeArmReplyWait): серия продолжается как раньше.
+	// ошибка чтения — не повод решать за чат (та же дисциплина, что при
+	// восстановлении ожиданий): серия продолжается как раньше.
 	s, serr := b.db.GetChatSettings(ctx, chatID)
 	if serr == nil && effectiveWelcomeMode(s) != welcomeReply {
 		b.disarmReplyWait(ctx, chatID, userID, p)

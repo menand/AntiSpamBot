@@ -64,22 +64,32 @@ AFTER_REVISION=$(image_revision "$after")
 CHANGES=$(deployment_changes "$before" "$after" "$BEFORE_VERSION" "$AFTER_VERSION" "$BEFORE_REVISION" "$AFTER_REVISION")
 ALPINE_INFO=$(alpine_details "$before" "$after")
 
-echo "=== $(date -Is) deploying image $(short_id "$after") ==="
 SMOKE_FAIL=""
-if ! run_bundle "$candidate"; then
-    # Compose мог уже остановить старый контейнер до ошибки создания нового.
-    # Поэтому ошибка команды требует той же попытки отката, что и smoke fail.
-    SMOKE_FAIL=${SMOKE_FAIL:-"команда запуска Compose завершилась ошибкой"}
+if [ "${resume_rollback:-0}" -eq 1 ]; then
+    SMOKE_FAIL="предыдущая попытка отката не завершилась"
 else
-    smoke_image "$after" || true
+    echo "=== $(date -Is) deploying image $(short_id "$after") ==="
+    if ! run_bundle "$candidate"; then
+        # Compose мог уже остановить старый контейнер до ошибки создания нового.
+        SMOKE_FAIL=${SMOKE_FAIL:-"команда запуска Compose завершилась ошибкой"}
+    else
+        smoke_image "$after" || true
+    fi
 fi
 
 if [ -n "$SMOKE_FAIL" ]; then
+    # Keep the recovery intent across interruptions before and during rollback.
+    quarantine=1
+    if [ -n "$previous" ] && [ "${resume_rollback:-0}" -eq 0 ] &&
+       ! write_bundle_pointer "$candidate" rollback; then
+        echo "!!! could not save rollback state; attempting rollback now"
+        quarantine=0
+    fi
     # Жёсткий провал — откат на прежний образ + карантин. Prune НЕ делаем:
     # старый образ ещё нужен, а упавший остаётся в registry для диагностики.
     mkdir -p "$(dirname "$QUARANTINE")" || true
     for rejected in "$after" "$candidate_ref"; do
-        if ! is_quarantined "$rejected"; then
+        if [ "$quarantine" -eq 1 ] && [ -n "$rejected" ] && ! is_quarantined "$rejected"; then
             echo "$rejected" >> "$QUARANTINE" 2>/dev/null || true
         fi
     done
@@ -91,7 +101,12 @@ if [ -n "$SMOKE_FAIL" ]; then
     DEPLOY_FAIL="$SMOKE_FAIL"
     echo "!!! $(date -Is) SMOKE FAIL ($DEPLOY_FAIL); rolling back to $(short_id "$before")"
     ROLLBACK_OK=0
-    if run_bundle "$previous"; then
+    rollback_recreate=""
+    if [ "${resume_rollback:-0}" -eq 1 ] && running_image_matches "$before" &&
+       [ "$(container_field '{{.RestartCount}}')" != 0 ]; then
+        rollback_recreate=--force-recreate
+    fi
+    if run_bundle "$previous" ${rollback_recreate:+"$rollback_recreate"}; then
         if smoke_image "$before"; then
             ROLLBACK_OK=1
         fi
@@ -99,16 +114,20 @@ if [ -n "$SMOKE_FAIL" ]; then
         SMOKE_FAIL="команда отката Compose завершилась ошибкой"
     fi
     if [ "$ROLLBACK_OK" -eq 1 ]; then
+        rm -f "$RELEASE_STATE/rollback"
         echo "!!! $(date -Is) rollback done; image $(short_id "$after") quarantined"
         notify_owners "⚠️ Обновление $BEFORE_VERSION → $AFTER_VERSION отменено.
 Причина: $DEPLOY_FAIL.
 Восстановлена версия: $BEFORE_VERSION; прежний образ работает, heartbeat текущего запуска подтверждён.
 Отклонённый образ $(short_id "$after") в карантине и повторно не устанавливается." || true
     else
-        echo "!!! $(date -Is) ROLLBACK FAILED ($SMOKE_FAIL) — manual intervention required!"
-        notify_owners "🚨 Обновление до $AFTER_VERSION не прошло: $DEPLOY_FAIL.
+        echo "!!! $(date -Is) ROLLBACK FAILED ($SMOKE_FAIL) — retry pending"
+        notify_once rollback "🚨 Обновление до $AFTER_VERSION не прошло: $DEPLOY_FAIL.
 Откат на $BEFORE_VERSION НЕ подтверждён: $SMOKE_FAIL.
-Нужно вмешательство; работоспособность бота не подтверждена." || true
+Бот пока не подтвердил запуск. Автодеплой повторит откат на следующем запуске." || true
+    fi
+    if [ "${resume_rollback:-0}" -eq 1 ] && [ "$ROLLBACK_OK" -eq 1 ]; then
+        exit 0
     fi
     exit 1
 fi

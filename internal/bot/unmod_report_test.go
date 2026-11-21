@@ -70,10 +70,11 @@ func TestHelpHTMLInGroupDMAndMenu(t *testing.T) {
 	}
 }
 
-func TestFullunbanReportsOnlyChatsRequesterManages(t *testing.T) {
+func TestFullunbanReportsAllChatsToOwner(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	ctx := b.runCtx
 	const requester, target = 901, 555
+	b.cfg.OwnerIDs = map[int64]struct{}{requester: {}}
 	const success, rejected, hidden = -100201, -100202, -100203
 	for i, chatID := range []int64{testChatID, success, rejected, hidden} {
 		serviceableChat(t, b, db, chatID)
@@ -85,12 +86,9 @@ func TestFullunbanReportsOnlyChatsRequesterManages(t *testing.T) {
 	if err := db.AddSpamBanned(ctx, target, testChatID, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	b.cacheAdmin(hidden, requester, true)
 	bot := `{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Bot"},"can_restrict_members":true}`
-	admin := `{"status":"administrator","user":{"id":901,"is_bot":false,"first_name":"Admin"}}`
-	member := `{"status":"member","user":{"id":901,"is_bot":false,"first_name":"Member"}}`
 	targetMember := `{"status":"member","user":{"id":555,"is_bot":false,"first_name":"Target"}}`
-	fc.respSeq["getChatMember"] = []string{bot, admin, targetMember, admin, admin, member}
+	fc.respSeq["getChatMember"] = []string{bot, targetMember}
 	fc.errWhen = func(method string, data *telegoapi.RequestData) bool {
 		return method == "unbanChatMember" && strings.Contains(string(data.BodyRaw), fmt.Sprintf(`"chat_id":%d`, rejected))
 	}
@@ -109,8 +107,56 @@ func TestFullunbanReportsOnlyChatsRequesterManages(t *testing.T) {
 		!strings.Contains(sent[1], "B Declined» — разбан не подтверждён") {
 		t.Fatalf("private results did not distinguish outcomes: %v", sent)
 	}
-	if strings.Contains(strings.Join(sent, ""), "C Private") ||
+	if !strings.Contains(sent[1], "C Private") ||
 		!strings.Contains(strings.Join(fc.callBodies("unbanChatMember"), ""), `"chat_id":-100203`) {
-		t.Fatalf("private chat leaked, or scope of existing unban changed: %v", sent)
+		t.Fatalf("owner did not receive the result for each chat: %v", sent)
+	}
+}
+
+func TestLocalAdminCanOnlyUnbanInOwnChat(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	ctx := t.Context()
+	const requester, target, otherChat = 200, 555, -100203
+	b.cfg.OwnerIDs = map[int64]struct{}{901: {}}
+	serviceableChat(t, b, db, testChatID)
+	serviceableChat(t, b, db, otherChat)
+	if err := db.AddSpamBanned(ctx, target, testChatID, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	bot := `{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Bot"},"can_restrict_members":true}`
+	admin := `{"status":"administrator","user":{"id":200,"is_bot":false,"first_name":"Admin"}}`
+	member := `{"status":"member","user":{"id":555,"is_bot":false,"first_name":"Target"}}`
+	fc.respSeq["getChatMember"] = []string{bot, admin, admin, bot, admin, member}
+	msg := reportCommand(requester, &telego.User{ID: target})
+	msg.Text = "/fullunban"
+	if err := b.handleFullunbanCommand(nil, msg); err != nil {
+		t.Fatal(err)
+	}
+	query := telego.CallbackQuery{
+		ID: "full", From: *msg.From, Data: "mc:f:555",
+		Message: &telego.Message{MessageID: 42, Chat: msg.Chat},
+	}
+	if err := b.handleModChoiceCallback(nil, query); err != nil {
+		t.Fatal(err)
+	}
+	if fc.callCount("unbanChatMember") != 0 {
+		t.Fatalf("local admin ran a full unban: %v", fc.callList())
+	}
+	if got := strings.Join(fc.callBodies("answerCallbackQuery"), ""); !strings.Contains(got, "доступен владельцу") {
+		t.Fatalf("old full-unban button did not explain rejection: %s", got)
+	}
+	msg.Text = "/unban"
+	if err := b.handleUnbanCommand(nil, msg); err != nil {
+		t.Fatal(err)
+	}
+	if calls := fc.callBodies("unbanChatMember"); len(calls) != 1 ||
+		!strings.Contains(calls[0], fmt.Sprintf(`"chat_id":%d`, testChatID)) {
+		t.Fatalf("local unban had an unexpected scope: %v", calls)
+	}
+	if banned, err := db.IsSpamBannedInChat(ctx, testChatID, target); err != nil || banned {
+		t.Fatalf("local chat still applies the old spam ban: %v / %v", banned, err)
+	}
+	if banned, err := db.IsSpamBannedInChat(ctx, otherChat, target); err != nil || !banned {
+		t.Fatalf("other chat lost protection from the existing spam verdict: %v / %v", banned, err)
 	}
 }

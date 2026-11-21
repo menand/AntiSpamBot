@@ -80,7 +80,7 @@ func (b *Bot) executePendingAdmission(ctx context.Context, chatID, userID int64)
 	if err != nil || !exists {
 		return err
 	}
-	if row.Action == storage.AdmissionUnbanChat && row.PardonID > 0 {
+	if (row.Action == storage.AdmissionUnbanChat || row.Action == storage.AdmissionLocalUnban) && row.PardonID > 0 {
 		newer, err := b.db.NewerSpamDecision(ctx, chatID, userID, row.PardonID)
 		if err != nil {
 			return err

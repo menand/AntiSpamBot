@@ -288,10 +288,7 @@ func TestReplyWaitSeriesThreeStages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
-	if p := b.maybeArmReplyWait(s, testChatID, testUserID, 77); p == nil || !b.sendReplyGreeting(ctx, s, p) {
-		t.Fatal("anchor send failed")
-	}
+	completeReplyAdmission(t, b, 77)
 
 	waitFor(t, func() bool {
 		k := statsKinds(t, db, testChatID, testUserID)
@@ -307,9 +304,9 @@ func TestReplyWaitSeriesThreeStages(t *testing.T) {
 	if !strings.Contains(bodies[1], `"message_thread_id":77`) {
 		t.Fatalf("напоминание ушло мимо топика: %s", bodies[1])
 	}
-	// Якорь ст.1 при переходе, якорь ст.2 при переходе, якорь ст.3 перед карой.
-	if n := fc.callCount("deleteMessage"); n != 3 {
-		t.Fatalf("deleteMessage = %d, want 3", n)
+	// Капча и три якоря ожидания.
+	if n := fc.callCount("deleteMessage"); n != 4 {
+		t.Fatalf("deleteMessage = %d, want 4", n)
 	}
 	list, err := db.RecentEventUsers(ctx, testChatID, 10,
 		[]storage.EventKind{storage.EventKick}, []string{storage.ReasonNoReply})
@@ -330,16 +327,12 @@ func TestReplyWaitReminderFailDisarmsWithPass(t *testing.T) {
 	fc.errWhen = func(_ string, data *telegoapi.RequestData) bool {
 		return data != nil && strings.Contains(string(data.BodyRaw), "Напоминание")
 	}
-	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
 	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
 	if err := db.SetReplyCheckEnabled(ctx, testChatID, true); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 0, 1); !ok {
-		t.Fatal("anchor send failed")
-	}
-	b.maybeArmReplyWait(s, testChatID, testUserID, 0)
+	completeReplyAdmission(t, b, 0)
 
 	// Лестница ретраев 400 (0+1+2+4 c) длиннее стандартных пяти секунд.
 	waitForWithin(t, 20*time.Second, func() bool {

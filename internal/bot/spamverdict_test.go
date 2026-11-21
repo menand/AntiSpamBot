@@ -234,7 +234,7 @@ func TestPardonStopsCrossBanWaitingForRights(t *testing.T) {
 		defer b.rights.mu.Unlock()
 		return len(b.rights.lanes[chatUser{other, testUserID}]) == 2
 	})
-	if _, err := b.execUnmod("u", testChatID, testUserID, nil); err != nil {
+	if _, err := b.execUnmod("f", testChatID, testUserID, &fullUnbanRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	unlock()

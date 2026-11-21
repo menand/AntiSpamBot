@@ -20,7 +20,7 @@ import (
 // резолв тот же, что у /kick) — действие сразу; без цели — публичная плашка
 // «10 последних» с кнопками выбора. Весь стейт выбора живёт в callback data
 // (mc:<a>:<userID>) — pending-структур и TTL нет, рестарты безразличны, жать
-// может любой админ.
+// может админ, а полный разбан доступен владельцу бота.
 
 // unmodListLimit — сколько юзеров показывает плашка выбора.
 const unmodListLimit = 10
@@ -61,7 +61,7 @@ func (b *Bot) handleUnbanCommand(ctx *th.Context, message telego.Message) error 
 
 // handleFullunbanCommand — /fullunban: снять баны юзера во ВСЕХ чатах бота,
 // вычеркнуть его из глобальной базы спамеров и сбросить попытки капчи везде.
-// Форма и гейты те же, что у остальных восстанавливающих команд.
+// Команда доступна владельцу бота.
 func (b *Bot) handleFullunbanCommand(ctx *th.Context, message telego.Message) error {
 	return b.handleUnmodCommand(ctx, message, "f")
 }
@@ -77,6 +77,10 @@ func (b *Bot) handleWhitelistCommand(ctx *th.Context, message telego.Message) er
 func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action string) error {
 	chatID, ok := b.modPrologue(ctx, message)
 	if !ok {
+		return nil
+	}
+	if action == "f" && !b.isOwner(message.From.ID) {
+		b.refuseAndDelete(ctx, message, "Полный разбан доступен владельцу бота. Для этого чата используйте /unban.")
 		return nil
 	}
 	// Снятие мьюта — RestrictChatMember, он работает только в супергруппах
@@ -112,16 +116,12 @@ func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action
 		}
 		b.log.Info("unmod command", "action", action, "chat", chatID,
 			"target", targetID, "by", message.From.ID)
-		requesterID := message.From.ID
-		if message.From.IsBot {
-			requesterID = 0 // Telegram does not supply the anonymous admin's ID.
-		}
 		if action == "f" {
-			text += fullUnbanAnnouncement(requesterID)
+			text += fullUnbanAnnouncement
 		}
 		b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), text)
 		if action == "f" {
-			b.startFullUnbanFanout(targetID, requesterID, full)
+			b.startFullUnbanFanout(targetID, message.From.ID, full)
 		}
 		return nil
 	}
@@ -206,7 +206,10 @@ func unmodListView(title, action string, recent []storage.RecentUser, infos map[
 // execUnmod применяет действие к юзеру и возвращает HTML-строку итога.
 // Все ветки идемпотентны — повторный клик или гонка двух админов безвредны.
 func (b *Bot) execUnmod(action string, chatID, targetID int64, full *fullUnbanRequest) (string, error) {
-	if action == storage.AdmissionUnban || action == storage.AdmissionWhitelist {
+	if action == storage.AdmissionUnban {
+		return b.execPersistentUnmod(storage.AdmissionLocalUnban, chatID, targetID)
+	}
+	if action == storage.AdmissionWhitelist {
 		return b.execPersistentUnmod(action, chatID, targetID)
 	}
 	if action == "f" {
@@ -268,12 +271,7 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64, full *fullUnbanRe
 	return "", fmt.Errorf("unknown unmod action %q", action)
 }
 
-func fullUnbanAnnouncement(requesterID int64) string {
-	if requesterID <= 0 {
-		return "\nЗапускаю обход остальных чатов. Для анонимной команды личный отчёт недоступен."
-	}
-	return "\nЗапускаю обход остальных чатов. Итог отправлю в ЛС."
-}
+const fullUnbanAnnouncement = "\nЗапускаю обход остальных чатов. Итог отправлю в ЛС."
 
 type fullUnbanRequest struct {
 	chats    []storage.ChatInfo
@@ -303,17 +301,11 @@ func (b *Bot) fullUnbanEverywhere(userID, requesterID int64, full fullUnbanReque
 	}
 	var lines []string
 	for i, chat := range chats {
-		if !b.isOwner(requesterID) {
-			admin, sure := b.isChatAdminFresh(b.runCtx, chat.ChatID, requesterID)
-			if !sure || !admin {
-				continue
-			}
-		}
 		chat.Title = truncateLabel(titleOrID(chat), 60)
 		lines = append(lines, chatLinkHTML(chat)+" — "+results[i])
 	}
 	if len(lines) == 0 {
-		b.sendFullUnbanResult(requesterID, "Обход завершён. В отчёт входят только чаты, которыми вы управляете.")
+		b.sendFullUnbanResult(requesterID, "Других обслуживаемых чатов нет.")
 		return
 	}
 	header := "🌍 <b>Итоги обхода для " + b.mentionFor(userID) + "</b>\n"
@@ -468,6 +460,11 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 		return nil
 	}
+	if action == "f" && !b.isOwner(query.From.ID) {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
+			WithText("Полный разбан доступен владельцу бота.").WithShowAlert())
+		return nil
+	}
 	// Лёгкий гард цели без якоря-команды (кнопка): не бот, не сам нажавший,
 	// не админ/владелец, не сервисный/канальный id. Отказ — тостом:
 	// реплаять не на что. Последний случай зеркалит хвост guardModTarget
@@ -510,7 +507,7 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 	// Итог редактируется в саму плашку, клавиатура снимается. Гонка двух
 	// админов даёт повторный edit тем же текстом — isNotModified глушим.
 	if action == "f" {
-		text += fullUnbanAnnouncement(query.From.ID)
+		text += fullUnbanAnnouncement
 	}
 	result := text + "\n<i>(" + html.EscapeString(userLabel(query.From)) + ")</i>"
 	if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{

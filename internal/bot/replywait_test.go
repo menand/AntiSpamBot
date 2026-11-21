@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mymmrac/telego/telegoapi"
+
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -92,7 +94,7 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 		ChatID: 1, UserID: 2, ExpiresAt: time.Now().Add(time.Minute),
 	})
 
-	if p := b.replyWaitSatisfied(1, 2); p == nil {
+	if p, err := b.replyWaitSatisfied(1, 2); err != nil || p == nil {
 		t.Fatal("replyWaitSatisfied must return the taken pending")
 	}
 
@@ -114,7 +116,7 @@ func TestReplyWaitSatisfiedRecordsPass(t *testing.T) {
 	}
 
 	// Повторный вызов (ожидания уже нет) пасс не дублирует и возвращает nil.
-	if p := b.replyWaitSatisfied(1, 2); p != nil {
+	if p, err := b.replyWaitSatisfied(1, 2); err != nil || p != nil {
 		t.Fatal("replyWaitSatisfied on an idle wait must return nil")
 	}
 	s, _ = db.QueryStats(ctx, 1, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
@@ -235,22 +237,27 @@ func TestRestorePendingRepliesDisarmsNonReplyMode(t *testing.T) {
 	}
 }
 
-// TestMaybeArmReplyWaitModeLeftRecordsPass — пока капча дозревала, админ увёл
+// TestAdmissionAfterModeLeftRecordsPass — пока капча дозревала, админ увёл
 // чат из «с ответом» (устаревший снапшот s): серия не взводится, но воронка
 // закрывается компенсирующим пассом — иначе прошедший капчу юзер навсегда
 // завис бы в «В процессе» (в reply-режиме пасс пишет только ответ, а ожидания
 // нет — ни disarmReplyWaits, ни цикл его не увидят).
-func TestMaybeArmReplyWaitModeLeftRecordsPass(t *testing.T) {
+func TestAdmissionAfterModeLeftRecordsPass(t *testing.T) {
 	ctx := context.Background()
-	b, db, _ := newFlowBot(t)
+	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
-	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeGreet)); err != nil {
+	if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
 		t.Fatal(err)
 	}
-	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true} // снимок ДО смены режима
-	if b.maybeArmReplyWait(s, testChatID, testUserID, 0) != nil {
-		t.Fatal("stale snapshot must not arm against the DB mode")
+	fc.errWhen = func(method string, _ *telegoapi.RequestData) bool {
+		if method == "restrictChatMember" {
+			if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeGreet)); err != nil {
+				t.Error(err)
+			}
+		}
+		return false
 	}
+	completeReplyAdmission(t, b, 0)
 	if _, ok := b.replies.Take(testChatID, testUserID); ok {
 		t.Fatal("no wait may be armed")
 	}

@@ -350,14 +350,14 @@ func TestSpamDecisionOrderSurvivesChatMigration(t *testing.T) {
 	if err := db.MigrateChat(ctx, old, migrated); err != nil {
 		t.Fatal(err)
 	}
-	if current, err := db.SpamBanStillCurrent(ctx, migrated, migrated, user, verdict); err != nil || current {
+	if current, err := db.SpamBanStillCurrent(ctx, migrated, user, verdict); err != nil || current {
 		t.Fatalf("migrated pardon lost its order: %t / %v", current, err)
 	}
 	next, err := db.BeginDirectSpamDecision(ctx, SpamVote{ChatID: migrated, AuthorID: user}, "test", "test")
 	if err != nil || next <= pardon.PardonID {
 		t.Fatalf("next decision=%d, pardon=%d / %v", next, pardon.PardonID, err)
 	}
-	if current, err := db.SpamBanStillCurrent(ctx, migrated, migrated, user, next); err != nil || !current {
+	if current, err := db.SpamBanStillCurrent(ctx, migrated, user, next); err != nil || !current {
 		t.Fatalf("migrated pardon blocked a fresh decision: %t / %v", current, err)
 	}
 }
