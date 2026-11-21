@@ -487,3 +487,64 @@ func TestPendingEphemeralRoundTripAndGuardedDelete(t *testing.T) {
 		t.Fatalf("matching ephemeral delete missed, left %d", n)
 	}
 }
+
+func TestFunnelEntriesFollowIndividualJoinsAcrossMidnight(t *testing.T) {
+	db := openTest(t)
+	ctx := t.Context()
+	midnight := time.Date(2026, 11, 20, 0, 0, 0, 0, StatsLocation)
+	from := midnight.AddDate(0, 0, -1)
+	const chat, waiting, oldtimer = 10, 30, 90
+	record := func(user int64, kind EventKind, at time.Time) {
+		t.Helper()
+		if err := db.RecordEvent(ctx, chat, user, kind, at, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(waiting, EventJoin, midnight.Add(-time.Minute))
+	record(oldtimer, EventSpamBan, midnight.Add(-time.Second))
+	stats, err := db.QueryStats(ctx, chat, from, midnight)
+	if err != nil || stats.Pending != 1 || stats.SpamBanned != 1 || stats.LegacyPendingEstimate {
+		t.Fatalf("oldtimer ban affected a different user's entry: %+v / %v", stats, err)
+	}
+	record(waiting, EventSpamBan, midnight)
+	record(waiting, EventJoin, midnight.Add(time.Minute))
+	stats, err = db.QueryStats(ctx, chat, from, midnight)
+	if err != nil || stats.Pending != 1 {
+		t.Fatalf("boundary outcome leaked into yesterday: %+v / %v", stats, err)
+	}
+	stats, err = db.QueryStats(ctx, chat, midnight, midnight.AddDate(0, 0, 1))
+	if err != nil || stats.Pending != 1 || stats.Joined != 1 {
+		t.Fatalf("repeat join did not get its own entry: %+v / %v", stats, err)
+	}
+	stats, err = db.QueryStats(ctx, chat, from, midnight.AddDate(0, 0, 1))
+	if err != nil || stats.Pending != 1 || stats.Joined != 2 {
+		t.Fatalf("completion and new entry were conflated: %+v / %v", stats, err)
+	}
+}
+
+func TestLegacyFunnelEstimateKeepsHistory(t *testing.T) {
+	db := openTest(t)
+	now := time.Now()
+	ctx := t.Context()
+	if err := db.RecordEvent(ctx, 1, 2, EventJoin, now, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Model the join row written before the entry table existed.
+	if _, err := db.sql.ExecContext(ctx, "DELETE FROM funnel_entries"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.RecordEvent(ctx, 1, 9, EventSpamBan, now.Add(time.Second), ""); err != nil {
+		t.Fatal(err)
+	}
+	s, err := db.QueryStats(ctx, 1, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil || s.Joined != 1 || s.Pending != 1 || !s.LegacyPendingEstimate {
+		t.Fatalf("legacy history or uncertainty lost: %+v / %v", s, err)
+	}
+	if err := db.RecordEvent(ctx, 1, 2, EventSpamBan, now.Add(2*time.Second), ""); err != nil {
+		t.Fatal(err)
+	}
+	s, err = db.QueryStats(ctx, 1, now.Add(-time.Minute), now.Add(time.Minute))
+	if err != nil || s.Joined != 1 || s.Pending != 0 || !s.LegacyPendingEstimate {
+		t.Fatalf("legacy outcome is no longer estimated: %+v / %v", s, err)
+	}
+}

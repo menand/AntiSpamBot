@@ -178,13 +178,22 @@ func TestMigrateChat_FreshNewSide(t *testing.T) {
 	if _, ok, _ := db.TakeGreetingMsg(ctx, old, 1); ok {
 		t.Error("old-chat greeting must be dropped on migration")
 	}
-	// messages (текстовый след) переключается на новый chat_id, иначе он
-	// раскололся бы между старым и новым id после апгрейда группы.
-	if got, _ := db.QueryMessages(ctx, MessageFilter{ChatID: neu}); len(got) != 1 {
-		t.Errorf("messages not re-keyed to new chat: got %d rows, want 1", len(got))
+	// Telegram message IDs remain scoped to the source. A history
+	// snapshot filtered by the new chat finds the original record.
+	snapshot, err := db.OpenMessageSnapshot(ctx, MessageFilter{ChatID: neu})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got, _ := db.QueryMessages(ctx, MessageFilter{ChatID: old}); len(got) != 0 {
-		t.Errorf("messages still on old chat: got %d rows, want 0", len(got))
+	defer func() { _ = snapshot.Close() }()
+	count := 0
+	for m, err := range snapshot.Messages(ctx) {
+		if err != nil || m.ChatID != old {
+			t.Errorf("migrated history changed source identity: %+v / %v", m, err)
+		}
+		count++
+	}
+	if count != 1 {
+		t.Errorf("want one migrated message, got %d", count)
 	}
 }
 
@@ -283,6 +292,73 @@ func TestMigrateChat_SameIDNoop(t *testing.T) {
 	}
 	if _, ok, _ := db.MemberJoinedAt(ctx, 42, 1); !ok {
 		t.Error("self-migrate wiped data")
+	}
+}
+
+func TestAdmissionBanPendingMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "admission.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := db.AcceptManualAdmission(ctx, PendingAdmission{ChatID: -5, UserID: 7, Generation: "old", Action: AdmissionUnban}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.ExecContext(ctx, `ALTER TABLE pending_admissions DROP COLUMN ban_pending`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	row, ok, err := db.GetPendingAdmission(ctx, old.ChatID, old.UserID)
+	if err != nil || !ok || row != old {
+		t.Fatalf("legacy admission changed: %+v, %v, %v", row, ok, err)
+	}
+	row.BanPending = true
+	if err := db.UpdateAdmissionRights(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateChat(ctx, old.ChatID, -10005); err != nil {
+		t.Fatal(err)
+	}
+	row.ChatID = -10005
+	got, ok, err := db.GetPendingAdmission(ctx, row.ChatID, row.UserID)
+	if err != nil || !ok || got != row {
+		t.Fatalf("pending ban lost in migrated chat: %+v, %v, %v", got, ok, err)
+	}
+}
+
+func TestSpamDecisionOrderSurvivesChatMigration(t *testing.T) {
+	ctx := context.Background()
+	db := openTest(t)
+	const old, migrated, user = -5, -10005, 7
+	verdict, err := db.BeginDirectSpamDecision(ctx, SpamVote{ChatID: old, AuthorID: user}, "test", "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pardon, err := db.AcceptManualAdmission(ctx, PendingAdmission{ChatID: old, UserID: user, Generation: "test", Action: AdmissionUnban}, nil)
+	if err != nil || pardon.PardonID <= verdict {
+		t.Fatalf("invalid pardon order: %+v / %v", pardon, err)
+	}
+	if err := db.MigrateChat(ctx, old, migrated); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := db.SpamBanStillCurrent(ctx, migrated, migrated, user, verdict); err != nil || current {
+		t.Fatalf("migrated pardon lost its order: %t / %v", current, err)
+	}
+	next, err := db.BeginDirectSpamDecision(ctx, SpamVote{ChatID: migrated, AuthorID: user}, "test", "test")
+	if err != nil || next <= pardon.PardonID {
+		t.Fatalf("next decision=%d, pardon=%d / %v", next, pardon.PardonID, err)
+	}
+	if current, err := db.SpamBanStillCurrent(ctx, migrated, migrated, user, next); err != nil || !current {
+		t.Fatalf("migrated pardon blocked a fresh decision: %t / %v", current, err)
 	}
 }
 
@@ -464,5 +540,86 @@ func TestDeleteChat(t *testing.T) {
 	// Но исторические данные остаются.
 	if _, ok, _ := db.MemberJoinedAt(ctx, 1, 100); !ok {
 		t.Error("DeleteChat should keep historical data intact")
+	}
+}
+
+func TestSpamFanoutRecoversLegacyOutcomeAndMigratesTargets(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "fanout.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const oldSource, source, oldFirst, first, second, user = -1, -10001, -2, -10002, -10003, 7
+	v := SpamVote{ChatID: oldSource, BotMsgID: 20, TargetMsgID: 21, AuthorID: user, CreatedAt: time.Now()}
+	if ok, err := db.PutSpamVoteOnce(ctx, v); err != nil || !ok {
+		t.Fatalf("insert vote: %t / %v", ok, err)
+	}
+	id, err := db.AcceptSpamVerdict(ctx, oldSource, v.BotMsgID, func(int, int) (bool, string, bool) {
+		return true, "test", true
+	})
+	if err != nil || id == 0 {
+		t.Fatalf("accept vote: %d / %v", id, err)
+	}
+	if saved, err := db.RecordSpamOutcome(ctx, SpamVerdict{ID: id, SpamVote: v}, SpamBanApplied, time.Now(), "test"); err != nil || !saved {
+		t.Fatalf("save local outcome: %t / %v", saved, err)
+	}
+	// Match the schema before cross-ban progress was introduced.
+	for _, q := range []string{
+		"DROP TABLE spam_verdict_targets",
+		"ALTER TABLE spam_verdicts DROP COLUMN fanout_ready",
+		"ALTER TABLE spam_verdicts DROP COLUMN ban_reason",
+	} {
+		if _, err := db.sql.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	live, found, err := db.SpamVerdict(ctx, id)
+	if err != nil || !found || live.Outcome != SpamBanApplied || live.FanoutReady || live.BanReason != "" {
+		t.Fatalf("existing outcome after schema upgrade: %+v / %t / %v", live, found, err)
+	}
+	if err := db.InitSpamFanout(ctx, id, []int64{oldFirst, first, second}); err != nil {
+		t.Fatal(err)
+	}
+	if started, err := db.StartCrossBan(ctx, id, oldFirst); err != nil || !started {
+		t.Fatalf("start first target: %t / %v", started, err)
+	}
+	if err := db.FinishCrossBan(ctx, live, oldFirst, CrossBanApplied); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateChat(ctx, oldFirst, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MigrateChat(ctx, oldSource, source); err != nil {
+		t.Fatal(err)
+	}
+	live, found, err = db.SpamVerdict(ctx, id)
+	if err != nil || !found || live.ChatID != source || live.BotMsgID != 0 || live.TargetMsgID != 0 || !live.FanoutReady {
+		t.Fatalf("source verdict after migration: %+v / %t / %v", live, found, err)
+	}
+	targets, err := db.CrossBanTargets(ctx, id)
+	if err != nil || len(targets) != 2 || targets[0] != (CrossBanTarget{ChatID: second, Status: CrossBanPending}) ||
+		targets[1] != (CrossBanTarget{ChatID: first, Status: CrossBanApplied}) {
+		t.Fatalf("target progress after migration: %+v / %v", targets, err)
+	}
+	if finished, err := db.FinishSpamVerdict(ctx, id, source); err != nil || finished {
+		t.Fatalf("unfinished target allowed parent removal: %t / %v", finished, err)
+	}
+	if err := db.FinishCrossBan(ctx, live, second, CrossBanSkipped); err != nil {
+		t.Fatal(err)
+	}
+	if finished, err := db.FinishSpamVerdict(ctx, id, source); err != nil || !finished {
+		t.Fatalf("all targets terminal, could not finish parent: %t / %v", finished, err)
+	}
+	if targets, err := db.CrossBanTargets(ctx, id); err != nil || len(targets) != 0 {
+		t.Fatalf("settled target rows were not deleted: %+v / %v", targets, err)
 	}
 }

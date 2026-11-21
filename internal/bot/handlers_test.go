@@ -174,9 +174,9 @@ func TestReconcileChats(t *testing.T) {
 		}
 	})
 
-	t.Run("not in ALLOWED_CHATS drops chat", func(t *testing.T) {
+	t.Run("not in ALLOWED_CHATS preserves approval", func(t *testing.T) {
 		ctx := context.Background()
-		b, db, _ := newFlowBot(t)
+		b, db, fc := newFlowBot(t)
 		chatID := int64(-100100)
 		serviceableChat(t, b, db, chatID)
 		b.cfg.AllowedChats = map[int64]struct{}{-999: {}}
@@ -184,10 +184,8 @@ func TestReconcileChats(t *testing.T) {
 		b.reconcileChats(ctx)
 
 		chats, _ := db.ListChats(ctx)
-		for _, c := range chats {
-			if c.ChatID == chatID {
-				t.Fatal("chat outside ALLOWED_CHATS must be dropped")
-			}
+		if len(chats) != 1 || chats[0].ChatID != chatID || fc.callCount("getChatMember") != 0 {
+			t.Fatal("chat outside ALLOWED_CHATS must retain its registry entry without Telegram calls")
 		}
 	})
 }
@@ -199,7 +197,6 @@ func TestEditedGroupMessage(t *testing.T) {
 		_ = db.SetSpamCheckEnabled(context.Background(), testChatID, true)
 		zero := 0
 		_ = db.SetSpamWhitelistMsgs(context.Background(), testChatID, &zero)
-		b.spamGateCache[testChatID] = true
 		llm := &fakeLLM{enabled: true, spam: false}
 		b.groqc = llm
 		// Mark user 999 as non-admin to avoid skip in spamGatesPass.
@@ -260,7 +257,6 @@ func TestEditedGroupMessage(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		_ = db.SetSpamCheckEnabled(context.Background(), testChatID, true)
-		b.spamGateCache[testChatID] = true
 		llm := &fakeLLM{enabled: true, spam: false}
 		b.groqc = llm
 

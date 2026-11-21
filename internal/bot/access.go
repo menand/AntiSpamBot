@@ -42,6 +42,40 @@ func (b *Bot) userChats(ctx context.Context, userID int64) ([]storage.ChatInfo, 
 	return out, nil
 }
 
+// dailyReportChats verifies roles at delivery time and reports incomplete
+// checks so a temporary Telegram or SQLite error can be retried.
+func (b *Bot) dailyReportChats(ctx context.Context, userID int64) ([]storage.ChatInfo, bool, error) {
+	chats, err := b.db.ListChats(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	var allowed []storage.ChatInfo
+	incomplete := false
+	owner := b.isOwner(userID)
+	for _, chat := range chats {
+		serviceable, err := b.chatServiceableChecked(ctx, chat.ChatID)
+		if err != nil {
+			b.log.Warn("dm report: check chat", "err", err, "chat", chat.ChatID)
+			incomplete = true
+			continue
+		}
+		if !serviceable {
+			continue
+		}
+		if owner {
+			allowed = append(allowed, chat)
+			continue
+		}
+		admin, sure := b.isChatAdminFresh(ctx, chat.ChatID, userID)
+		if !sure {
+			incomplete = true
+		} else if admin {
+			allowed = append(allowed, chat)
+		}
+	}
+	return allowed, incomplete, nil
+}
+
 // canManageChat отвечает, может ли юзер смотреть статистику и крутить
 // настройки конкретного чата: либо владелец бота, либо админ/создатель чата.
 // Админство перепроверяется ЖИВО (getChatMember мимо кэша): в чатах, где бот
@@ -59,14 +93,9 @@ func (b *Bot) canManageChat(ctx context.Context, userID, chatID int64) bool {
 	return b.isChatAdminCached(ctx, chatID, userID)
 }
 
-// chatSettings загружает пер-чатовые настройки для РЕЗОЛВИНГА (параметры
-// капчи, приветствие, пороги антиспама): ошибка логируется здесь, а
-// возвращённая структура всё равно несёт дефолты (это гарантирует
-// GetChatSettings), так что вызывающие резолвят по ней безусловно. НЕ
-// использовать для read-modify-write (тогглы настроек) и для отрисовки
-// экрана настроек — те обязаны звать GetChatSettings напрямую и прерываться
-// на ошибке, иначе запишут/покажут инверсию дефолта вместо сохранённого
-// значения.
+// chatSettings возвращает дефолты при ошибке чтения для путей, которым
+// допустимо продолжить с ними. Гейты доверия и пороги голосований, тогглы
+// и экраны настроек читают GetChatSettings с проверкой ошибки.
 func (b *Bot) chatSettings(ctx context.Context, chatID int64) storage.ChatSettings {
 	s, err := b.db.GetChatSettings(ctx, chatID)
 	if err != nil {

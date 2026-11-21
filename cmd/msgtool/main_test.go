@@ -76,26 +76,16 @@ func TestParseDay(t *testing.T) {
 	}
 }
 
-func TestDerefStr(t *testing.T) {
-	if derefStr(nil) != "" {
-		t.Fatal("nil must yield empty")
-	}
-	s := "abc"
-	if derefStr(&s) != "abc" {
-		t.Fatal("pointer must deref")
-	}
-}
-
 // Оба источника сводятся к одному wireEntry: source/time/RFC3339 и разыменование
 // reply-указателей hot-стороны (nil → пустые строки, не мусор и не паника).
 func TestFromArchiveAndFromHotMapping(t *testing.T) {
 	rid := int64(7)
 	when := time.Date(2026, 10, 1, 21, 30, 0, 0, time.UTC)
 
-	a := fromArchive(archive.Entry{
+	a := fromEntry(archive.Entry{
 		Chat: -100, User: 5, TGMsgID: 9, TS: when.Unix(), Kind: "text", Text: "t",
 		ReplyMsgID: &rid,
-	})
+	}, "archive")
 	if a.Source != "archive" || a.Chat != -100 || a.TGMsgID != 9 {
 		t.Fatalf("fromArchive identity: %+v", a)
 	}
@@ -107,10 +97,10 @@ func TestFromArchiveAndFromHotMapping(t *testing.T) {
 	}
 
 	author, text := "Автор", "цитата"
-	h := fromHot(storage.StoredMessage{
+	h := fromEntry(archive.FromStored(storage.StoredMessage{
 		ChatID: -100, UserID: 5, TGMsgID: 9, TS: when, Kind: "edit", Text: "t2",
 		ReplyAuthor: &author, ReplyText: &text,
-	})
+	}), "hot")
 	if h.Source != "hot" || h.Kind != "edit" || h.ReplyAuthor != author || h.ReplyText != text {
 		t.Fatalf("fromHot mapping: %+v", h)
 	}
@@ -119,7 +109,7 @@ func TestFromArchiveAndFromHotMapping(t *testing.T) {
 	}
 
 	// Nil-reply запись: пустые строки, без паники.
-	plain := fromHot(storage.StoredMessage{TS: when})
+	plain := fromEntry(archive.FromStored(storage.StoredMessage{TS: when}), "hot")
 	if plain.ReplyAuthor != "" || plain.ReplyText != "" || plain.ReplyMsgID != nil {
 		t.Fatalf("nil reply deref: %+v", plain)
 	}

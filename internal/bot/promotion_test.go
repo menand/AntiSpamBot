@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -165,31 +167,57 @@ func TestPromotionDeletesEphemeralCaptcha(t *testing.T) {
 	}
 }
 
-// TestPunishAttemptFailOpenOnAdminCheckError — ошибка живой проверки НЕ
-// отменяет наказание (fail-open, старое поведение): счётчик на пороге — бан
-// всё равно летит, компенсирующего пасса нет.
-func TestPunishAttemptFailOpenOnAdminCheckError(t *testing.T) {
-	ctx := context.Background()
-	b, db, fc := newFlowBot(t)
-	serviceableChat(t, b, db, testChatID)
-	b.cfg.MaxAttempts = 3
-	for range 2 {
-		if _, err := db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 500, Description: "internal"}
-	p := putCaptcha(b, db, testChatID, testUserID, 77)
-
-	if err := b.onFail(ctx, p, "тест"); err != nil {
-		t.Fatalf("fail-open punish must proceed: %v", err)
-	}
-	if n := fc.callCount("banChatMember"); n != 1 {
-		t.Fatalf("banChatMember calls = %d, want 1 (%v)", n, fc.callList())
-	}
-	kinds := statsKinds(t, db, testChatID, testUserID)
-	if kinds[storage.EventBan] != 1 || kinds[storage.EventPass] != 0 {
-		t.Fatalf("want exactly one ban, no pass: %v", kinds)
+func TestPunishmentWaitsForConfirmedRole(t *testing.T) {
+	for _, tc := range []struct {
+		name, status string
+		want         storage.EventKind
+	}{
+		{"after error user became admin", "administrator", storage.EventPass},
+		{"after error user is still member", "member", storage.EventBan},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "deferred.db")
+			b, _, fc := newFlowBot(t)
+			b.db = openPendingRestoreDB(t, ctx, path)
+			serviceableChat(t, b, b.db, testChatID)
+			for range 2 {
+				if _, err := b.db.IncrementAttempt(ctx, testChatID, testUserID, attemptsTTL); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fc.err["getChatMember"] = &telegoapi.Error{ErrorCode: 500, Description: "internal"}
+			expirePunishmentCheck(t, b, storage.ReasonCaptcha)()
+			decision, exists, err := b.db.GetPunishment(ctx, testChatID, testUserID)
+			if err != nil || !exists || decision.Kind != "" || decision.Attempt != 0 {
+				t.Fatalf("failure did not preserve an uncounted decision: %+v, %v, %v", decision, exists, err)
+			}
+			if n, err := b.db.AttemptCount(ctx, testChatID, testUserID, attemptsTTL); err != nil || n != 2 ||
+				fc.callCount("banChatMember") != 0 {
+				t.Fatalf("uncertain role counted or punished: %d, %v, %v", n, err, fc.callList())
+			}
+			if err := b.db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, _, retry := newFlowBot(t)
+			restarted.db = openPendingRestoreDB(t, ctx, path)
+			retry.resp["getChatMember"] = fmt.Sprintf(`{"status":%q,"user":{"id":7}}`, tc.status)
+			restarted.reconcilePunishments(ctx)
+			restarted.reconcilePunishments(ctx)
+			expect := 2
+			if tc.want == storage.EventBan {
+				expect++
+			}
+			if n, err := restarted.db.AttemptCount(ctx, testChatID, testUserID, attemptsTTL); err != nil || n != expect {
+				t.Fatalf("attempts after recovery: %d, %v; want %d", n, err, expect)
+			}
+			if events := statsKinds(t, restarted.db, testChatID, testUserID); events[tc.want] != 1 {
+				t.Fatalf("want one %s: %v", tc.want, events)
+			}
+			if tc.want == storage.EventPass && retry.callCount("banChatMember") != 0 {
+				t.Fatalf("admin was punished: %v", retry.callList())
+			}
+		})
 	}
 }
 
@@ -235,5 +263,74 @@ func TestReplyWaitPunishSkippedForPromotedAdmin(t *testing.T) {
 	}
 	if n, err := db.AttemptCount(ctx, testChatID, testUserID, attemptsTTL); err != nil || n != 0 {
 		t.Fatalf("attempts = %d, err=%v; want 0 — skip must not increment", n, err)
+	}
+}
+
+func TestRestrictedMembershipChangesWithoutStatusChange(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.runCtx = ctx
+	serviceableChat(t, b, db, testChatID)
+	putCaptcha(b, db, testChatID, testUserID, 77)
+	user := telego.User{ID: testUserID}
+	upd := memberUpdate(testChatID, leftActor, user, "restricted", "restricted")
+	upd.ChatMember.OldChatMember = &telego.ChatMemberRestricted{Status: "restricted", User: user, IsMember: true}
+	upd.ChatMember.NewChatMember = &telego.ChatMemberRestricted{Status: "restricted", User: user, IsMember: false}
+	if err := b.handleChatMember(nil, upd); err != nil {
+		t.Fatal(err)
+	}
+	if b.store.IsCaptchaActive(testChatID, testUserID) || len(pendingRows(t, db)) != 0 {
+		t.Fatal("departed restricted user kept a timer")
+	}
+	if kinds := statsKinds(t, db, testChatID, testUserID); kinds[storage.EventLeft] != 1 {
+		t.Fatalf("want one departure: %v", kinds)
+	}
+
+	upd.ChatMember.OldChatMember, upd.ChatMember.NewChatMember = upd.ChatMember.NewChatMember, upd.ChatMember.OldChatMember
+	if err := b.handleChatMember(nil, upd); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		p, ok := b.store.Get(testChatID, testUserID)
+		return ok && p.MessageID != 77
+	})
+	if kinds := statsKinds(t, db, testChatID, testUserID); kinds[storage.EventJoin] != 1 || kinds[storage.EventKick] != 0 ||
+		kinds[storage.EventBan] != 0 || fc.callCount("unbanChatMember") != 0 {
+		t.Fatalf("return did not start a fresh check: %v, %v", kinds, fc.callList())
+	}
+}
+
+func TestRestoreSkipsAbsentRestrictedMembers(t *testing.T) {
+	for _, reason := range []string{storage.ReasonCaptcha, storage.ReasonNoReply} {
+		t.Run(reason, func(t *testing.T) {
+			b, db, fc := newFlowBot(t)
+			ctx := b.runCtx
+			serviceableChat(t, b, db, testChatID)
+			fc.resp["getChatMember"] = `{"status":"restricted","is_member":false,"user":{"id":7}}`
+			expires := time.Now().Add(time.Minute)
+			if reason == storage.ReasonCaptcha {
+				if err := db.PutPending(ctx, storage.PendingRow{ChatID: testChatID, UserID: testUserID, MessageID: 77, ExpiresAt: expires}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := db.SetWelcomeMode(ctx, testChatID, string(welcomeReply)); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.PutPendingReply(ctx, storage.PendingReply{ChatID: testChatID, UserID: testUserID, ExpiresAt: expires}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if n, err := b.restorePending(ctx); n != 0 || err != nil {
+				t.Fatalf("absent user got a captcha timer: %d, %v", n, err)
+			}
+			if n, err := b.restorePendingReplies(ctx); n != 0 || err != nil {
+				t.Fatalf("absent user got a reply timer: %d, %v", n, err)
+			}
+			if kinds := statsKinds(t, db, testChatID, testUserID); kinds[storage.EventLeft] != 1 ||
+				fc.callCount("banChatMember") != 0 || fc.callCount("unbanChatMember") != 0 {
+				t.Fatalf("unexpected effect of restoring an absent member: %v, %v", kinds, fc.callList())
+			}
+		})
 	}
 }

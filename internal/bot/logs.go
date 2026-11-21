@@ -14,21 +14,22 @@ import (
 const maxLogUploadBytes = 50 * 1024 * 1024
 
 func (b *Bot) handleLogsCommand(ctx *th.Context, message telego.Message) error {
-	if message.Chat.Type != "private" {
+	if message.From == nil || !isOwnPrivateChat(message.Chat, message.From.ID) {
 		return nil
 	}
-	if message.From == nil || !b.isOwner(message.From.ID) {
+	userID := message.From.ID
+	if !b.isOwner(userID) {
 		// Отбивка-отказ — экран screenNotice: повторный отказ заменит
 		// прошлый, но экраны панели и флоу не тронет.
-		_, _ = b.sendScreen(ctx, message.Chat.ID, screenNotice,
+		_, _ = b.sendScreen(ctx, userID, screenNotice,
 			"Команда доступна только владельцам бота (OWNER_IDS).", false, nil)
 		return nil
 	}
 	// Все сообщения /logs — один заменяемый экран screenLogs: повторный вызов
 	// гасит прошлый файл/отбивку, файлы не копятся стопкой.
 	notice := func(text string, html bool) {
-		if _, err := b.sendScreen(ctx, message.Chat.ID, screenLogs, text, html, nil); err != nil {
-			b.log.Warn("send logs notice", "err", err, "user", message.From.ID)
+		if _, err := b.sendScreen(ctx, userID, screenLogs, text, html, nil); err != nil {
+			b.log.Warn("send logs notice", "err", err, "user", userID)
 		}
 	}
 	if b.cfg.LogFile == "" {
@@ -64,13 +65,13 @@ func (b *Bot) handleLogsCommand(ctx *th.Context, message telego.Message) error {
 
 	filename := fmt.Sprintf("bot-%s.log", time.Now().UTC().Format("2006-01-02-150405"))
 	sent, err := b.api.SendDocument(ctx,
-		tu.Document(tu.ID(message.Chat.ID), tu.File(tu.NameReader(file, filename))).
+		tu.Document(tu.ID(userID), tu.File(tu.NameReader(file, filename))).
 			WithCaption(fmt.Sprintf("📄 %s (%.1f КБ)", filename, float64(info.Size())/1024)))
 	if err != nil {
 		b.log.Warn("send logs", "err", err)
 		notice(fmt.Sprintf("Ошибка отправки: %v", err), false)
 		return nil
 	}
-	b.replaceScreen(ctx, message.Chat.ID, screenLogs, sent.MessageID)
+	b.replaceScreen(ctx, userID, screenLogs, sent.MessageID)
 	return nil
 }

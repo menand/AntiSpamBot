@@ -151,7 +151,7 @@ func TestOnSuccessWelcomeModes(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		pend := putCaptcha(b, db, testChatID, testUserID, 77)
-		if err := b.onSuccess(ctx, pend, ""); err != nil {
+		if err := completeTestCaptcha(ctx, b, pend); err != nil {
 			t.Fatal(err)
 		}
 		if kinds := statsKinds(t, db, testChatID, testUserID); kinds[storage.EventPass] != 1 {
@@ -169,7 +169,7 @@ func TestOnSuccessWelcomeModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		pend := putCaptcha(b, db, testChatID, testUserID, 77)
-		if err := b.onSuccess(ctx, pend, ""); err != nil {
+		if err := completeTestCaptcha(ctx, b, pend); err != nil {
 			t.Fatal(err)
 		}
 		if kinds := statsKinds(t, db, testChatID, testUserID); kinds[storage.EventPass] != 1 {
@@ -187,7 +187,7 @@ func TestOnSuccessWelcomeModes(t *testing.T) {
 			t.Fatal(err)
 		}
 		pend := putCaptcha(b, db, testChatID, testUserID, 77)
-		if err := b.onSuccess(ctx, pend, ""); err != nil {
+		if err := completeTestCaptcha(ctx, b, pend); err != nil {
 			t.Fatal(err)
 		}
 		// Пасс отложен до ответа (при записи ответа его поставит

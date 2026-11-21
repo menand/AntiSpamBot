@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"strconv"
@@ -98,17 +99,30 @@ func (b *Bot) handleUnmodCommand(ctx *th.Context, message telego.Message, action
 		if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
 			b.log.Debug("delete unmod command", "err", err, "chat", chatID)
 		}
-		text, err := b.execUnmod(action, chatID, targetID)
+		var full fullUnbanRequest
+		text, err := b.execUnmod(action, chatID, targetID, &full)
 		if err != nil {
 			b.log.Warn("unmod action failed", "err", err,
 				"action", action, "chat", chatID, "target", targetID)
-			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message),
-				"Не получилось — проверь мои права.")
+			if text == "" {
+				text = "Не получилось — проверь мои права."
+			}
+			b.sendPlain(chatID, threadOf(message), b.modReceiver(chatID, message), text)
 			return nil
 		}
 		b.log.Info("unmod command", "action", action, "chat", chatID,
 			"target", targetID, "by", message.From.ID)
+		requesterID := message.From.ID
+		if message.From.IsBot {
+			requesterID = 0 // Telegram does not supply the anonymous admin's ID.
+		}
+		if action == "f" {
+			text += fullUnbanAnnouncement(requesterID)
+		}
 		b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), text)
+		if action == "f" {
+			b.startFullUnbanFanout(targetID, requesterID, full)
+		}
 		return nil
 	}
 	// @username в аргументе был, но резолв не удался — плашка тут сбила бы с
@@ -191,7 +205,24 @@ func unmodListView(title, action string, recent []storage.RecentUser, infos map[
 
 // execUnmod применяет действие к юзеру и возвращает HTML-строку итога.
 // Все ветки идемпотентны — повторный клик или гонка двух админов безвредны.
-func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
+func (b *Bot) execUnmod(action string, chatID, targetID int64, full *fullUnbanRequest) (string, error) {
+	if action == storage.AdmissionUnban || action == storage.AdmissionWhitelist {
+		return b.execPersistentUnmod(action, chatID, targetID)
+	}
+	if action == "f" {
+		ctx, cancel := b.liveCtx()
+		defer cancel()
+		return b.execFullUnban(ctx, chatID, targetID, true, full)
+	}
+	unlock, err := b.rights.lock(b.runCtx, chatID, targetID, false)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+
+	if err := b.checkManualMute(b.runCtx, chatID, targetID); err != nil {
+		return "Бот сверяет предыдущий мут. Повторите команду после сверки.", err
+	}
 	mention := b.mentionFor(targetID)
 
 	// Та же дисциплина, что у /kick|/ban (cleanupTargetTraces): восстанав-
@@ -220,54 +251,6 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		}
 	}
 	switch action {
-	case "u":
-		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
-			return "", err
-		}
-		// Наш собственный UnbanChatMember не проходит forgiveness-хук
-		// handleChatMember (тот игнорирует события от самого бота) — снимаем
-		// глобальный флаг спамера сами, иначе join-хук банил бы заново.
-		if _, err := b.db.DeleteSpamBanned(b.runCtx, targetID); err != nil {
-			b.log.Warn("unban: delete spam banned", "err", err, "user", targetID)
-		}
-		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
-			b.log.Warn("unban: reset attempts", "err", err, "chat", chatID, "user", targetID)
-		}
-		// Карантин — полный release, НЕ dropQuarantineState (в отличие от
-		// /mute): список «10 последних» строится по историческим событиям
-		// ban/spamban, поэтому выбранный юзер может быть не забанен, а
-		// активно карантинить (текст-онли). Drop без release оставил бы
-		// серверный рестрикт висеть до until_date, но выключил бы цензора
-		// ссылок/форвардов и счётчик эскалации — половинчатый карантин.
-		// Для реально забаненного release идемпотентен и безвреден: бан
-		// рестрикт не снимает, отсутствие юзера даст максимум Warn.
-		_, _ = b.releaseQuarantineUser(chatID, targetID)
-		return "♻️ " + mention + " разбанен — может зайти заново.", nil
-	case "f":
-		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
-			return "", err
-		}
-		// removed — был ли юзер в глобальной базе спамеров: для честного
-		// текста итога (наш unban forgiveness-хук не проходит).
-		removed, derr := b.db.DeleteSpamBanned(b.runCtx, targetID)
-		if derr != nil {
-			b.log.Warn("fullunban: delete spam banned", "err", derr, "user", targetID)
-		}
-		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
-			b.log.Warn("fullunban: reset attempts", "err", err, "chat", chatID, "user", targetID)
-		}
-		// Карантин — как в ветке «u» (полный release; список исторический).
-		_, _ = b.releaseQuarantineUser(chatID, targetID)
-		// Остальные чаты и их attempts — в фоне: обход реестра с ретраями
-		// не должен висеть на хендлере/кнопке (прецедент spamVerdictFanout).
-		b.goSafe("fullunbanFanout", func() {
-			b.fullUnbanEverywhere(chatID, targetID)
-		})
-		text := "🌍 " + mention + " полностью разбанен во всех моих чатах"
-		if removed {
-			text += " и вычеркнут из базы спамеров"
-		}
-		return text + ".", nil
 	case "m":
 		// Снятие мьюта = вернуть дефолтные права чата — ровно то, что release
 		// делает после пройденной капчи.
@@ -280,46 +263,177 @@ func (b *Bot) execUnmod(action string, chatID, targetID int64) (string, error) {
 		// рестрикт до его until_date из ниоткуда.
 		b.dropQuarantineState(chatID, targetID)
 		return "🔊 " + mention + " снова может писать.", nil
-	case "w":
-		if err := b.db.AddTrusted(b.runCtx, chatID, targetID, time.Now()); err != nil {
-			return "", err
-		}
-		// Провал капчи мог кончиться перманентным баном — снимаем (no-op без
-		// бана), иначе «доверенный» не смог бы даже войти.
-		if err := b.unban(b.runCtx, chatID, targetID); err != nil {
-			b.log.Warn("whitelist: unban", "err", err, "chat", chatID, "user", targetID)
-		}
-		if err := b.db.ResetAttempts(b.runCtx, chatID, targetID); err != nil {
-			b.log.Warn("whitelist: reset attempts", "err", err, "chat", chatID, "user", targetID)
-		}
-		// Полный release (в отличие от u/f/m): доверенный войдёт БЕЗ капчи —
-		// подменить старый текст-рестрикт будет нечем. Если карантин активен
-		// (юзер в чате), снимаем и серверный рестрикт сразу.
-		_, _ = b.releaseQuarantineUser(chatID, targetID)
-		return "🤝 " + mention + " в доверенных — войдёт без капчи.", nil
+
 	}
 	return "", fmt.Errorf("unknown unmod action %q", action)
 }
 
-// fullUnbanEverywhere снимает бан и счётчик попыток во всех остальных чатах
-// реестра. Unban идемпотентен (OnlyIfBanned), ошибка одного чата (обычно нет
-// прав) — Warn и дальше. Доверенные юзеры исключением не служат: разбан
-// никому не вредит.
-func (b *Bot) fullUnbanEverywhere(originChatID, userID int64) {
-	chats, err := b.serviceableGroupChatsExcept(originChatID)
-	if err != nil {
-		b.log.Warn("fullunban: list chats", "err", err)
+func fullUnbanAnnouncement(requesterID int64) string {
+	if requesterID <= 0 {
+		return "\nЗапускаю обход остальных чатов. Для анонимной команды личный отчёт недоступен."
+	}
+	return "\nЗапускаю обход остальных чатов. Итог отправлю в ЛС."
+}
+
+type fullUnbanRequest struct {
+	chats    []storage.ChatInfo
+	pardonID int64
+	listErr  error
+}
+
+func (b *Bot) startFullUnbanFanout(userID, requesterID int64, full fullUnbanRequest) {
+	b.goSafe("fullunbanFanout", func() {
+		b.fullUnbanEverywhere(userID, requesterID, full)
+	})
+}
+
+func (b *Bot) fullUnbanEverywhere(userID, requesterID int64, full fullUnbanRequest) {
+	if full.listErr != nil {
+		b.log.Warn("fullunban: list chats", "err", full.listErr)
+		b.sendFullUnbanResult(requesterID, "Не удалось получить список чатов для обхода.")
 		return
 	}
-	for _, c := range chats {
-		if err := b.unban(b.runCtx, c.ChatID, userID); err != nil {
-			b.log.Warn("fullunban: cross-chat unban", "err", err, "chat", c.ChatID, "user", userID)
-			continue
+	chats := full.chats
+	results := make([]string, len(chats))
+	for i, chat := range chats {
+		results[i] = b.fullUnbanChat(chat.ChatID, userID, full.pardonID)
+	}
+	if requesterID <= 0 {
+		return
+	}
+	var lines []string
+	for i, chat := range chats {
+		if !b.isOwner(requesterID) {
+			admin, sure := b.isChatAdminFresh(b.runCtx, chat.ChatID, requesterID)
+			if !sure || !admin {
+				continue
+			}
 		}
-		if err := b.db.ResetAttempts(b.runCtx, c.ChatID, userID); err != nil {
-			b.log.Warn("fullunban: reset attempts", "err", err, "chat", c.ChatID, "user", userID)
+		chat.Title = truncateLabel(titleOrID(chat), 60)
+		lines = append(lines, chatLinkHTML(chat)+" — "+results[i])
+	}
+	if len(lines) == 0 {
+		b.sendFullUnbanResult(requesterID, "Обход завершён. В отчёт входят только чаты, которыми вы управляете.")
+		return
+	}
+	header := "🌍 <b>Итоги обхода для " + b.mentionFor(userID) + "</b>\n"
+	var body strings.Builder
+	body.WriteString(header)
+	budget := reportRuneBudget
+	for _, line := range lines {
+		size := len([]rune(line)) + 1
+		if size > budget {
+			b.sendFullUnbanResult(requesterID, body.String())
+			body.Reset()
+			body.WriteString(header)
+			budget = reportRuneBudget
 		}
-		b.log.Info("fullunban: cross-chat unban", "chat", c.ChatID, "user", userID)
+		body.WriteByte('\n')
+		body.WriteString(line)
+		budget -= size
+	}
+	b.sendFullUnbanResult(requesterID, body.String())
+}
+
+func (b *Bot) fullUnbanChat(chatID, userID, pardonID int64) string {
+	text, err := b.execFullUnban(b.runCtx, chatID, userID, false, &fullUnbanRequest{pardonID: pardonID})
+	if err != nil {
+		b.log.Warn("fullunban: cross-chat unban", "err", err, "chat", chatID, "user", userID)
+	}
+	return text
+}
+
+func (b *Bot) execFullUnban(ctx context.Context, chatID, userID int64, origin bool, full *fullUnbanRequest) (string, error) {
+	unlock, err := b.rights.lock(ctx, chatID, userID, false)
+	if err != nil {
+		return "проверка прервана", err
+	}
+	defer unlock()
+	allowed, err := b.chatServiceableChecked(ctx, chatID)
+	if err != nil {
+		return "не удалось проверить доступ к чату", err
+	}
+	if !allowed {
+		return "чат больше не обслуживается", fmt.Errorf("chat %d no longer serviceable", chatID)
+	}
+	if err := b.checkManualMute(ctx, chatID, userID); err != nil {
+		return "Бот сверяет предыдущий мут. Повторите команду после сверки.", err
+	}
+	action := storage.AdmissionUnbanChat
+	var wasSpamBanned bool
+	var otherChats []int64
+	if origin {
+		action = storage.AdmissionUnban
+		full.chats, full.listErr = b.serviceableGroupChatsExcept(chatID)
+		otherChats = make([]int64, len(full.chats))
+		for i, chat := range full.chats {
+			otherChats[i] = chat.ChatID
+		}
+		wasSpamBanned, err = b.db.IsSpamBanned(ctx, userID)
+		if err != nil {
+			b.log.Warn("fullunban: read spam banned", "err", err, "user", userID)
+		}
+	} else {
+		if full.pardonID > 0 {
+			newer, err := b.db.NewerSpamDecision(ctx, chatID, userID, full.pardonID)
+			if err != nil {
+				return "не удалось сверить спам-вердикты", err
+			}
+			if newer {
+				return "действует более свежий спам-вердикт", nil
+			}
+		}
+		// В чужом чате обычная проверка входа остаётся активной.
+		_, pending, err := b.db.GetPunishment(ctx, chatID, userID)
+		if err != nil {
+			return "не удалось проверить предыдущие наказания", err
+		}
+		if !pending {
+			row, found, err := b.db.GetPendingAdmission(ctx, chatID, userID)
+			if err != nil {
+				return "не удалось проверить текущий допуск", err
+			}
+			if !found || row.Action != action {
+				if err := b.unban(ctx, chatID, userID); err != nil {
+					return "разбан не подтверждён", err
+				}
+				if err := b.db.ResetAttempts(ctx, chatID, userID); err != nil {
+					return "разбан подтверждён, попытки не сброшены", err
+				}
+				return "разбан подтверждён, попытки сброшены", nil
+			}
+		}
+	}
+	row, err := b.prepareManualAdmission(ctx, action, chatID, userID, full.pardonID, otherChats)
+	if err != nil {
+		return "не удалось сохранить решение о разбане", err
+	}
+	if origin {
+		full.pardonID = row.PardonID
+	}
+	confirmed, err := b.applyManualAdmission(ctx, row)
+	if !confirmed {
+		return "разбан не подтверждён. Решение сохранено, бот повторит запрос.", err
+	}
+	if err != nil {
+		b.log.Warn("fullunban: confirmed unban still pending local cleanup", "err", err, "chat", chatID, "user", userID)
+		return "Разбан подтверждён. Восстановление прав и сброс попыток ещё не завершены, бот повторит сверку.", nil
+	}
+	if !origin {
+		return "разбан подтверждён, попытки сброшены", nil
+	}
+	text := "Разбан в этом чате подтверждён для " + b.mentionFor(userID) + "."
+	if wasSpamBanned {
+		if remains, err := b.db.IsSpamBanned(ctx, userID); err == nil && !remains {
+			text += " Запись в базе спамеров удалена."
+		}
+	}
+	return text, nil
+}
+
+func (b *Bot) sendFullUnbanResult(userID int64, text string) {
+	if userID > 0 {
+		b.sendHTML(userID, 0, 0, text)
 	}
 }
 
@@ -379,12 +493,15 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 		return nil
 	}
 
-	text, err := b.execUnmod(action, chatID, targetID)
+	var full fullUnbanRequest
+	text, err := b.execUnmod(action, chatID, targetID, &full)
 	if err != nil {
 		b.log.Warn("unmod choice failed", "err", err,
 			"action", action, "chat", chatID, "target", targetID)
-		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).
-			WithText("Не получилось — проверь мои права.").WithShowAlert())
+		if text == "" {
+			text = "Не получилось — проверь мои права."
+		}
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).WithText(text).WithShowAlert())
 		return nil
 	}
 	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID).WithText("Готово."))
@@ -392,6 +509,9 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 		"target", targetID, "by", query.From.ID)
 	// Итог редактируется в саму плашку, клавиатура снимается. Гонка двух
 	// админов даёт повторный edit тем же текстом — isNotModified глушим.
+	if action == "f" {
+		text += fullUnbanAnnouncement(query.From.ID)
+	}
 	result := text + "\n<i>(" + html.EscapeString(userLabel(query.From)) + ")</i>"
 	if _, err := b.api.EditMessageText(b.runCtx, &telego.EditMessageTextParams{
 		ChatID:    tu.ID(chatID),
@@ -401,6 +521,10 @@ func (b *Bot) handleModChoiceCallback(ctx *th.Context, query telego.CallbackQuer
 	}); err != nil && !isNotModified(err) {
 		b.log.Warn("edit unmod list result", "err", err, "chat", chatID)
 	}
+	if action == "f" {
+		b.startFullUnbanFanout(targetID, query.From.ID, full)
+	}
+
 	return nil
 }
 

@@ -143,3 +143,27 @@ func (d *DB) HasQuarantine(ctx context.Context, chatID, userID, now int64) (bool
 	}
 	return true, nil
 }
+
+// ActiveQuarantineUntil возвращает срок для сверки ограничения с Telegram.
+func (d *DB) ActiveQuarantineUntil(ctx context.Context, chatID, userID, now int64) (int64, error) {
+	row, err := d.ActiveQuarantine(ctx, chatID, userID, now)
+	if row.UntilAt.IsZero() {
+		return 0, err
+	}
+	return row.UntilAt.Unix(), err
+}
+
+func (d *DB) ActiveQuarantine(ctx context.Context, chatID, userID, now int64) (QuarantineRow, error) {
+	row := QuarantineRow{ChatID: chatID, UserID: userID}
+	var until int64
+	err := d.sql.QueryRowContext(ctx, `SELECT until_at, warned FROM chat_quarantine
+		WHERE chat_id = ? AND user_id = ? AND until_at > ?`, chatID, userID, now).Scan(&until, &row.Warned)
+	if err == sql.ErrNoRows {
+		return row, nil
+	}
+	if err != nil {
+		return row, fmt.Errorf("read active quarantine: %w", err)
+	}
+	row.UntilAt = time.Unix(until, 0)
+	return row, nil
+}

@@ -122,57 +122,101 @@ func TestOwnerDMLinkDroppedOnChatMigration(t *testing.T) {
 	}
 }
 
-// TestOwnerDMLinkDevTableWithoutBotID — dev-БД, где owner_dm_links успела
-// появиться в прежней форме (PK без bot_id): Open обязан пройти (ALTER
-// добавляет bot_id), старые строки не находятся ни у какого бота, а новая
-// запись кладётся поверх старого PK.
-func TestOwnerDMLinkDevTableWithoutBotID(t *testing.T) {
-	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "legacy.db")
+func TestOwnerDMLinkKeyMigration(t *testing.T) {
+	for _, tc := range []struct {
+		name, botColumn, primaryKey string
+		knownBot                    bool
+	}{
+		{name: "fresh"},
+		{name: "legacy", primaryKey: "owner_id, dm_message_id"},
+		{name: "partially migrated", botColumn: "bot_id INTEGER NOT NULL DEFAULT 0,", primaryKey: "owner_id, dm_message_id", knownBot: true},
+		{name: "different key order", botColumn: "bot_id INTEGER NOT NULL DEFAULT 0,", primaryKey: "owner_id, dm_message_id, bot_id", knownBot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "links.db")
+			if tc.primaryKey != "" {
+				raw, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = raw.ExecContext(ctx, `
+					CREATE TABLE owner_dm_links (
+						`+tc.botColumn+`
+						owner_id INTEGER NOT NULL, dm_message_id INTEGER NOT NULL, chat_id INTEGER NOT NULL,
+						thread_id INTEGER NOT NULL DEFAULT 0, source_msg_id INTEGER NOT NULL,
+						is_forward INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL,
+						PRIMARY KEY (`+tc.primaryKey+`)
+					);
+					CREATE INDEX idx_owner_dm_links_at ON owner_dm_links(at);
+					INSERT INTO owner_dm_links (owner_id, dm_message_id, chat_id, thread_id, source_msg_id, is_forward, at)
+					VALUES (7, 900, -1001, 11, 500, 1, 1234);
+				`)
+				if err == nil && tc.knownBot {
+					_, err = raw.ExecContext(ctx, `INSERT INTO owner_dm_links VALUES (42, 7, 901, -1005, 12, 501, 1, 1235)`)
+				}
+				closeErr := raw.Close()
+				if err != nil || closeErr != nil {
+					t.Fatalf("seed older schema: %v / %v", err, closeErr)
+				}
+			}
 
-	raw, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatalf("open raw: %v", err)
-	}
-	if _, err := raw.ExecContext(ctx, `
-		CREATE TABLE owner_dm_links (
-			owner_id      INTEGER NOT NULL,
-			dm_message_id INTEGER NOT NULL,
-			chat_id       INTEGER NOT NULL,
-			thread_id     INTEGER NOT NULL DEFAULT 0,
-			source_msg_id INTEGER NOT NULL,
-			is_forward    INTEGER NOT NULL DEFAULT 0,
-			at            INTEGER NOT NULL,
-			PRIMARY KEY (owner_id, dm_message_id)
-		);
-		INSERT INTO owner_dm_links VALUES (7, 900, -1001, 0, 500, 1, 0);
-	`); err != nil {
-		t.Fatalf("seed legacy table: %v", err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatalf("close raw: %v", err)
-	}
-
-	db, err := Open(ctx, path)
-	if err != nil {
-		t.Fatalf("open with legacy owner_dm_links: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	// bot_id = 0 у старых строк: мост не должен находить их ни у какого бота.
-	if link, ok, err := db.OwnerDMLink(ctx, testLinkBotID, 7, 900); err != nil || ok {
-		t.Fatalf("legacy row must not resolve: ok=%v err=%v link=%+v", ok, err, link)
-	}
-	// Новая запись по той же паре заменяет легаси-строку (старый PK).
-	if err := db.PutOwnerDMLink(ctx, testLinkBotID, 7, 900, -1002, 0, 600, false, time.Now()); err != nil {
-		t.Fatalf("put link over legacy row: %v", err)
-	}
-	link, ok, err := db.OwnerDMLink(ctx, testLinkBotID, 7, 900)
-	if err != nil || !ok {
-		t.Fatalf("new row must resolve: ok=%v err=%v", ok, err)
-	}
-	if link.ChatID != -1002 || link.SourceMsgID != 600 || link.IsForward {
-		t.Fatalf("new row = %+v, want chat -1002 source 600 card", link)
+			for opening := range 2 {
+				db, err := Open(ctx, path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = db.Close() })
+				var key string
+				if err := db.sql.QueryRowContext(ctx, `
+					SELECT group_concat(name, ',' ORDER BY pk)
+					FROM pragma_table_info('owner_dm_links') WHERE pk > 0
+				`).Scan(&key); err != nil {
+					t.Fatal(err)
+				}
+				if key != "bot_id,owner_id,dm_message_id" {
+					t.Fatalf("unexpected primary key on open %d: %q", opening, key)
+				}
+				var indexed string
+				if err := db.sql.QueryRowContext(ctx, `SELECT name FROM pragma_index_info('idx_owner_dm_links_at')`).Scan(&indexed); err != nil || indexed != "at" {
+					t.Fatalf("pruning index missing: %q / %v", indexed, err)
+				}
+				if tc.primaryKey != "" {
+					var preserved int
+					if err := db.sql.QueryRowContext(ctx, `SELECT source_msg_id FROM owner_dm_links WHERE bot_id = 0 AND owner_id = 7 AND dm_message_id = 900`).Scan(&preserved); err != nil || preserved != 500 {
+						t.Fatalf("unknown-bot link lost: %d / %v", preserved, err)
+					}
+					if _, ok, err := db.OwnerDMLink(ctx, 0, 7, 900); err != nil || ok {
+						t.Fatalf("unknown-bot link was exposed: %v / %v", ok, err)
+					}
+				}
+				if tc.knownBot {
+					link, ok, err := db.OwnerDMLink(ctx, testLinkBotID, 7, 901)
+					if err != nil || !ok || link.SourceMsgID != 501 || link.ThreadID != 12 || !link.IsForward {
+						t.Fatalf("known legacy link changed: %+v / %v / %v", link, ok, err)
+					}
+				}
+				if opening == 0 {
+					if _, ok, err := db.OwnerDMLink(ctx, testLinkBotID, 7, 900); err != nil || ok {
+						t.Fatalf("legacy link was assigned to a new bot: %v / %v", ok, err)
+					}
+					for _, bot := range []int64{testLinkBotID, 99} {
+						if err := db.PutOwnerDMLink(ctx, bot, 7, 900, -bot, 0, 600, false, time.Now()); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				for _, bot := range []int64{testLinkBotID, 99} {
+					link, ok, err := db.OwnerDMLink(ctx, bot, 7, 900)
+					if err != nil || !ok || link.ChatID != -bot {
+						t.Fatalf("bot %d lost its link: %+v / %v / %v", bot, link, ok, err)
+					}
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
 	}
 }
 

@@ -167,11 +167,12 @@ func TestFullunbanSweepsChatsAndBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	text, err := b.execUnmod("f", testChatID, 555)
+	var full fullUnbanRequest
+	text, err := b.execUnmod("f", testChatID, 555, &full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, "полностью разбанен") || !strings.Contains(text, "вычеркнут из базы спамеров") {
+	if !strings.Contains(text, "Разбан в этом чате подтверждён") || !strings.Contains(text, "Запись в базе спамеров удалена") {
 		t.Fatalf("want full-unban summary with base cleanup, got:\n%s", text)
 	}
 	if banned, err := db.IsSpamBanned(ctx, 555); err != nil || banned {
@@ -180,6 +181,8 @@ func TestFullunbanSweepsChatsAndBase(t *testing.T) {
 	if n, err := db.AttemptCount(ctx, testChatID, 555, ttl); err != nil || n != 0 {
 		t.Fatalf("attempts in origin chat must be reset (n=%d err=%v)", n, err)
 	}
+
+	b.startFullUnbanFanout(555, 7, full)
 
 	// Fanout асинхронный: поллим само DB-условие (attempts второго чата
 	// сброшены) — счётчик unban-вызовов инкрементится до коммита ResetAttempts,
@@ -210,7 +213,7 @@ func TestUnbanStaysLocal(t *testing.T) {
 	serviceableChat(t, b, db, testChatID)
 	serviceableChat(t, b, db, -100200)
 
-	text, err := b.execUnmod("u", testChatID, 555)
+	text, err := b.execUnmod("u", testChatID, 555, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"errors"
+
 	"github.com/mymmrac/telego"
 	th "github.com/mymmrac/telego/telegohandler"
 )
@@ -33,6 +35,12 @@ func (b *Bot) handleTrustCommand(ctx *th.Context, message telego.Message) error 
 	recv := b.modReceiver(chatID, message)
 	mention := b.mentionFor(targetID)
 	released, err := b.releaseQuarantineUser(chatID, targetID)
+	if errors.Is(err, errQuarantineUnconfirmed) {
+		b.log.Warn("trust deferred", "err", err, "chat", chatID, "target", targetID)
+		b.sendPlain(chatID, threadOf(message), recv,
+			"Снятие отложено. Не удалось подтвердить карантин, попробуй ещё раз.")
+		return nil
+	}
 	if err != nil {
 		b.sendPlain(chatID, threadOf(message), recv,
 			"Не получилось снять карантин — проверь мои права и попробуй ещё раз.")

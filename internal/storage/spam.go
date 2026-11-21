@@ -44,9 +44,11 @@ func (d *DB) PutSpamVoteOnce(ctx context.Context, v SpamVote) (bool, error) {
 		SELECT ?, ?, ?, ?, ?, ?, ?
 		WHERE NOT EXISTS (
 			SELECT 1 FROM spam_votes WHERE chat_id = ? AND author_id = ?
+		) AND NOT EXISTS (
+			SELECT 1 FROM spam_verdicts WHERE chat_id = ? AND author_id = ?
 		)
 	`, v.ChatID, v.BotMsgID, v.TargetMsgID, v.AuthorID, v.InitiatorID,
-		v.Prob, v.CreatedAt.Unix(), v.ChatID, v.AuthorID)
+		v.Prob, v.CreatedAt.Unix(), v.ChatID, v.AuthorID, v.ChatID, v.AuthorID)
 	if err != nil {
 		return false, fmt.Errorf("put spam vote once: %w", err)
 	}
@@ -236,7 +238,13 @@ type Ballot struct {
 // ListBallots — все голоса активного голосования. Вызывать ДО TakeSpamVote:
 // он удаляет бюллетени в своей транзакции.
 func (d *DB) ListBallots(ctx context.Context, chatID int64, botMsgID int) ([]Ballot, error) {
-	rows, err := d.sql.QueryContext(ctx,
+	return readBallots(ctx, d.sql, chatID, botMsgID)
+}
+
+func readBallots(ctx context.Context, query interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, chatID int64, botMsgID int) ([]Ballot, error) {
+	rows, err := query.QueryContext(ctx,
 		`SELECT voter_id, is_spam FROM spam_ballots WHERE chat_id = ? AND bot_msg_id = ?`,
 		chatID, botMsgID)
 	if err != nil {
@@ -549,6 +557,24 @@ func (d *DB) MarkDailyReportSent(ctx context.Context, userID int64, day string) 
 	return d.setOwnerCol(ctx, userID, "last_report_day", day)
 }
 
+func (d *DB) DailyReportProgress(ctx context.Context, userID int64, day string) (messageID int, bodyHash string, err error) {
+	err = d.sql.QueryRowContext(ctx, `
+		SELECT message_id, body_hash FROM daily_report_progress WHERE user_id = ? AND day = ?
+	`, userID, day).Scan(&messageID, &bodyHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, "", nil
+	}
+	return messageID, bodyHash, err
+}
+
+func (d *DB) SaveDailyReportProgress(ctx context.Context, userID int64, day string, messageID int, bodyHash string) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO daily_report_progress (user_id, day, message_id, body_hash) VALUES (?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET day = excluded.day, message_id = excluded.message_id, body_hash = excluded.body_hash
+	`, userID, day, messageID, bodyHash)
+	return err
+}
+
 func boolToInt(b bool) int {
 	if b {
 		return 1
@@ -556,15 +582,17 @@ func boolToInt(b bool) int {
 	return 0
 }
 
+const putGreetingSQL = `
+	INSERT INTO greetings (chat_id, user_id, message_id, sent_at)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(chat_id, user_id) DO UPDATE SET
+		message_id = excluded.message_id, sent_at = excluded.sent_at
+`
+
 // PutGreeting запоминает message_id приветствия для (chat, user), чтобы при
 // спам-бане снести и его. Повторный вход перезаписывает.
 func (d *DB) PutGreeting(ctx context.Context, chatID, userID int64, messageID int, at time.Time) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO greetings (chat_id, user_id, message_id, sent_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(chat_id, user_id) DO UPDATE SET
-			message_id = excluded.message_id, sent_at = excluded.sent_at
-	`, chatID, userID, messageID, at.Unix())
+	_, err := d.sql.ExecContext(ctx, putGreetingSQL, chatID, userID, messageID, at.Unix())
 	if err != nil {
 		return fmt.Errorf("put greeting: %w", err)
 	}
@@ -588,9 +616,18 @@ func (d *DB) TakeGreetingMsg(ctx context.Context, chatID, userID int64) (int, bo
 	return msgID, true, nil
 }
 
+// DeleteGreetingIfMsg убирает ссылку только на конкретное приветствие.
+func (d *DB) DeleteGreetingIfMsg(ctx context.Context, chatID, userID int64, msgID int) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM greetings WHERE chat_id = ? AND user_id = ? AND message_id = ?`,
+		chatID, userID, msgID)
+	if err != nil {
+		return fmt.Errorf("delete greeting by message: %w", err)
+	}
+	return nil
+}
+
 // GetGreetingMsg возвращает message_id приветствия БЕЗ удаления строки.
-// Нужен, чтобы снять клавиатуру после ответа юзера, сохранив запись для
-// будущей очистки (cleanupTargetTraces при спам-бане).
+// При восстановлении ожидания сверяется с привязкой текущей стадии.
 func (d *DB) GetGreetingMsg(ctx context.Context, chatID, userID int64) (int, bool, error) {
 	var msgID int
 	err := d.sql.QueryRowContext(ctx,

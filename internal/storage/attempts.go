@@ -11,21 +11,27 @@ import (
 // IncrementAttempt возвращает новое значение счётчика. Если последнее
 // обновление старше ttl, счётчик сбрасывается в 1.
 func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl time.Duration) (int, error) {
-	now := time.Now().Unix()
-	ttlSec := int64(ttl.Seconds())
-
 	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
+	count, err := incrementAttempt(ctx, tx, chatID, userID, ttl)
+	if err != nil {
+		return 0, err
+	}
+	return count, tx.Commit()
+}
 
+func incrementAttempt(ctx context.Context, tx *sql.Tx, chatID, userID int64, ttl time.Duration) (int, error) {
+	now := time.Now().Unix()
+	ttlSec := int64(ttl.Seconds())
 	var existingCount int
 	var existingUpdated int64
 	row := tx.QueryRowContext(ctx,
 		`SELECT count, updated_at FROM attempts WHERE chat_id = ? AND user_id = ?`,
 		chatID, userID)
-	err = row.Scan(&existingCount, &existingUpdated)
+	err := row.Scan(&existingCount, &existingUpdated)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("query attempt: %w", err)
 	}
@@ -44,9 +50,6 @@ func (d *DB) IncrementAttempt(ctx context.Context, chatID, userID int64, ttl tim
 	`, chatID, userID, newCount, now)
 	if err != nil {
 		return 0, fmt.Errorf("upsert attempt: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
 	}
 	return newCount, nil
 }

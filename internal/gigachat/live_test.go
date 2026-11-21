@@ -11,7 +11,7 @@ import (
 
 // TestLiveIsSpam бьёт в настоящий GigaChat API — прогоняется вручную:
 //
-//	GIGACHAT_AUTH_KEY=... go test -run TestLive ./internal/gigachat -v
+//	GIGACHAT_AUTH_KEY=... go test -tags stdjson -run TestLive ./internal/gigachat -v
 //
 // Без ключа (CI, обычный прогон) тест скипается. Проверяет всю прод-связку:
 // TLS с сертификатом НУЦ Минцифры, OAuth, chat и парсер вердикта — с тем же

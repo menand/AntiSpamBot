@@ -111,6 +111,13 @@ func TestQuarantineViolates(t *testing.T) {
 	}
 }
 
+func (b *Bot) armQuarantine(ctx context.Context, chatID, userID int64, until time.Time) {
+	b.quar.Set(chatID, userID, until, false)
+	if err := b.db.PutQuarantine(ctx, chatID, userID, until, false); err != nil {
+		b.log.Warn("seed quarantine", "err", err, "chat", chatID, "user", userID)
+	}
+}
+
 // TestOnSuccessArmsQuarantine — на успешной капче при включённом карантине
 // идёт рестрикт «только текст» (НЕ обычный release), ставится зеркало и БД-
 // строка; release при этом не вызывается вовсе.
@@ -123,7 +130,7 @@ func TestOnSuccessArmsQuarantine(t *testing.T) {
 	}
 
 	pend := putCaptcha(b, db, testChatID, testUserID, 77)
-	if err := b.onSuccess(ctx, pend, ""); err != nil {
+	if err := completeTestCaptcha(ctx, b, pend); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,7 +178,7 @@ func TestOnSuccessFallbackReleaseOnQuarantineFailure(t *testing.T) {
 	}
 
 	pend := putCaptcha(b, db, testChatID, testUserID, 77)
-	if err := b.onSuccess(ctx, pend, ""); err != nil {
+	if err := completeTestCaptcha(ctx, b, pend); err != nil {
 		t.Fatalf("fallback release must succeed: %v", err)
 	}
 
@@ -300,7 +307,9 @@ func TestRestoreQuarantineSeedsMirror(t *testing.T) {
 	if err := db.PutQuarantine(ctx, 1, 11, time.Now().Add(-time.Minute), false); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.PutQuarantine(ctx, 2, 20, time.Now().Add(time.Hour), false); err != nil {
+	until := time.Now().Add(time.Hour)
+	fc.resp["getChatMember"] = quarantineStatus(20, until, true)
+	if err := db.PutQuarantine(ctx, 2, 20, until, false); err != nil {
 		t.Fatal(err)
 	}
 	b.restoreQuarantine(ctx)
@@ -488,7 +497,8 @@ func TestTrustCommandReleasesQuarantine(t *testing.T) {
 	ctx := context.Background()
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
-	b.armQuarantine(ctx, testChatID, testUserID, time.Now().Add(time.Hour))
+	until := time.Now().Add(time.Hour)
+	b.armQuarantine(ctx, testChatID, testUserID, until)
 
 	// Живая проверка админа в этом харнессе отвечает некорректно (голый true),
 	// поэтому админ и жертва сидят в кэше: админ — положительно, жертва —
@@ -501,6 +511,7 @@ func TestTrustCommandReleasesQuarantine(t *testing.T) {
 		`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
 		`{"status":"administrator","user":{"id":9,"is_bot":false,"first_name":"Аня"}}`,
 		`{"status":"member","user":{"id":7,"is_bot":false,"first_name":"Новичок"}}`,
+		quarantineStatus(testUserID, until, true),
 		// 2-й вызов handleTrustCommand: botCanRestrict + isChatAdminFresh + canManageChat
 		`{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_restrict_members":true}`,
 		`{"status":"administrator","user":{"id":9,"is_bot":false,"first_name":"Аня"}}`,
@@ -664,7 +675,7 @@ func TestUnmodUnbanReleasesQuarantine(t *testing.T) {
 	serviceableChat(t, b, db, testChatID)
 	b.armQuarantine(ctx, testChatID, testUserID, time.Now().Add(time.Hour))
 
-	text, err := b.execUnmod("u", testChatID, testUserID)
+	text, err := b.execUnmod("u", testChatID, testUserID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -98,10 +98,10 @@ func TestReplyAnchorCompletionPreservesReplacement(t *testing.T) {
 	b, _, _ := newFlowBot(t)
 	old := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Hour), 0, 1, 10)
 	live := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Hour), 0, 1, 20)
-	if b.replies.SetGreetingMsgID(old, 99) || b.cancelReplyWaitIf(testChatID, testUserID, old) {
+	if b.bindReplyGreeting(b.runCtx, old, 99) || b.cancelReplyWaitIf(testChatID, testUserID, old) {
 		t.Fatal("old greeting completion changed the replacement wait")
 	}
-	if got, ok := b.replies.Get(testChatID, testUserID); !ok || got != live || !b.replies.MatchesGreeting(testChatID, testUserID, 20) {
+	if got, ok := b.replies.Get(testChatID, testUserID); !ok || got != live || b.replies.MatchGreeting(testChatID, testUserID, 20) != live {
 		t.Fatal("replacement greeting identity was lost")
 	}
 }

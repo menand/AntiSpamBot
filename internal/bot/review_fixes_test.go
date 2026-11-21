@@ -14,6 +14,7 @@ import (
 	"github.com/mymmrac/telego/telegoapi"
 
 	"github.com/menand/AntiSpamBot/internal/config"
+	"github.com/menand/AntiSpamBot/internal/groq"
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
 
@@ -172,6 +173,38 @@ func TestClassifyVerdictFallback(t *testing.T) {
 	})
 }
 
+func TestAmbiguousLLMVerdictNeedsValidFallback(t *testing.T) {
+	for _, answer := range []string{"SPAM", "OK", "SPAM или OK"} {
+		t.Run(answer, func(t *testing.T) {
+			b, db, _ := newFlowBot(t)
+			serviceableChat(t, b, db, testChatID)
+			uncertain, parseErr := groq.ParseVerdict("Не уверен, спам ли это")
+			if parseErr == nil || uncertain {
+				t.Fatalf("ambiguous primary answer was accepted: %v / %v", uncertain, parseErr)
+			}
+			fallbackSpam, fallbackErr := groq.ParseVerdict(answer)
+			primary := &fakeLLM{enabled: true, err: parseErr}
+			fallback := &fakeLLM{enabled: true, spam: fallbackSpam, err: fallbackErr}
+			b.groqc, b.gemic = primary, fallback
+			b.runSpamCheck(b.runCtx, telego.Message{
+				Chat:      telego.Chat{ID: testChatID, Type: telego.ChatTypeSupergroup},
+				MessageID: 100, From: &telego.User{ID: testUserID}, Text: "Тестовое сообщение",
+			}, storage.ChatSettings{}, 0)
+			wantCalls := 1
+			if fallbackErr != nil {
+				wantCalls = 2
+			}
+			if primary.callCount() != wantCalls || fallback.callCount() != wantCalls {
+				t.Fatalf("provider attempts primary=%d fallback=%d, want %d each", primary.callCount(), fallback.callCount(), wantCalls)
+			}
+			pending, err := db.HasPendingVoteForAuthor(b.runCtx, testChatID, testUserID)
+			if err != nil || pending != (answer == "SPAM") {
+				t.Fatalf("vote pending=%v for %q: %v", pending, answer, err)
+			}
+		})
+	}
+}
+
 // TestManualUnbanForgivesSpamBase — ручной разбан чужой рукой стирает
 // глобальный флаг спамера; свои события и чужие боты — нет (кроме
 // GroupAnonymousBot — рука человека-анонимного админа).
@@ -213,8 +246,7 @@ func TestManualUnbanForgivesSpamBase(t *testing.T) {
 	}
 }
 
-// TestOnFailBrokenCounterNeverBans — ошибка счётчика попыток принудительно
-// ведёт на кик (ban+unban), пермабан по «угаданному» счёту запрещён.
+// TestOnFailBrokenCounterNeverBans — запрет санкции без сохранённого решения.
 func TestOnFailBrokenCounterNeverBans(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -222,7 +254,7 @@ func TestOnFailBrokenCounterNeverBans(t *testing.T) {
 		wantUnbans int  // kick = ban+unban; permaban = banShort без unban
 	}{
 		{"рабочий счётчик, последняя попытка — бан", false, 0},
-		{"сломанный счётчик — принудительный кик", true, 1},
+		{"сломанный счётчик — санкция отложена", true, 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -242,14 +274,18 @@ func TestOnFailBrokenCounterNeverBans(t *testing.T) {
 				}
 			}
 
-			if err := b.onFail(ctx, p, "тест"); err != nil {
-				t.Fatalf("onFail must not fail the punish itself: %v", err)
+			if err := b.onFail(ctx, p, "тест"); (err != nil) != tc.breakDB {
+				t.Fatalf("onFail error inconsistent with DB availability: %v", err)
 			}
 			if got := fc.callCount("unbanChatMember"); got != tc.wantUnbans {
 				t.Fatalf("unban calls = %d, want %d (calls: %v)", got, tc.wantUnbans, fc.callList())
 			}
-			if n := fc.callCount("banChatMember"); n != 1 {
-				t.Fatalf("ban calls = %d, want exactly one punish", n)
+			wantBans := 1
+			if tc.breakDB {
+				wantBans = 0
+			}
+			if n := fc.callCount("banChatMember"); n != wantBans {
+				t.Fatalf("ban calls = %d, want %d", n, wantBans)
 			}
 		})
 	}
@@ -752,7 +788,7 @@ func TestResolveModTargetHygiene(t *testing.T) {
 }
 
 // TestSpamGateCacheInvalidation — кэш тумблера антиспама переживает закрытие
-// БД (нет походов в базу на каждое сообщение) и сбрасывается тогглом.
+// БД (нет походов в базу на каждое сообщение).
 func TestSpamGateCacheInvalidation(t *testing.T) {
 	ctx := context.Background()
 
@@ -762,7 +798,7 @@ func TestSpamGateCacheInvalidation(t *testing.T) {
 		// ИИ доступен (иначе maybeSpamCheck вышел бы раньше гейта)…
 		b.groqc = &fakeLLM{enabled: true}
 		// …но тумблер чата выключен.
-		if b.spamCheckEnabledCached(testChatID) {
+		if b.cachedSpamGate(testChatID, db.GetChatSettings).enabled {
 			t.Fatal("default chat must have the check disabled")
 		}
 		if _, cached := b.spamGateCache[testChatID]; !cached {
@@ -775,24 +811,20 @@ func TestSpamGateCacheInvalidation(t *testing.T) {
 		b.maybeSpamCheck(msg) // должен выйти по кэшу без похода в БД и паник
 	})
 
-	t.Run("позитив кэшируется, сброс возвращает чтение", func(t *testing.T) {
+	t.Run("позитив кэшируется", func(t *testing.T) {
 		b, db, _ := newFlowBot(t)
 		serviceableChat(t, b, db, testChatID)
 		if err := db.SetSpamCheckEnabled(ctx, testChatID, true); err != nil {
 			t.Fatal(err)
 		}
-		if !b.spamCheckEnabledCached(testChatID) {
+		if !b.cachedSpamGate(testChatID, db.GetChatSettings).enabled {
 			t.Fatal("enabled flag must be read and cached")
 		}
 		if err := db.Close(); err != nil {
 			t.Fatal(err)
 		}
-		if !b.spamCheckEnabledCached(testChatID) {
+		if !b.cachedSpamGate(testChatID, db.GetChatSettings).enabled {
 			t.Fatal("cached positive must survive a closed DB")
-		}
-		b.delSpamGateCache(testChatID)
-		if b.spamCheckEnabledCached(testChatID) {
-			t.Fatal("after invalidation a closed DB must fail closed")
 		}
 	})
 }

@@ -2,12 +2,14 @@ package bot
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
 	"github.com/mymmrac/telego"
+	th "github.com/mymmrac/telego/telegohandler"
 
 	"github.com/menand/AntiSpamBot/internal/config"
 	"github.com/menand/AntiSpamBot/internal/storage"
@@ -199,94 +201,171 @@ func TestCaptureMessageDisabledIsNoop(t *testing.T) {
 }
 
 func TestCaptureWriterFlushPaths(t *testing.T) {
-	tests := []struct {
-		name      string
-		push      int
-		cancelNow bool // отменить ctx сразу (проверка финального флаша)
+	for _, tc := range []struct {
+		name             string
+		push             int
+		flushBeforeClose bool
 	}{
-		{"batch full flush", captureBatchMax, false},
-		{"ctx done flush", 3, true},
-	}
-	for _, tc := range tests {
+		{"batch full flush", captureBatchMax, true},
+		{"timer flush", 1, true},
+		{"queue close flush", 3, false},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, db := newTestBotWithDB(t)
 			b.cfg = &config.Config{MessageCaptureEnabled: true}
-			b.captureCh = make(chan storage.StoredMessage, captureBufSize)
-			b.captureDone = make(chan struct{})
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { b.captureWriter(ctx); close(done) }()
+			b.startCaptureWriter()
+			defer b.stopCaptureWriter()
 			for i := 0; i < tc.push; i++ {
 				b.captureCh <- storage.StoredMessage{
 					ChatID: 1, UserID: 2, TGMsgID: int64(i), TS: time.Now(), Kind: "text", Text: "привет",
 				}
 			}
-			if tc.cancelNow {
-				cancel()
-			} else {
-				// Ждём таймер-флаш (captureFlushInt), затем останавливаем.
-				time.Sleep(captureFlushInt + 300*time.Millisecond)
-				cancel()
+			if tc.flushBeforeClose {
+				waitFor(t, func() bool {
+					rows, err := db.QueryMessages(t.Context(), storage.MessageFilter{})
+					return err == nil && len(rows) == tc.push
+				})
 			}
-			<-done
-			got, err := db.QueryMessages(context.Background(), storage.MessageFilter{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(got) != tc.push {
-				t.Fatalf("rows = %d, want %d", len(got), tc.push)
+			b.stopCaptureWriter()
+			got, err := db.QueryMessages(t.Context(), storage.MessageFilter{})
+			if err != nil || len(got) != tc.push {
+				t.Fatalf("rows = %d, want %d: %v", len(got), tc.push, err)
 			}
 		})
 	}
 }
 
-// Настоящая ошибка БД (не отмена контекста): пачка логируется и отбрасывается,
-// writer НЕ зависает — горутина доезжает до ctx.Done и закрывает captureDone.
-// Проверяет ветку «wctx жив → warn + drop» в flush.
 func TestCaptureWriterDBErrorDropsBatchAndExits(t *testing.T) {
 	b, db := newTestBotWithDB(t)
 	b.cfg = &config.Config{MessageCaptureEnabled: true}
-	b.captureCh = make(chan storage.StoredMessage, captureBufSize)
-	b.captureDone = make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	go b.captureWriter(ctx)
-
-	// БД мертва → AppendMessages упадёт настоящей ошибкой (не ctx-отменой).
+	b.startCaptureWriter()
+	defer b.stopCaptureWriter()
 	if err := db.Close(); err != nil {
-		t.Fatalf("close db: %v", err)
+		t.Fatal(err)
 	}
 	b.captureCh <- storage.StoredMessage{ChatID: 1, UserID: 2, TS: time.Now(), Kind: "text", Text: "a"}
-	// Ждём таймер-флаш с ошибкой, потом останавливаем: финальный флаш тоже
-	// упадёт, но не зависнет и закроет captureDone.
-	time.Sleep(captureFlushInt + 300*time.Millisecond)
-	cancel()
+	b.stopCaptureWriter()
 	select {
 	case <-b.captureDone:
-	case <-time.After(captureShutdownTimeout + time.Second):
-		t.Fatal("writer must exit on ctx.Done even after DB errors")
+	default:
+		t.Fatal("writer did not finish after DB error")
 	}
 }
 
-func TestWaitCaptureDone(t *testing.T) {
-	b, _ := newTestBotWithDB(t)
-	b.captureDone = make(chan struct{})
+func TestCaptureShutdownDrainsLateHandler(t *testing.T) {
+	b, _, _ := newFlowBot(t)
+	path := filepath.Join(t.TempDir(), "capture.db")
+	db, err := storage.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	b.db = db
+	b.cfg.MessageCaptureEnabled = true
+	b.startCaptureWriter()
+	defer b.stopCaptureWriter()
 
-	// Выключен: мгновенный no-op (captureDone никогда не закроется).
-	b.cfg = &config.Config{MessageCaptureEnabled: false}
-	done := make(chan struct{})
-	go func() { b.waitCaptureDone(); close(done) }()
+	updates := make(chan telego.Update, 1)
+	handler, err := th.NewBotHandler(b.api, updates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	polling, stop := context.WithCancel(t.Context())
+	defer stop()
+	started := make(chan struct{})
+	allowWrite := make(chan struct{})
+	defer func() {
+		select {
+		case <-allowWrite:
+		default:
+			close(allowWrite)
+		}
+	}()
+	message := telego.Message{Chat: telego.Chat{ID: 1}, From: &telego.User{ID: 2}, MessageID: 21, Date: time.Now().Unix(), Text: "late capture"}
+	handler.HandleMessage(func(_ *th.Context, msg telego.Message) error {
+		close(started)
+		<-polling.Done()
+		<-allowWrite
+		b.captureMessage(&msg, "text")
+		return nil
+	})
+	updates <- telego.Update{UpdateID: 1, Message: &message}
+	handlerDone := make(chan error, 1)
+	go func() { handlerDone <- handler.Start() }()
 	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("disabled capture must not wait")
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("capture producer did not start")
+	}
+	shutdownDone := make(chan struct{})
+	go func() {
+		b.stopUpdateHandling(stop, handler)
+		close(shutdownDone)
+	}()
+	<-polling.Done()
+	select {
+	case <-b.captureDone:
+		t.Fatal("writer exited before the active producer")
+	default:
+	}
+	close(allowWrite)
+	select {
+	case <-shutdownDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not drain the producer and writer")
+	}
+	if err := <-handlerDone; err != nil {
+		t.Fatal(err)
 	}
 
-	// Включён, канал уже закрыт: мгновенный возврат.
-	b.cfg.MessageCaptureEnabled = true
-	close(b.captureDone)
-	start := time.Now()
-	b.waitCaptureDone()
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("closed captureDone must return promptly, took %v", elapsed)
+	// An accidental call after teardown must not send to a closed channel.
+	b.captureMessage(&message, "text")
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := storage.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reopened.Close() }()
+	rows, err := reopened.QueryMessages(t.Context(), storage.MessageFilter{})
+	if err != nil || len(rows) != 1 || rows[0].TGMsgID != 21 {
+		t.Fatalf("late handler message was lost or duplicated: %v / %v", rows, err)
+	}
+}
+
+func TestCaptureWriterExitsOnEarlyRunReturn(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		b, _, fc := newFlowBot(t)
+		b.cfg.DBPath = filepath.Join(t.TempDir(), "run.db")
+		b.cfg.MessageCaptureEnabled = enabled
+		fc.resp["getUpdates"] = "[]"
+		polling, stop := context.WithCancel(t.Context())
+		updates, err := b.api.UpdatesViaLongPolling(polling, nil, telego.WithLongPollingUpdateInterval(100*time.Millisecond))
+		if err != nil {
+			stop()
+			t.Fatal(err)
+		}
+		err = b.Run(t.Context())
+		stop()
+		for range updates {
+		}
+		if err == nil || !strings.Contains(err.Error(), "long polling:") || t.Context().Err() != nil {
+			t.Fatalf("expected early polling error with a live parent: %v", err)
+		}
+		if !enabled {
+			if b.captureDone != nil || b.captureCh != nil {
+				t.Fatal("disabled capture started a writer")
+			}
+			continue
+		}
+		if b.captureCh != nil {
+			t.Fatal("early exit left the capture queue open")
+		}
+		select {
+		case <-b.captureDone:
+		default:
+			t.Fatal("early exit left the writer running")
+		}
 	}
 }

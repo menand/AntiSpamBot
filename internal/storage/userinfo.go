@@ -78,7 +78,7 @@ func (d *DB) UserEventCounts(ctx context.Context, chatID, userID int64) (EventCo
 		if err := rows.Scan(&kind, &captcha, &noreply, &global, &mod, &total); err != nil {
 			return c, fmt.Errorf("scan user event counts: %w", err)
 		}
-		switch EventKind(kind) { //nolint:exhaustive // EventJoin/EventPass/EventLeft/EventAbort не влияют на user info
+		switch EventKind(kind) { //nolint:exhaustive // EventJoin/EventPass/EventLeft/EventAbort/EventFunnelClose не влияют на user info
 		case EventKick:
 			c.CaptchaFails += captcha
 			c.NoReply += noreply

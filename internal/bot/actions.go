@@ -92,13 +92,17 @@ func isUserNotParticipant(err error) bool {
 		strings.Contains(apiErr.Description, "USER_NOT_PARTICIPANT")
 }
 
-func (b *Bot) restrict(ctx context.Context, chatID, userID int64) error {
-	// Ретраится: сетевой чих (DNS/TCP) на этом вызове означает, что юзер НЕ
-	// ограничен и капча не уйдёт. Это хуже, чем задержка на ретрай.
-	if err := b.restrictFor(ctx, chatID, userID, 0); err != nil {
-		return fmt.Errorf("restrict after retries: %w", err)
-	}
-	return nil
+// restrictCaptcha повторяет запрос с тем же сроком, который уже в SQLite.
+// Слишком близкий срок Telegram превратил бы в бессрочное ограничение.
+func (b *Bot) restrictCaptcha(ctx context.Context, chatID, userID, until int64) error {
+	ctx, cancel := context.WithDeadline(ctx, time.Unix(until, 0).Add(-time.Minute))
+	defer cancel()
+	return retryTG(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return b.restrictUntil(ctx, chatID, userID, until)
+	})
 }
 
 // mute — рид-онли на срок d. Telegram снимает ограничение по until_date сам,
@@ -136,39 +140,34 @@ func textOnlyPermissions() telego.ChatPermissions {
 	}
 }
 
-// quarantineRestrict применяет «только текст» на срок d. Тот же паттерн, что у
-// restrictFor: retryTG + пересчёт until на КАЖДОЙ попытке (429-очередь не
-// должна уронить дневной карантин под 30-секундный пол «навсегда»).
-func (b *Bot) quarantineRestrict(ctx context.Context, chatID, userID int64, d time.Duration) error {
-	if err := retryTG(ctx, func() error {
+// quarantineUntil сохраняет один срок между попытками и рестартами.
+func (b *Bot) quarantineUntil(ctx context.Context, chatID, userID, until int64) error {
+	ctx, cancel := context.WithDeadline(ctx, time.Unix(until, 0).Add(-time.Minute))
+	defer cancel()
+	return retryTG(ctx, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
-			ChatID:      tu.ID(chatID),
-			UserID:      userID,
-			Permissions: textOnlyPermissions(),
-			UntilDate:   time.Now().Add(d).Unix(),
+			ChatID: tu.ID(chatID), UserID: userID, Permissions: textOnlyPermissions(), UntilDate: until,
 		})
-	}); err != nil {
-		return fmt.Errorf("quarantine restrict after retries: %w", err)
-	}
-	return nil
+	})
 }
 
-// restrictFor — общее ядро restrict/mute: d == 0 — бессрочно (капча), d > 0 —
-// until_date. until вычисляется в момент КАЖДОЙ попытки: retryTG честно ждёт
-// весь retry_after на 429 (бывают минуты), и посчитанный заранее until мог бы
-// к моменту успешного вызова опуститься ниже 30-секундного порога Telegram
-// «меньше 30 сек = навсегда» — минутный мьют стал бы вечным.
+// restrictFor пересчитывает until_date ручного мута на каждой попытке:
+// ожидание retry_after не должно делать минутный мут бессрочным.
 func (b *Bot) restrictFor(ctx context.Context, chatID, userID int64, d time.Duration) error {
 	return retryTG(ctx, func() error {
-		p := &telego.RestrictChatMemberParams{
-			ChatID:      tu.ID(chatID),
-			UserID:      userID,
-			Permissions: telego.ChatPermissions{},
-		}
-		if d > 0 {
-			p.UntilDate = time.Now().Add(d).Unix()
-		}
-		return b.api.RestrictChatMember(ctx, p)
+		return b.restrictUntil(ctx, chatID, userID, time.Now().Add(d).Unix())
+	})
+}
+
+func (b *Bot) restrictUntil(ctx context.Context, chatID, userID, until int64) error {
+	return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
+		ChatID:      tu.ID(chatID),
+		UserID:      userID,
+		Permissions: telego.ChatPermissions{},
+		UntilDate:   until,
 	})
 }
 
@@ -180,7 +179,10 @@ func (b *Bot) restrictFor(ctx context.Context, chatID, userID int64, d time.Dura
 // оставил бы проверенного человека замьюченным — а капчи, через которую
 // можно было бы повторить, уже нет.
 func (b *Bot) release(ctx context.Context, chatID, userID int64) error {
-	perms := b.chatDefaultPermissions(ctx, chatID)
+	return b.releaseWithPermissions(ctx, chatID, userID, b.chatDefaultPermissions(ctx, chatID))
+}
+
+func (b *Bot) releaseWithPermissions(ctx context.Context, chatID, userID int64, perms telego.ChatPermissions) error {
 	err := retryTG(ctx, func() error {
 		return b.api.RestrictChatMember(ctx, &telego.RestrictChatMemberParams{
 			ChatID:      tu.ID(chatID),
@@ -201,26 +203,11 @@ func (b *Bot) release(ctx context.Context, chatID, userID int64) error {
 // когда ретраи исчерпаны: невозможность узнать дефолты не должна оставить
 // проверенного человека замьюченным навсегда.
 func (b *Bot) chatDefaultPermissions(ctx context.Context, chatID int64) telego.ChatPermissions {
-	var perms *telego.ChatPermissions
-	err := retryTG(ctx, func() error {
-		chat, e := b.api.GetChat(ctx, &telego.GetChatParams{ChatID: tu.ID(chatID)})
-		if e == nil && chat != nil {
-			perms = chat.Permissions
-		}
-		return e
-	})
-	if err == nil && perms != nil {
-		return *perms
+	perms, err := b.fetchChatDefaultPermissions(ctx, chatID)
+	if err == nil {
+		return perms
 	}
-	if err != nil {
-		b.log.Warn("get chat permissions, falling back to all-true",
-			"err", err, "chat", chatID)
-	} else {
-		// GetChat прошёл, но Permissions не вернул — тоже fallback, логируем
-		// честно (иначе молчаливый all-true выглядел бы только как retry-exhaust).
-		b.log.Warn("get chat permissions returned no permissions, falling back to all-true",
-			"chat", chatID)
-	}
+	b.log.Warn("get chat permissions, falling back to all-true", "err", err, "chat", chatID)
 	yes := true
 	return telego.ChatPermissions{
 		CanSendMessages:       &yes,
@@ -237,8 +224,25 @@ func (b *Bot) chatDefaultPermissions(ctx context.Context, chatID int64) telego.C
 	}
 }
 
-// releaseOnAbort снимает капча-мут с обрывочных путей runCaptcha (pending ещё
-// не записан — рестарт юзера не восстановит, мут был бы вечным). На живом ctx
+func (b *Bot) fetchChatDefaultPermissions(ctx context.Context, chatID int64) (telego.ChatPermissions, error) {
+	var perms *telego.ChatPermissions
+	err := retryTG(ctx, func() error {
+		chat, e := b.api.GetChat(ctx, &telego.GetChatParams{ChatID: tu.ID(chatID)})
+		if e == nil && chat != nil {
+			perms = chat.Permissions
+		}
+		return e
+	})
+	if err != nil {
+		return telego.ChatPermissions{}, err
+	}
+	if perms == nil {
+		return telego.ChatPermissions{}, fmt.Errorf("get chat returned no default permissions")
+	}
+	return *perms, nil
+}
+
+// releaseOnAbort снимает капча-мут на обрывочных путях. На живом ctx
 // работает прямо на нём: полный бюджет ретраев release, включая honor
 // retry_after 429-шторма (ровно тот сценарий, где отправка капчи и падает).
 // На мёртвом (shutdown) — свежий detached-бюджет: release на отменённом ctx
@@ -295,23 +299,6 @@ func (b *Bot) releaseDetached(chatID, userID int64) {
 	}
 }
 
-func (b *Bot) kick(ctx context.Context, chatID, userID int64) error {
-	// Обе половины кика ретраятся: без ретрая бана сетевой чих оставляет
-	// юзера замьюченным «зомби» в чате, а событие kick уже записано (почему
-	// короткая лестница — см. kickUnbanBackoffs: ×2 укладывается в 10 c
-	// cleanup-ctx).
-	err := retryWith(ctx, kickUnbanBackoffs, func() error {
-		return b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
-			ChatID: tu.ID(chatID),
-			UserID: userID,
-		})
-	})
-	if err != nil {
-		return fmt.Errorf("ban (for kick) after retries: %w", err)
-	}
-	return b.unban(ctx, chatID, userID)
-}
-
 // unban снимает бан (вторая половина кика), ретраясь на короткой лестнице,
 // чтобы транзиентная ошибка API не превратила кик в перманентный бан
 // (почему короткая — см. kickUnbanBackoffs). OnlyIfBanned делает вызов
@@ -348,36 +335,60 @@ func (b *Bot) banShort(ctx context.Context, chatID, userID int64) error {
 	return nil
 }
 
-// banRevoke — перманентный бан со стиранием ВСЕХ сообщений юзера в чате.
-// Используется только вердиктом ИИ-антиспама: у спамера сносится и то, что
-// не попало под плашку. Капча-бан остаётся обычным ban — там сообщений нет.
-// Ретраится обязательно: TakeSpamVote одноразовый, и упавший на сетевом чихе
-// одиночный вызов терял бы вердикт сообщества безвозвратно.
+var errBanUnconfirmed = errors.New("permanent ban awaits confirmation")
+
+// banRevoke — постоянный бан со стиранием сообщений. Вызывающий держит очередь прав участника.
 func (b *Bot) banRevoke(ctx context.Context, chatID, userID int64) error {
-	err := retryTG(ctx, func() error {
-		return b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
+	return b.banRevokeWith(ctx, chatID, userID, tgBackoffs)
+}
+
+func (b *Bot) banRevokeWith(ctx context.Context, chatID, userID int64, backoffs []time.Duration) error {
+	row, found, err := b.db.GetPendingAdmission(ctx, chatID, userID)
+	if err != nil {
+		return err
+	}
+	uncertain := row.BanPending
+	if found && !uncertain {
+		// Ответ Telegram может потеряться уже после успешного бана.
+		row.BanPending = true
+		if err := b.db.UpdateAdmissionRights(ctx, row); err != nil {
+			return err
+		}
+	}
+	err = retryWith(ctx, backoffs, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := b.api.BanChatMember(ctx, &telego.BanChatMemberParams{
 			ChatID:         tu.ID(chatID),
 			UserID:         userID,
 			RevokeMessages: true,
 		})
-	})
-	if err != nil {
-		return fmt.Errorf("ban with revoke after retries: %w", err)
-	}
-	return nil
-}
-
-// kickRevoke — кик со стиранием ВСЕХ сообщений юзера (для админской команды
-// /kick): banRevoke + unban, чтобы юзер мог перезайти. Обе половины ретраятся.
-// Метка наблюдения ставится сразу после удавшейся ban-половины (revoke уже
-// стёр сообщения), до unban: окно, в котором проба может увидеть «not found»,
-// минимизировано (но не закрыто атомарно — метка это отдельный UPDATE).
-func (b *Bot) kickRevoke(ctx context.Context, chatID, userID int64) error {
-	if err := b.banRevoke(ctx, chatID, userID); err != nil {
+		if err == nil {
+			return nil
+		}
+		var apiErr *telegoapi.Error
+		if !errors.As(err, &apiErr) || apiErr.ErrorCode < 400 || apiErr.ErrorCode >= 500 || apiErr.ErrorCode == 408 {
+			uncertain = true
+		}
 		return err
+	})
+	if err == nil {
+		if found {
+			if err := b.retireBannedAdmission(ctx, row); err != nil {
+				b.log.Warn("retire admission after confirmed ban", "err", err, "chat", chatID, "user", userID)
+			}
+		}
+		return nil
 	}
-	b.markReplyWatchesDeletedByUser(chatID, userID, replyWatchDeletedByKick)
-	return b.unban(ctx, chatID, userID)
+	if found && !uncertain {
+		row.BanPending = false
+		err = errors.Join(err, b.db.UpdateAdmissionRights(ctx, row))
+	}
+	if uncertain {
+		return fmt.Errorf("%w: %w", errBanUnconfirmed, err)
+	}
+	return fmt.Errorf("ban with revoke after retries: %w", err)
 }
 
 func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) error {

@@ -9,7 +9,7 @@ import (
 
 // TestLiveIsSpam бьёт в настоящий Groq API — прогоняется вручную:
 //
-//	GROQ_API_KEY=... go test -run TestLive ./internal/groq -v
+//	GROQ_API_KEY=... go test -tags stdjson -run TestLive ./internal/groq -v
 //
 // Без ключа (CI, обычный прогон) тест скипается. Кейсы — только заведомо
 // однозначные.

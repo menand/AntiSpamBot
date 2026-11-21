@@ -5,9 +5,9 @@ import (
 	"fmt"
 )
 
-// MigrateChat переносит все строки с ключом oldID на newID во всех таблицах,
-// сливая их с уже существующими строками newID. Идемпотентен — безопасно
-// вызывать, когда с одной из сторон данных нет.
+// MigrateChat переносит настройки и состояние с oldID на newID и
+// сохраняет связь для чтения истории сообщений. Повтор той же миграции
+// безопасен, в том числе при отсутствии данных с одной из сторон.
 //
 // Нужен, когда Telegram апгрейдит basic group до supergroup, что переназначает
 // chat_id. Без этого статистика и настройки раскололись бы между двумя
@@ -29,12 +29,10 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("migrate events: %w", err)
 	}
 
-	// messages — PK здесь id (autoincrement); chat_id просто переписываем.
-	// Без этого текстовый след чата раскололся бы между старым и новым
-	// chat_id после апгрейда basic group → supergroup.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE messages SET chat_id = ? WHERE chat_id = ?`, newID, oldID); err != nil {
-		return fmt.Errorf("migrate messages: %w", err)
+	// Message rows (including later writes from the capture queue) retain
+	// their source chat ID. The same lookup covers hot and archived rows.
+	if err := recordMessageChatMove(ctx, tx, oldID, newID); err != nil {
+		return err
 	}
 
 	// members — PK (chat_id, user_id). Оставляем самый ранний joined_at юзера.
@@ -173,12 +171,32 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 		return fmt.Errorf("drop old owner_dm_links: %w", err)
 	}
 
-	// pending_captchas — старого чата больше нет, всё «pending» там ссылается
-	// на мёртвые message ID. Удаляем, а не копируем.
+	// Миграция прерывает капчу, включая подготовку. Старые message ID
+	// недействительны, а live-обработчик снимает ограничение в новом чате.
+	// Конечный restrict_until страхует подготовку при обрыве обработчика.
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pending_captchas WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old pending_captchas: %w", err)
 	}
+	// Допуск привязан к участнику; клавиатура и топик старого чата устарели.
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE pending_admissions
+		SET chat_id = ?, message_id = 0, ephemeral_msg_id = 0, thread_id = 0 WHERE chat_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("move pending admissions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_admissions WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop migrated admissions: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_punishments WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop migrated punishments: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE OR IGNORE pending_manual_mutes SET chat_id = ? WHERE chat_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("move pending manual mutes: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM pending_manual_mutes WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop migrated manual mutes: %w", err)
+	}
+
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM pending_replies WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old pending_replies: %w", err)
@@ -203,6 +221,30 @@ func (d *DB) MigrateChat(ctx context.Context, oldID, newID int64) error {
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM greetings WHERE chat_id = ?`, oldID); err != nil {
 		return fmt.Errorf("drop old greetings: %w", err)
+	}
+
+	// Принятое решение переживает миграцию чата. Старые message ID недействительны.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE spam_verdicts SET chat_id = ?, bot_msg_id = 0, target_msg_id = 0 WHERE chat_id = ?`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate spam verdicts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO spam_verdict_targets (verdict_id, chat_id, status)
+		SELECT verdict_id, ?, status FROM spam_verdict_targets WHERE chat_id = ?
+		ON CONFLICT (verdict_id, chat_id) DO UPDATE SET status = max(status, excluded.status)`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate spam verdict targets: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM spam_verdict_targets WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop migrated spam verdict targets: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_spam_decisions (chat_id, user_id, verdict_id, pardon_id)
+		SELECT ?, user_id, verdict_id, pardon_id FROM chat_spam_decisions WHERE chat_id = ?
+		ON CONFLICT(chat_id, user_id) DO UPDATE SET verdict_id = max(verdict_id, excluded.verdict_id),
+			pardon_id = max(pardon_id, excluded.pardon_id)`, newID, oldID); err != nil {
+		return fmt.Errorf("migrate spam decisions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chat_spam_decisions WHERE chat_id = ?`, oldID); err != nil {
+		return fmt.Errorf("drop migrated spam decisions: %w", err)
 	}
 
 	// attempts — PK (chat_id, user_id). Берём max count + самое позднее время обновления.

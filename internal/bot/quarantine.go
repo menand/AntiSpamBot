@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"sync"
 	"time"
@@ -225,6 +227,9 @@ func (b *Bot) restoreQuarantine(ctx context.Context) {
 	}
 	var drain []storage.QuarantineRow
 	for _, r := range rows {
+		if err := b.checkManualMute(ctx, r.ChatID, r.UserID); err != nil {
+			continue
+		}
 		s, err := b.db.GetChatSettings(ctx, r.ChatID)
 		if err != nil {
 			// Настройки нечитаемы — дрейн небезопасен: молчаливый сброс
@@ -254,16 +259,6 @@ func (b *Bot) restoreQuarantine(ctx context.Context) {
 			b.log.Warn("restore: release disabled-chat quarantine", "err", err,
 				"chat", r.ChatID, "user", r.UserID)
 		}
-	}
-}
-
-// armQuarantine ставит карантинную строку после успешного рестрикта (вызывает
-// onSuccess): зеркало первым (горячий путь цензора), БД — рестарт-безопасность.
-// Провал записи в БД не откатывает рестрикт — Telegram держит его и так.
-func (b *Bot) armQuarantine(ctx context.Context, chatID, userID int64, until time.Time) {
-	b.quar.Set(chatID, userID, until, false)
-	if err := b.db.PutQuarantine(ctx, chatID, userID, until, false); err != nil {
-		b.log.Warn("persist quarantine", "err", err, "chat", chatID, "user", userID)
 	}
 }
 
@@ -324,6 +319,19 @@ func (b *Bot) censorQuarantineMessage(m *telego.Message, e quarantineEntry) {
 // мьют полностью заменяет прежний текст-онли рестрикт, и по истечении срока
 // юзер вернётся к дефолтным правам чата, а не к «только текст».
 func (b *Bot) escalateQuarantine(chatID, userID int64) {
+	unlock, err := b.rights.lock(b.runCtx, chatID, userID, false)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if err := b.checkManualMute(b.runCtx, chatID, userID); err != nil {
+		return
+	}
+	// Пока эскалация ждала очередь, ручной мут мог уже снять карантин.
+	if _, active := b.quar.Get(chatID, userID); !active {
+		return
+	}
+
 	if err := b.mute(b.runCtx, chatID, userID, censorEscalateMute); err != nil {
 		b.log.Warn("quarantine escalation mute", "err", err, "chat", chatID, "user", userID)
 		b.quar.RetryEscalation(chatID, userID)
@@ -391,29 +399,59 @@ func (b *Bot) releaseQuarantineUser(chatID, userID int64) (bool, error) {
 }
 
 func (b *Bot) releaseQuarantine(ctx context.Context, chatID, userID int64) (bool, error) {
-	_, inMirror := b.quar.Get(chatID, userID)
-	has, err := b.db.HasQuarantine(ctx, chatID, userID, time.Now().Unix())
+	unlock, err := b.rights.lock(ctx, chatID, userID, false)
 	if err != nil {
-		b.log.Warn("quarantine: has row", "err", err, "chat", chatID, "user", userID)
-	}
-	// Fail-open: выход только по ПОДТВЕРЖДЁННОМУ «нет карантина». Error —
-	// не основание молчать: release идемпотентен, а невызванный release
-	// оставил бы серверный текст-рестрикт висеть (свежий карантин в зеркале
-	// или нечитаемой строке всё равно надо отпускать).
-	if !inMirror && err == nil && !has {
-		return false, nil
-	}
-	// Состояние остаётся повторяемым до подтверждённого снятия ограничения.
-	if err := b.release(ctx, chatID, userID); err != nil {
-		b.log.Warn("quarantine: release", "err", err, "chat", chatID, "user", userID)
 		return false, err
 	}
-	b.quar.Remove(chatID, userID)
-	if err := b.db.DeleteQuarantine(ctx, chatID, userID); err != nil {
-		b.log.Warn("quarantine: delete row", "err", err, "chat", chatID, "user", userID)
-		return true, err
+	defer unlock()
+	return b.releaseQuarantineLocked(ctx, chatID, userID)
+}
+
+var errQuarantineUnconfirmed = errors.New("quarantine status unconfirmed")
+
+func (b *Bot) releaseQuarantineLocked(ctx context.Context, chatID, userID int64) (bool, error) {
+	if err := b.checkManualMute(ctx, chatID, userID); err != nil {
+		return false, fmt.Errorf("%w: %w", errQuarantineUnconfirmed, err)
 	}
-	return true, nil
+	mirror, inMirror := b.quar.Get(chatID, userID)
+	until, err := b.db.ActiveQuarantineUntil(ctx, chatID, userID, time.Now().Unix())
+	if err != nil && !inMirror {
+		return false, fmt.Errorf("%w: %w", errQuarantineUnconfirmed, err)
+	}
+	if until == 0 && inMirror {
+		until = mirror.Until.Unix()
+	}
+	if until == 0 {
+		return false, nil
+	}
+
+	member, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{ChatID: tu.ID(chatID), UserID: userID})
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", errQuarantineUnconfirmed, err)
+	}
+	m, restricted := member.(*telego.ChatMemberRestricted)
+	owned := restricted && isTextOnlyQuarantine(m, until)
+	if owned {
+		// Состояние остаётся повторяемым до подтверждённого снятия.
+		if err := b.release(ctx, chatID, userID); err != nil {
+			b.log.Warn("quarantine: release", "err", err, "chat", chatID, "user", userID)
+			return false, err
+		}
+	}
+	// Более новое ограничение оставляем в Telegram. После проверки эта
+	// локальная строка больше не представляет действующий карантин.
+	if err := b.db.DeleteQuarantine(ctx, chatID, userID); err != nil {
+		return owned, err
+	}
+	b.quar.Remove(chatID, userID)
+	return owned, nil
+}
+
+func isTextOnlyQuarantine(m *telego.ChatMemberRestricted, until int64) bool {
+	return m.UntilDate == until && m.CanSendMessages && !m.CanSendAudios &&
+		!m.CanSendDocuments && !m.CanSendPhotos && !m.CanSendVideos &&
+		!m.CanSendVideoNotes && !m.CanSendVoiceNotes && !m.CanSendPolls &&
+		!m.CanSendOtherMessages && !m.CanAddWebPagePreviews && !m.CanInviteUsers
 }
 
 // quarantineReleaseChat отпускает всех активных карантинных юзеров чата.

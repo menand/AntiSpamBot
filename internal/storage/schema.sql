@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS pending_captchas (
     -- Стадия серии капчи (1..3): какое сообщение серии сейчас живо. Рестарт
     -- продолжает серию с этой стадии, а не с начала.
     stage       INTEGER NOT NULL DEFAULT 1,
+    generation  TEXT NOT NULL DEFAULT '',
+    restrict_until INTEGER NOT NULL DEFAULT 0,
+    suspended   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -38,6 +41,35 @@ CREATE INDEX IF NOT EXISTS idx_events_chat_user_kind_at ON events(chat_id, user_
 -- Под прунинг: PruneEvents фильтрует и сортирует по at; без ведущего at
 -- каждый батч — скан всей таблицы (TEMP B-TREE) на единственном соединении.
 CREATE INDEX IF NOT EXISTS idx_events_at ON events(at);
+
+-- New funnel entries are keyed by their join event. The terminal event
+-- and its effect on the entry are written in the same SQLite transaction.
+CREATE TABLE IF NOT EXISTS funnel_entries (
+    join_event_id INTEGER PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,
+    closed_at     INTEGER,
+    outcome       TEXT
+);
+CREATE TRIGGER IF NOT EXISTS open_funnel_entry AFTER INSERT ON events
+WHEN NEW.kind = 'join'
+BEGIN
+    UPDATE funnel_entries SET closed_at = NEW.at, outcome = 'rejoined'
+    WHERE closed_at IS NULL AND join_event_id IN (
+        SELECT id FROM events
+        WHERE chat_id = NEW.chat_id AND user_id = NEW.user_id AND kind = 'join' AND at <= NEW.at
+    );
+    INSERT INTO funnel_entries (join_event_id) VALUES (NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS close_funnel_entry AFTER INSERT ON events
+WHEN NEW.kind IN ('pass', 'kick', 'ban', 'spamban', 'left', 'abort', 'funnel_close')
+BEGIN
+    UPDATE funnel_entries SET closed_at = NEW.at, outcome = NEW.kind
+    WHERE closed_at IS NULL AND join_event_id = (
+        SELECT j.id FROM events j
+        WHERE j.chat_id = NEW.chat_id AND j.user_id = NEW.user_id
+          AND j.kind = 'join' AND j.at <= NEW.at
+        ORDER BY j.at DESC, j.id DESC LIMIT 1
+    );
+END;
 
 CREATE TABLE IF NOT EXISTS members (
     chat_id   INTEGER NOT NULL,
@@ -192,6 +224,40 @@ CREATE TABLE IF NOT EXISTS spam_ballots (
 -- горячем пути спам-чека перед каждым LLM-вызовом.
 CREATE INDEX IF NOT EXISTS idx_spam_votes_chat_author ON spam_votes(chat_id, author_id);
 
+-- Принятые вердикты, ожидающие исполнения или завершения подтверждённого результата.
+CREATE TABLE IF NOT EXISTS spam_verdicts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id       INTEGER NOT NULL,
+    bot_msg_id    INTEGER NOT NULL,
+    target_msg_id INTEGER NOT NULL,
+    author_id     INTEGER NOT NULL,
+    initiator_id  INTEGER NOT NULL,
+    prob          INTEGER NOT NULL,
+    created_at    INTEGER NOT NULL,
+    is_spam       INTEGER NOT NULL,
+    why           TEXT NOT NULL,
+    ballots       TEXT NOT NULL,
+    outcome       TEXT NOT NULL DEFAULT '',
+    fanout_ready  INTEGER NOT NULL DEFAULT 0,
+    ban_reason    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_spam_verdicts_chat_author ON spam_verdicts(chat_id, author_id);
+
+CREATE TABLE IF NOT EXISTS spam_verdict_targets (
+    verdict_id INTEGER NOT NULL REFERENCES spam_verdicts(id) ON DELETE CASCADE,
+    chat_id    INTEGER NOT NULL,
+    status     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (verdict_id, chat_id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_spam_decisions (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    verdict_id INTEGER NOT NULL DEFAULT 0,
+    pardon_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);
+
 -- Общая база спамеров: вердикт «спам» в любом чате баним во всех чатах бота,
 -- а при входе такого юзера в новый чат — мгновенный бан вместо капчи.
 -- Ручной разбан админом в любом чате снимает флаг (DeleteSpamBanned из
@@ -199,7 +265,8 @@ CREATE INDEX IF NOT EXISTS idx_spam_votes_chat_author ON spam_votes(chat_id, aut
 CREATE TABLE IF NOT EXISTS spam_banned (
     user_id INTEGER PRIMARY KEY,
     chat_id INTEGER NOT NULL, -- чат, где вынесен вердикт
-    at      INTEGER NOT NULL
+    at      INTEGER NOT NULL,
+    decision_id INTEGER NOT NULL DEFAULT 0
 );
 
 -- Ожидания «ответь на приветствие» (режим reply_check): после капчи юзер
@@ -214,6 +281,9 @@ CREATE TABLE IF NOT EXISTS pending_replies (
     stage           INTEGER NOT NULL DEFAULT 1,
     -- Топик форума для повторных отправок якоря; 0 = без топика.
     thread_id       INTEGER NOT NULL DEFAULT 0,
+    greeting_msg_id INTEGER NOT NULL DEFAULT 0,
+    welcome_claimed INTEGER NOT NULL DEFAULT 0,
+    suspended       INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -309,8 +379,16 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 -- Архиватор находит незакрытые дни без полного скана.
 CREATE INDEX IF NOT EXISTS idx_messages_day ON messages(day);
+CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_id, ts);
 CREATE INDEX IF NOT EXISTS idx_messages_user_ts ON messages(user_id, ts);
+
+-- Message IDs and quoted message IDs remain scoped to their original chat.
+CREATE TABLE IF NOT EXISTS message_chat_moves (
+    old_id INTEGER PRIMARY KEY,
+    new_id INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_message_chat_moves_new ON message_chat_moves(new_id);
 
 -- Служебные метки бота (ключ-значение): например, announced_version —
 -- последняя версия, о которой разосланы ЛС-оповещения.
@@ -331,6 +409,15 @@ CREATE TABLE IF NOT EXISTS owner_settings (
     captcha_notify  INTEGER NOT NULL DEFAULT 0, -- слать в ЛС ВСЕ провалы капчи (mod_notify шлёт только повторные)
     version_notify  INTEGER NOT NULL DEFAULT 1, -- слать ЛС «бот обновлён»; единственный opt-out тумблер (нет строки = ВКЛ)
     last_stats_period TEXT                      -- последний выбранный период статистики DM-меню, NULL = неделя
+);
+
+-- Последнее сообщение с личным дайджестом. При повторе дополняем тот же
+-- экран, храня хеш его содержимого. Следующие сутки заменяют строку.
+CREATE TABLE IF NOT EXISTS daily_report_progress (
+    user_id    INTEGER PRIMARY KEY,
+    day        TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    body_hash  TEXT NOT NULL
 );
 
 -- Последнее отправленное юзеру ЛС-сообщение-экран каждого вида: показ нового
@@ -369,3 +456,43 @@ CREATE TABLE IF NOT EXISTS owner_dm_links (
     PRIMARY KEY (bot_id, owner_id, dm_message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_owner_dm_links_at ON owner_dm_links(at);
+
+-- Принятые решения о допуске, для которых ещё не подтверждены права Telegram.
+CREATE TABLE IF NOT EXISTS pending_admissions (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    generation TEXT NOT NULL,
+    action TEXT NOT NULL,
+    message_id INTEGER NOT NULL,
+    ephemeral_msg_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL,
+    release_needed INTEGER NOT NULL,
+    closes_check INTEGER NOT NULL,
+    quarantine_until INTEGER NOT NULL,
+    unban_done INTEGER NOT NULL DEFAULT 0,
+    ban_pending INTEGER NOT NULL DEFAULT 0,
+    pardon_id INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_manual_mutes (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    generation TEXT NOT NULL,
+    until_date INTEGER NOT NULL,
+    reason TEXT NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_punishments (
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    generation TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    ban_until INTEGER NOT NULL,
+    ban_confirmed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat_id, user_id)
+);

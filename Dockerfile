@@ -14,15 +14,14 @@ RUN CGO_ENABLED=0 GOOS=linux go build -tags stdjson -trimpath \
 FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -H -u 10001 bot && \
-    mkdir -p /data && chown bot:bot /data
+    mkdir -p /data /run/antispam && chown bot:bot /data /run/antispam
 COPY --from=build /out/bot /usr/local/bin/bot
 COPY --from=build /out/msgtool /usr/local/bin/msgtool
 COPY --chmod=755 scripts/healthcheck.sh /usr/local/bin/healthcheck
+ENV ANTISPAM_READY_FILE=/run/antispam/heartbeat
 USER bot
 VOLUME ["/data"]
-# Бот раз в минуту освежает /data/.heartbeat (рядом с DB_PATH); свежесть файла
-# — единственный честный признак жизни: зависший процесс остаётся «running»,
-# а тихий чат не пишет в лог часами.
+# Проверяется свежий heartbeat текущего PID 1 после инициализации обработчика.
 HEALTHCHECK --interval=2m --timeout=10s --start-period=2m --retries=3 \
     CMD ["/usr/local/bin/healthcheck"]
 ENTRYPOINT ["/usr/local/bin/bot"]

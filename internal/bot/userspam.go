@@ -102,7 +102,12 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 
 	// Гейт доверия инициатора — тот же порог, что у бюллетеней. Fail-closed:
 	// ошибка чтения счётчика репорту не доверяет (как и голосу).
-	s := b.chatSettings(b.runCtx, chatID)
+	s, err := b.db.GetChatSettings(b.runCtx, chatID)
+	if err != nil {
+		b.log.Warn("spam report settings", "err", err, "chat", chatID)
+		b.refuseAndDelete(ctx, message, "Не удалось прочитать настройки репорта. Попробуйте позже.")
+		return nil
+	}
 	total, err := b.db.UserMessageTotal(b.runCtx, chatID, message.From.ID)
 	if err != nil || total <= effectiveSpamWhitelist(s) {
 		if err != nil {
@@ -275,11 +280,9 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 		role = "владелец"
 	}
 	why := role + " " + userLabel(*message.From)
-	banned := b.executeSpamBan(v, storage.ReasonVotePrefix, why)
+	banned, verdictID := b.executeSpamBan(v, storage.ReasonVotePrefix, why)
 
-	// Замок снят: исполнение завершено (успешное или нет — повторять его
-	// осознанно не нужно, у бана нет частичного успеха, требующего ретрая
-	// руками человека).
+	// Прямое решение уже записано отдельно от временного замка репорта.
 	if _, terr := b.db.TakeSpamVote(b.runCtx, chatID, v.BotMsgID); terr != nil {
 		b.log.Warn("golden report: release claim", "err", terr, "chat", chatID)
 	}
@@ -292,14 +295,7 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 	// держать хендлер (локальный бан уже исполнен). Кросс-бан гейтится тем
 	// же флагом banned, что у голосований: неисполнимый локально вердикт
 	// не банит юзера по всему флоту без единого бюллетеня там.
-	targets := b.spamNotifyTargets(b.runCtx)
-	b.goSafe("goldenReportFanout", func() {
-		var alsoBanned []string
-		if banned {
-			alsoBanned = b.banEverywhere(chatID, targetID)
-		}
-		b.notifySpamVerdict(targets, v, true, banned, why, nil, alsoBanned)
-	})
+	b.notifyDirectSpamResult(v, banned, verdictID, why)
 
 	// Подтверждение адресовано исполнителю (modReceiver: в эфемерном чате
 	// увидит только он, как у /kick|/ban) — реплаем на цель якориться нельзя,

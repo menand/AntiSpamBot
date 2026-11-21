@@ -22,87 +22,69 @@ const (
 	captureFlushInt = 2 * time.Second
 	// captureReplyMaxRunes — потолок длины сохраняемой цитаты.
 	captureReplyMaxRunes = 300
-	// captureShutdownTimeout — потолок отсоединённого флаша при остановке.
+	// captureShutdownTimeout — потолок одной записи пачки, включая финальную.
 	captureShutdownTimeout = 3 * time.Second
 )
 
-// captureWriter — фоновая горутина захвата: собирает записи из captureCh
-// пачками и пишет их в messages одной транзакцией. Запускается только при
-// включённом MESSAGE_CAPTURE_ENABLED; иначе канал никто не читает и запись
-// в него отбрасывается captureMessage. По ctx.Done дорисовывает остаток
-// отсоединённым контекстом (runCtx уже отменён — им писать нельзя) и закрывает
-// captureDone, чтобы Run дождался этого ПЕРЕД db.Close().
-func (b *Bot) captureWriter(ctx context.Context) {
-	defer close(b.captureDone)
+func (b *Bot) startCaptureWriter() {
+	if !b.cfg.MessageCaptureEnabled {
+		return
+	}
+	b.captureMu.Lock()
+	defer b.captureMu.Unlock()
+	queue := make(chan storage.StoredMessage, captureBufSize)
+	done := make(chan struct{})
+	b.captureCh = queue
+	b.captureDone = done
+	b.goSafe("captureWriter", func() { b.captureWriter(queue, done) })
+}
+
+// captureWriter drains the queue until it is closed after the producers.
+// Each write has its own deadline and can finish after polling stops.
+func (b *Bot) captureWriter(queue <-chan storage.StoredMessage, done chan<- struct{}) {
+	defer close(done)
 	batch := make([]storage.StoredMessage, 0, captureBatchMax)
-	flush := func(wctx context.Context) {
+	flush := func() {
 		if len(batch) == 0 {
 			return
 		}
-		if err := b.db.AppendMessages(wctx, batch); err != nil {
-			// Отменённый контекст (runCtx умер посреди вставки) — пачку
-			// СОХРАНЯЕМ: финальный detached-флаш в Done-ветке дочешет её
-			// отсоединённым контекстом. Настоящая ошибка БД — логируем и
-			// отбрасываем (лучше потерять статистику, чем копить бесконечно).
-			if wctx.Err() != nil {
-				return
-			}
+		ctx, cancel := context.WithTimeout(context.Background(), captureShutdownTimeout)
+		defer cancel()
+		if err := b.db.AppendMessages(ctx, batch); err != nil {
 			b.log.Warn("capture: append messages", "err", err, "count", len(batch))
 		}
 		batch = batch[:0]
 	}
-	t := time.NewTimer(captureFlushInt)
-	defer t.Stop()
+	ticker := time.NewTicker(captureFlushInt)
+	defer ticker.Stop()
 	for {
 		select {
-		case <-ctx.Done():
-			// Последний шанс не потерять накопленное: runCtx мёртв, берём
-			// отсоединённый контекст с потолком (паттерн releaseOnAbort).
-			shutCtx, cancel := context.WithTimeout(context.Background(), captureShutdownTimeout)
-			// Дёргаем и то, что пришло в канал до отмены.
-			for drained := true; drained; {
-				select {
-				case m := <-b.captureCh:
-					batch = append(batch, m)
-				default:
-					drained = false
-				}
+		case m, ok := <-queue:
+			if !ok {
+				flush()
+				return
 			}
-			flush(shutCtx)
-			cancel()
-			return
-		case m := <-b.captureCh:
 			batch = append(batch, m)
 			if len(batch) >= captureBatchMax {
-				flush(ctx)
-				if !t.Stop() {
-					select {
-					case <-t.C:
-					default:
-					}
-				}
-				t.Reset(captureFlushInt)
+				flush()
+				ticker.Reset(captureFlushInt)
 			}
-		case <-t.C:
-			flush(ctx)
-			t.Reset(captureFlushInt)
+		case <-ticker.C:
+			flush()
 		}
 	}
 }
 
-// waitCaptureDone дожидается, пока captureWriter завершит финальный флаш (по
-// ctx.Done) и закроет captureDone. Если захват выключен, горутина не
-// запускалась и captureDone никогда не закроется — выходим по таймауту, это
-// no-op. Вызывается из Run ПЕРЕД db.Close(), чтобы финальная вставка не упала
-// на закрытом соединении.
-func (b *Bot) waitCaptureDone() {
-	if !b.cfg.MessageCaptureEnabled {
-		return
+func (b *Bot) stopCaptureWriter() {
+	b.captureMu.Lock()
+	if b.captureCh != nil {
+		close(b.captureCh)
+		b.captureCh = nil
 	}
-	select {
-	case <-b.captureDone:
-	case <-time.After(captureShutdownTimeout + time.Second):
-		b.log.Warn("capture: writer did not finish in time")
+	done := b.captureDone
+	b.captureMu.Unlock()
+	if done != nil {
+		<-done
 	}
 }
 
@@ -117,6 +99,11 @@ func (b *Bot) captureMessage(m *telego.Message, kind string) {
 	}
 	rec := captureFromMessage(m)
 	rec.Kind = kind
+	b.captureMu.RLock()
+	defer b.captureMu.RUnlock()
+	if b.captureCh == nil {
+		return
+	}
 	select {
 	case b.captureCh <- rec:
 	default:

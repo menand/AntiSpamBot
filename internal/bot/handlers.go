@@ -90,7 +90,6 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	// разбаненного спамера (kicked → administrator) должен успеть и простить
 	// глобальный флаг, и снять карантин.
 	if newStatus == "administrator" {
-		_, _ = b.releaseQuarantineUser(upd.Chat.ID, user.ID)
 		// Промоушен — терминал и для активных проверок: серия капчи или
 		// reply-wait не должна досчитать до наказания свежего админа
 		// (бэкстоп punishAttempt перепроверяет статус, но только в самом
@@ -100,6 +99,15 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		// завис бы в «В процессе» (канон /mute и unmod).
 		ctx, cancel := b.liveCtx()
 		defer cancel()
+		unlock, err := b.rights.lock(ctx, upd.Chat.ID, user.ID, false)
+		if err != nil {
+			return err
+		}
+		defer unlock()
+		if err := b.checkManualMute(ctx, upd.Chat.ID, user.ID); err != nil {
+			return nil
+		}
+		_, _ = b.releaseQuarantineLocked(ctx, upd.Chat.ID, user.ID)
 		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
 			p.Cancel()
 			// Серверный release ДО удаления строки: обрыв в этом окне
@@ -136,7 +144,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		return nil
 	}
 
-	joined := (oldStatus == "left" || oldStatus == "kicked") &&
+	joined := !upd.OldChatMember.MemberIsMember() && upd.NewChatMember.MemberIsMember() &&
 		(newStatus == "member" || newStatus == "restricted")
 	if joined {
 		// chat_member-апдейты не несут информации о топике; капча уйдёт в General (0).
@@ -149,7 +157,7 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 	// статистику провалов, а наш собственный кик после провала не задет
 	// (вызывающие onFail всегда забирают pending через Take ДО кика, так что
 	// для них этот lookup промахнётся).
-	if newStatus == "left" || newStatus == "kicked" {
+	if !upd.NewChatMember.MemberIsMember() {
 		// Свои события (fail-кик капчи, вердикт антиспама, captchaStageLoop,
 		// кросс-бан banEverywhere в ДРУГОМ чате) уже записали своё — лево-ветка
 		// не пишет поверх них НИЧЕГО. Но чистку состояния (pending/reply/таймер)
@@ -157,6 +165,9 @@ func (b *Bot) handleChatMember(ctx *th.Context, update telego.Update) error {
 		// своём чате (cancelCaptchaSilent), а сиротский таймаут в чужом чате
 		// поднял бы кросс-бан через unban-половину kick'а.
 		botOrigin := b.me != nil && upd.From.ID == b.me.ID
+		if !botOrigin {
+			b.retireDeferredOnDeparture(upd.Chat.ID, user.ID)
+		}
 		if p, ok := b.store.Take(upd.Chat.ID, user.ID); ok {
 			p.Cancel()
 			if err := b.db.DeletePending(b.runCtx, upd.Chat.ID, user.ID); err != nil {
@@ -346,6 +357,16 @@ func (b *Bot) dropChat(ctx context.Context, chatID int64, why string) {
 	for _, p := range b.replies.TakeChat(chatID) {
 		p.Cancel()
 	}
+	if err := b.db.DeleteChatManualMutes(ctx, chatID); err != nil {
+		b.log.Warn("delete pending manual mutes", "err", err, "chat", chatID)
+	}
+	if err := b.db.DeleteChatPunishments(ctx, chatID); err != nil {
+		b.log.Warn("delete pending punishments", "err", err, "chat", chatID)
+	}
+	if err := b.db.DeleteChatAdmissions(ctx, chatID); err != nil {
+		b.log.Warn("delete pending admissions", "err", err, "chat", chatID)
+	}
+
 	if err := b.db.DeletePendingRepliesChat(ctx, chatID); err != nil {
 		b.log.Warn("delete pending replies", "err", err, "chat", chatID)
 	}
@@ -384,7 +405,6 @@ func (b *Bot) reconcileChats(ctx context.Context) {
 	}
 	for _, c := range chats {
 		if !b.chatAllowed(c.ChatID) {
-			b.dropChat(ctx, c.ChatID, "not in ALLOWED_CHATS")
 			continue
 		}
 		m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
@@ -482,6 +502,19 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 		Type:     chat.Type,
 		Username: chat.Username,
 	})
+	if err := b.checkManualMute(b.runCtx, chatID, user.ID); err != nil {
+		return
+	}
+	if _, pending, err := b.db.GetPunishment(b.runCtx, chatID, user.ID); err != nil || pending {
+		return
+	}
+	if _, pending, err := b.db.GetPendingAdmission(b.runCtx, chatID, user.ID); err != nil || pending {
+		if err != nil {
+			b.log.Warn("read pending admission on join", "err", err, "chat", chatID, "user", user.ID)
+		}
+		return
+	}
+
 	// Доверенный (/whitelist): вход без капчи, reply-ожидания и профиль-чека.
 	// Проверка ДО глобальной базы спамеров — пер-чатовое доверие админа
 	// перекрывает её в этом чате. Ошибка чтения — обычная капча (fail-safe).
@@ -546,10 +579,11 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 	// вместо капчи. BeginKickoff гасит дубль-доставку chat_member +
 	// new_chat_members; в горутине — banRevoke с ретраями не должен
 	// блокировать обработку апдейтов.
-	if banned, err := b.db.IsSpamBanned(b.runCtx, user.ID); err == nil && banned {
+	if banned, err := b.db.IsSpamBannedInChat(b.runCtx, chatID, user.ID); err == nil && banned {
 		if !b.store.BeginKickoff(chatID, user.ID) {
 			return
 		}
+		kickoff := b.store.KickoffContext(chatID, user.ID)
 		b.goSafe("banKnownSpammer", func() {
 			// Замок снимается двумя штатными путями ниже (fail — сразу,
 			// success — через минуту в AfterFunc). Паника между ними раньше
@@ -560,20 +594,30 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			handedOff := false
 			defer func() {
 				if !handedOff {
-					b.store.FinishKickoff(chatID, user.ID)
+					b.store.FinishKickoff(chatID, user.ID, kickoff)
 				}
 			}()
+			unlock, err := b.rights.lock(b.runCtx, chatID, user.ID, false)
+			if err != nil {
+				return
+			}
+			defer unlock()
+			if kickoff.Err() != nil {
+				return
+			}
+			if banned, err := b.db.IsSpamBannedInChat(b.runCtx, chatID, user.ID); err != nil || !banned {
+				b.store.FinishKickoff(chatID, user.ID, kickoff)
+				handedOff = true
+				b.startCaptcha(chatID, user, threadID)
+				return
+			}
 			if err := b.banRevoke(b.runCtx, chatID, user.ID); err != nil {
 				// Бан не прошёл (обычно нет прав) — не оставляем спамера
 				// без присмотра: обычная капча, как до этой фичи.
 				b.log.Warn("ban known spammer on join", "err", err, "chat", chatID, "user", user.ID)
-				b.store.FinishKickoff(chatID, user.ID)
+				b.store.FinishKickoff(chatID, user.ID, kickoff)
 				handedOff = true // снят вручную ДО startCaptcha — он берёт замок заново
-				if b.startCaptcha(chatID, user, threadID) {
-					if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now(), ""); err != nil {
-						b.log.Warn("record join event (spammer fallback)", "err", err)
-					}
-				}
+				b.startCaptcha(chatID, user, threadID)
 				return
 			}
 			b.log.Info("banned known spammer on join", "chat", chatID, "user", user.ID)
@@ -594,7 +638,7 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 			// не должна убивать процесс (recover не пересекает горутины).
 			time.AfterFunc(time.Minute, func() {
 				b.goSafe("finishKickoffLinger", func() {
-					b.store.FinishKickoff(chatID, user.ID)
+					b.store.FinishKickoff(chatID, user.ID, kickoff)
 				})
 			})
 		})
@@ -619,13 +663,7 @@ func (b *Bot) onUserJoined(chat telego.Chat, user telego.User, threadID int) {
 		b.log.Info("recently passed user rejoined with reply-check on — re-running captcha",
 			"chat", chatID, "user", user.ID)
 	}
-	if !b.startCaptcha(chatID, user, threadID) {
-		// Дубль-доставка (chat_member + new_chat_members) — уже посчитано.
-		return
-	}
-	if err := b.db.RecordEvent(b.runCtx, chatID, user.ID, storage.EventJoin, time.Now(), ""); err != nil {
-		b.log.Warn("record join event", "err", err)
-	}
+	b.startCaptcha(chatID, user, threadID)
 }
 
 func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error {
@@ -658,6 +696,12 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 		return nil
 	}
 
+	unlock, err := b.rights.lock(b.runCtx, chatID, targetUserID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	capMsg := query.Message.Message()
 	// Stale-guard и Take — атомарно (TakeMatch): клик по устаревшей
 	// клавиатуре (старая капча, чей delete не прошёл) не должен разрешать
@@ -667,10 +711,14 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 	// же юзера. Недоступное сообщение (capMsg == nil) проверить нечем — а
 	// живая капча живёт минуты, так что клик почти наверняка с чужой/мёртвой
 	// клавиатуры: считаем его устаревшим, а не пропускаем наудачу.
-	p, ok := b.store.TakeMatch(chatID, query.From.ID, func(live *captcha.Pending) bool {
-		return capMsg != nil && !staleCaptchaClick(live, capMsg)
+	p, err := b.takeCaptchaAnswer(b.runCtx, chatID, query.From.ID, capMsg, func(live *captcha.Pending) bool {
+		return optIdx == live.CorrectIdx
 	})
-	if !ok {
+	if err != nil {
+		b.reportCaptchaSaveError(ctx, query, err)
+		return nil
+	}
+	if p == nil {
 		// Живого pending нет: чаще всего даблклик верного ответа спустя
 		// мгновение после прохождения — «Время вышло» здесь фактическая ложь,
 		// таймаут-то не наступал. Нейтральная формулировка честна во всех
@@ -688,23 +736,9 @@ func (b *Bot) handleCallback(ctx *th.Context, query telego.CallbackQuery) error 
 		_ = b.api.AnswerCallbackQuery(ctx, answer)
 		return nil
 	}
-	p.Cancel()
-	// Success-путь чистит pending СРАЗУ: onSuccess тянется секунды (release
-	// с ретраями, приветствие), и рестарт в этом окне иначе воскресил бы
-	// капчу для уже прошедшего и размьюченного юзера — с киком от таймера
-	// серии. Fail-путь, наоборот, держит строку до успешного
-	// наказания: она и есть механизм повтора при рестарте (см. onFail).
-
 	if optIdx == p.CorrectIdx {
-		if err := b.db.DeletePendingIfMsg(b.runCtx, chatID, query.From.ID, p.MessageID, p.EphemeralID); err != nil {
-			b.log.Warn("delete pending on captcha pass", "err", err,
-				"chat", chatID, "user", query.From.ID)
-		}
-		_ = b.api.AnswerCallbackQuery(ctx,
-			tu.CallbackQuery(query.ID).WithText("Правильно, добро пожаловать!"))
-		if err := b.onSuccess(b.runCtx, p, "выбрал "+buttonLabel(capMsg, optIdx)); err != nil {
-			b.log.Error("on success", "err", err, "chat", chatID, "user", query.From.ID)
-		}
+		b.answerAdmissionCallback(ctx, query, b.onSuccess(b.runCtx, p, "выбрал "+buttonLabel(capMsg, optIdx)),
+			"Правильно, добро пожаловать!")
 	} else {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Неверно.").WithShowAlert())
@@ -755,15 +789,23 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 				WithShowAlert())
 		return nil
 	}
+	unlock, err := b.rights.lock(b.runCtx, chatID, targetUserID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	// Тот же атомарный stale-guard, что в handleCallback: «Впустить» с
 	// мёртвой клавиатуры не должно апрувить живую капчу того же юзера.
 	// Недоступное сообщение проверке не поддаётся и считается устаревшим
 	// (см. комментарий там же).
-	p, ok := b.store.TakeMatch(chatID, targetUserID, func(live *captcha.Pending) bool {
-		msg := query.Message.Message()
-		return msg != nil && !staleCaptchaClick(live, msg)
-	})
-	if !ok {
+	p, err := b.takeCaptchaAnswer(b.runCtx, chatID, targetUserID, query.Message.Message(),
+		func(*captcha.Pending) bool { return true })
+	if err != nil {
+		b.reportCaptchaSaveError(ctx, query, err)
+		return nil
+	}
+	if p == nil {
 		msg := query.Message.Message()
 		text := "Капча уже не активна."
 		stale := false
@@ -778,19 +820,8 @@ func (b *Bot) handleApproveCallback(ctx *th.Context, query telego.CallbackQuery)
 		_ = b.api.AnswerCallbackQuery(ctx, answer)
 		return nil
 	}
-	// Pending — сразу (см. handleCallback: success-путь не оставляет строку).
-	p.Cancel()
-	if err := b.db.DeletePendingIfMsg(b.runCtx, chatID, targetUserID, p.MessageID, p.EphemeralID); err != nil {
-		b.log.Warn("delete pending on admin approve", "err", err,
-			"chat", chatID, "user", targetUserID)
-	}
-	_ = b.api.AnswerCallbackQuery(ctx,
-		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
-	b.log.Info("captcha approved by admin",
-		"chat", chatID, "user", targetUserID, "admin", query.From.ID)
-	if err := b.onSuccess(b.runCtx, p, ""); err != nil {
-		b.log.Error("on success (admin approve)", "err", err, "chat", chatID, "user", targetUserID)
-	}
+	b.log.Info("captcha approved by admin", "chat", chatID, "user", targetUserID, "admin", query.From.ID)
+	b.answerAdmissionCallback(ctx, query, b.onSuccess(b.runCtx, p, ""), "Пользователь впущен.")
 	return nil
 }
 
@@ -825,16 +856,13 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 		return nil
 	}
 
-	// Stale-guard: клик по кнопке на старом якоре (стадия уже перешла)
-	// не должен разрешать актуальное ожидание. GreetingMsgID == 0 после
-	// рестарта (строка не персистится) — пропускаем любой клик (fail-open
-	// для админского действия, как releaseOnAbort).
+	// Изъятие ожидания и проверка актуального якоря происходят под одним lock.
 	greetingMsgID := 0
 	if msg := query.Message.Message(); msg != nil {
 		greetingMsgID = msg.MessageID
 	}
 	p, ok := b.replies.TakeMatch(chatID, targetUserID, func(rp *replyPending) bool {
-		return rp.GreetingMsgID == 0 || rp.GreetingMsgID == greetingMsgID
+		return rp.matchesGreeting(greetingMsgID)
 	})
 	if !ok {
 		text := "Ожидание уже не активно."
@@ -846,11 +874,11 @@ func (b *Bot) handleReplyApproveCallback(ctx *th.Context, query telego.CallbackQ
 		return nil
 	}
 	p.Cancel()
-	if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, targetUserID, p.Stage); err != nil {
+	if err := b.db.DeletePendingReplyForGreeting(b.runCtx, chatID, targetUserID, greetingMsgID); err != nil {
 		b.log.Warn("delete pending reply on admin approve", "err", err,
 			"chat", chatID, "user", targetUserID)
 	}
-	b.deleteReplyAnchor(b.runCtx, chatID, targetUserID)
+	b.deleteReplyAnchor(b.runCtx, chatID, targetUserID, greetingMsgID)
 	_ = b.api.AnswerCallbackQuery(ctx,
 		tu.CallbackQuery(query.ID).WithText("Пользователь впущен."))
 
@@ -917,7 +945,7 @@ func (b *Bot) replySpamFirstClick(ctx *th.Context, query telego.CallbackQuery) e
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 		return nil
 	}
-	if !b.replies.MatchesGreeting(chatID, targetUserID, msg.MessageID) {
+	if b.replies.MatchGreeting(chatID, targetUserID, msg.MessageID) == nil {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).
 				WithText("Ожидание уже не активно.").
@@ -949,9 +977,7 @@ func (b *Bot) replySpamFirstClick(ctx *th.Context, query telego.CallbackQuery) e
 }
 
 // replySpamConfirm — подтверждение «Да, это спам»: бан юзера во всех чатах.
-// Паттерн как у execGoldenSpamReport: pending НЕ берём до executeSpamBan —
-// cancelReplyWait внутри него разберётся. При провале бана записываем
-// компенсирующий pass, иначе user застревает в «В процессе» навсегда.
+// Ожидание снимает executeSpamBan только после подтверждённого бана.
 func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) error {
 	targetUserID, err := strconv.ParseInt(strings.TrimPrefix(query.Data, "rpspamc:"), 10, 64)
 	if err != nil {
@@ -982,7 +1008,8 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 	if msg != nil {
 		greetingMsgID = msg.MessageID
 	}
-	if !b.replies.MatchesGreeting(chatID, targetUserID, greetingMsgID) {
+	p := b.replies.MatchGreeting(chatID, targetUserID, greetingMsgID)
+	if p == nil {
 		text := "Ожидание уже не активно."
 		if _, still := b.replies.Get(chatID, targetUserID); still {
 			text = "Это сообщение устарело — дождитесь следующего."
@@ -1034,55 +1061,30 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 		return nil
 	}
 
-	// executeSpamBan вызовет cancelReplyWait внутри — pending будет взят
-	// и закрыт компенсирующим pass при успешном бане. При неуспешном —
-	// pending останется активным, пользователь сможет ответить.
-	banned := b.executeSpamBan(v, reason, why)
+	if b.replies.MatchGreeting(chatID, targetUserID, greetingMsgID) != p {
+		if _, err := b.db.TakeSpamVote(b.runCtx, chatID, v.BotMsgID); err != nil {
+			b.log.Warn("reply-spam: release stale claim", "err", err, "chat", chatID)
+		}
+		_ = b.api.AnswerCallbackQuery(ctx,
+			tu.CallbackQuery(query.ID).WithText("Это сообщение устарело — дождитесь следующего.").WithShowAlert())
+		return nil
+	}
 
-	// Тост — после бана: честный по флагу banned.
+	banned, verdictID := b.executeSpamBan(v, reason, why)
+	if _, err := b.db.TakeSpamVote(b.runCtx, chatID, v.BotMsgID); err != nil {
+		b.log.Warn("reply-spam: release claim", "err", err, "chat", chatID)
+	}
+
 	if banned {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Пользователь забанен."))
 	} else {
 		_ = b.api.AnswerCallbackQuery(ctx,
-			tu.CallbackQuery(query.ID).WithText("Забанить не удалось — проверьте права бота.").
+			tu.CallbackQuery(query.ID).WithText("Забанить не удалось — проверьте права бота и повторите попытку.").
 				WithShowAlert())
-		// При провале бана: cancelReplyWait не нашёл pending (или не
-		// вызывался), пользователь мог остаться без active checks. Записываем
-		// компенсирующий pass и сносим якорь — иначе stats навсегда
-		// покажут «В процессе» (прецедент onSuccess/disarmed reply wait).
-		if _, ok := b.replies.Get(chatID, targetUserID); ok {
-			// Pending ещё жив (ban не дошёл до cancelReplyWait) —
-			// берём и закрываем. RecordEvent + deleteReplyAnchor —
-			// только если Take выиграл: иначе replyWaitSatisfied уже
-			// записал pass и закрыл pending.
-			if taken, ok := b.replies.Take(chatID, targetUserID); ok {
-				taken.Cancel()
-				if err := b.db.DeletePendingReplyIf(b.runCtx, chatID, targetUserID, taken.Stage); err != nil {
-					b.log.Warn("delete pending reply on ban failure", "err", err,
-						"chat", chatID, "user", targetUserID)
-				}
-				if err := b.db.RecordEvent(b.runCtx, chatID, targetUserID,
-					storage.EventPass, time.Now(), ""); err != nil {
-					b.log.Warn("record pass event (reply-spam ban failed)", "err", err)
-				}
-				b.deleteReplyAnchor(b.runCtx, chatID, targetUserID)
-			}
-		}
 	}
 
-	if _, terr := b.db.TakeSpamVote(b.runCtx, chatID, v.BotMsgID); terr != nil {
-		b.log.Warn("reply-spam: release claim", "err", terr, "chat", chatID)
-	}
-
-	targets := b.spamNotifyTargets(b.runCtx)
-	b.goSafe("replySpamFanout", func() {
-		var alsoBanned []string
-		if banned {
-			alsoBanned = b.banEverywhere(chatID, targetUserID)
-		}
-		b.notifySpamVerdict(targets, v, true, banned, why, nil, alsoBanned)
-	})
+	b.notifyDirectSpamResult(v, banned, verdictID, why)
 
 	threadID := 0
 	if msg != nil {
@@ -1091,7 +1093,7 @@ func (b *Bot) replySpamConfirm(ctx *th.Context, query telego.CallbackQuery) erro
 	text := "🚫 " + b.mentionFor(query.From.ID) + " пометил(а) как спамера — " +
 		b.mentionFor(targetUserID) + " забанен с чисткой сообщений."
 	if !banned {
-		text = "🚫 Репорт принят, но забанить не удалось — проверьте права бота."
+		text = "🚫 Забанить не удалось. Проверьте права бота и повторите попытку."
 	}
 	var receiverID int64
 	if msg != nil {
@@ -1132,8 +1134,8 @@ func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error
 		return nil
 	}
 
-	// Stale-guard: если pending уже закрыт — восстанавливать нечего.
-	if _, ok := b.replies.Get(chatID, targetUserID); !ok {
+	p := b.replies.MatchGreeting(chatID, targetUserID, msg.MessageID)
+	if p == nil {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).
 				WithText("Ожидание уже не активно.").
@@ -1150,15 +1152,11 @@ func (b *Bot) replySpamCancel(ctx *th.Context, query telego.CallbackQuery) error
 		b.log.Warn("fetch user info for greeting restore", "err", ierr)
 	}
 	mention := mentionOrID(infos, targetUserID)
-	stage := 1
-	if p, ok := b.replies.Get(chatID, targetUserID); ok {
-		stage = p.Stage
-	}
 	// Якорь серии — всегда тело ПРОВЕРКИ стадии (серия живёт только в режиме
 	// «с ответом»; после одноразовой миграции текстов оно лежит в reply_*):
 	// общий рендер welcomeAnchorText добавляет и строку-требование, и
 	// карантинную сноску — вручную собранная копия их теряла.
-	greetingText := welcomeAnchorText(settings, welcomeReply, stage,
+	greetingText := welcomeAnchorText(settings, welcomeReply, p.Stage,
 		int(b.effectiveStageInterval(settings).Minutes()), mention)
 
 	origKB := &telego.InlineKeyboardMarkup{InlineKeyboard: [][]telego.InlineKeyboardButton{
@@ -1650,10 +1648,19 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	defer cancel()
 	stop := context.AfterFunc(kickoff, cancel)
 	defer stop()
-	if kickoff.Err() != nil {
+	unlock, err := b.rights.lock(ctx, chatID, user.ID, false)
+	if err != nil {
+		return
+	}
+	defer unlock()
+
+	if kickoff.Err() != nil || b.checkManualMute(ctx, chatID, user.ID) != nil {
 		return
 	}
 
+	if _, pending, err := b.db.GetPunishment(ctx, chatID, user.ID); err != nil || pending {
+		return
+	}
 	// Кэшируем display-имя сейчас — оно понадобится приветствию после
 	// успешного прохождения (к тому моменту юзер ещё ничего не писал, и
 	// путь обработки сообщений user_info не заполнил бы).
@@ -1664,24 +1671,47 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 		Username:  user.Username,
 	})
 
-	// Restrict ПЕРВЫМ — каждая секунда до этого вызова открытое окно для
-	// спам-ботов «вошёл-и-запостил»: сообщение-то удалится, но
-	// push-уведомления уже разлетелись. Сам рестрикт юзеру не виден, поэтому
-	// задержка на отрисовку (ниже) ему не нужна.
-	if err := b.restrict(ctx, chatID, user.ID); err != nil {
-		if kickoff.Err() != nil {
-			return // ручная модерация уже определила новые ограничения
+	settings := b.chatSettings(ctx, chatID)
+	preparation, err := b.newCaptchaPreparation(ctx, chatID, user.ID, threadID, settings)
+	if err != nil {
+		if kickoff.Err() == nil && !errors.Is(err, storage.ErrAdmissionPending) {
+			b.log.Error("persist captcha preparation", "err", err, "chat", chatID, "user", user.ID)
+			b.recordAbortDetached(chatID, user.ID, "prepare persist failed")
 		}
-		b.log.Error("restrict", "err", err, "chat", chatID, "user", user.ID)
-		// Воронку закрываем: join уже записан, а капчи не будет — иначе юзер
-		// навсегда зависнет в «В процессе». Это abort (вина инфраструктуры),
-		// не «вышли сами»: юзер никуда не уходил и будет размучен ниже.
-		// releaseOnAbort — страховка от частично применённого restriction
-		// (таймаут после применения).
-		b.recordAbortEvent(ctx, chatID, user.ID, "restrict failed")
-		b.releaseOnAbort(ctx, chatID, user.ID)
 		return
 	}
+	published := false
+	defer func() {
+		if !published && kickoff.Err() != nil {
+			cleanup, cancel := b.liveCtx()
+			defer cancel()
+			if err := b.db.CancelCaptchaGeneration(cleanup, preparation); err != nil {
+				b.log.Warn("cancel captcha preparation", "err", err, "chat", chatID, "user", user.ID)
+			}
+		}
+	}()
+
+	if err := b.restrictCaptcha(ctx, chatID, user.ID, preparation.RestrictUntil); err != nil {
+		if kickoff.Err() == nil {
+			b.log.Error("restrict captcha", "err", err, "chat", chatID, "user", user.ID)
+			// Запрос мог примениться, хотя клиент получил ошибку.
+			base, cancel := b.liveCtx()
+			defer cancel()
+			check, stop := context.WithCancel(base)
+			defer stop()
+			unlink := context.AfterFunc(kickoff, stop)
+			defer unlink()
+			if err := b.restoreCaptchaPreparation(check, preparation); err != nil {
+				b.log.Warn("reconcile uncertain captcha restrict", "err", err, "chat", chatID, "user", user.ID)
+			}
+		}
+		return
+	}
+
+	// При аномально долгой задержке или ретраях подготовка не переживает
+	// серверный страховочный срок.
+	ctx, stopAtDeadline := context.WithDeadline(ctx, time.Unix(preparation.RestrictUntil, 0))
+	defer stopAtDeadline()
 
 	// Теперь даём клиенту юзера время полностью открыть чат. Без этого
 	// сообщение капчи иногда не подклеивается в уже отрисованную ленту, и
@@ -1690,28 +1720,24 @@ func (b *Bot) runCaptcha(chatID int64, user telego.User, threadID int) {
 	if b.cfg.CaptchaDelay > 0 {
 		select {
 		case <-ctx.Done():
-			if kickoff.Err() != nil {
-				return
-			}
-			// Shutdown в окне задержки: рестрикт уже применён, а pending ещё
-			// не записан — рестарт юзера не восстановит. Снимаем мут и
-			// закрываем воронку abort'ом (join уже записан), иначе юзер
-			// навсегда висел бы в «В процессе». Событие — на detached-бюджете:
-			// RecordEvent на отменённом runCtx был бы гарантированный no-op.
-			b.recordAbortDetached(chatID, user.ID, "shutdown during captcha delay")
-			b.releaseOnAbort(ctx, chatID, user.ID)
+			b.abortCaptchaPreparation(preparation, storage.EventAbort, kickoff)
 			return
 		case <-time.After(b.cfg.CaptchaDelay):
 		}
 	}
 
-	settings := b.chatSettings(ctx, chatID)
-	p := b.sendCaptchaStage(ctx, settings, chatID, user.ID, threadID, 1)
+	if ctx.Err() != nil {
+		b.abortCaptchaPreparation(preparation, storage.EventAbort, kickoff)
+		return
+	}
+
+	p := b.sendCaptchaStage(ctx, settings, chatID, user.ID, threadID, 1, &preparation)
 	if p == nil {
 		// Серия оборвалась при отправке первой стадии (юзер ушёл / сбой
 		// инфраструктуры): воронка и мьют уже закрыты внутри.
 		return
 	}
+	published = true
 	// Вся серия живёт в своей горутине (как прежний waitTimeout): runCaptcha
 	// возвращается сразу после взведения первой стадии.
 	b.goSafe("captchaStageLoop", func() { b.captchaStageLoop(chatID, user.ID, p) })
@@ -1725,14 +1751,38 @@ const captchaStages = 3
 
 // sendCaptchaStage собирает и отправляет сообщение капчи стадии stage
 // (1..captchaStages). Возвращает живой Pending (уже в store и в БД) или nil,
-// если серия оборвалась здесь: все abort-пути внутри сами закрывают воронку
-// (left/abort) и снимают капча-мьют (releaseOnAbort).
+// если серия оборвалась здесь. У первой стадии намерение остаётся в SQLite,
+// пока не подтверждена отправка или не снято ограничение.
 func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSettings,
-	chatID, userID int64, threadID, stage int,
+	chatID, userID int64, threadID, stage int, preparation *storage.PendingRow,
 ) *captcha.Pending {
-	if b.store.KickoffContext(chatID, userID).Err() != nil {
+	kickoff := b.store.KickoffContext(chatID, userID)
+	if kickoff.Err() != nil {
 		return nil
 	}
+	finish := func(kind storage.EventKind, why string) {
+		if kickoff.Err() != nil {
+			return
+		}
+		if preparation != nil {
+			b.abortCaptchaPreparation(*preparation, kind, kickoff)
+			return
+		}
+		switch kind {
+		case storage.EventLeft:
+			b.recordLeftEvent(ctx, chatID, userID, why)
+		case storage.EventPass:
+			live, cancel := b.liveCtx()
+			defer cancel()
+			if err := b.db.RecordEvent(live, chatID, userID, kind, time.Now(), ""); err != nil {
+				b.log.Warn("record pass event (promoted mid-kickoff)", "err", err, "chat", chatID, "user", userID)
+			}
+		default:
+			b.recordAbortEvent(ctx, chatID, userID, why)
+		}
+		b.releaseOnAbort(ctx, chatID, userID)
+	}
+
 	interval := b.effectiveStageInterval(settings)
 	mode := effectiveCaptchaMode(settings)
 	ch := captcha.New(mode)
@@ -1825,28 +1875,20 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 			return e
 		})
 	}
-	if err != nil {
-		// USER_NOT_PARTICIPANT — юзер вышел до доставки капчи (в store её ещё
-		// нет, ветка «left mid-captcha» в handleChatMember не сработала).
-		// Не провал капчи: kick не пишем, а EventLeft — чтобы воронка в
-		// статистике сходилась, а не копила «В процессе» навсегда.
-		if b.store.KickoffContext(chatID, userID).Err() != nil {
-			return nil
-		}
+	if err != nil || msg == nil || (msg.MessageID <= 0 && msg.EphemeralMessageID <= 0) {
 		if isUserNotParticipant(err) {
-			b.recordLeftEvent(ctx, chatID, userID, "user not participant")
-			b.log.Info("captcha aborted — user not participant",
-				"chat", chatID, "user", userID, "stage", stage)
+			finish(storage.EventLeft, "user not participant")
 		} else {
 			b.log.Error("send captcha", "err", err, "chat", chatID, "user", userID, "stage", stage)
-			// Не USER_NOT_PARTICIPANT — про юзера неизвестно ничего, но капча
-			// сорвалась после ретраев. releaseOnAbort ниже впустит его; здесь
-			// закрываем воронку как abort (инфраструктура), не «вышли сами».
-			b.recordAbortEvent(ctx, chatID, userID, "captcha send failed")
+			finish(storage.EventAbort, "captcha send failed")
 		}
-		// releaseOnAbort: при живом ctx (сетевой фейл) — полный бюджет ретраев,
-		// при отменённом (shutdown) — detached, иначе мут не снялся бы.
-		b.releaseOnAbort(ctx, chatID, userID)
+		return nil
+	}
+
+	if kickoff.Err() != nil {
+		live, cancel := b.liveCtx()
+		defer cancel()
+		_ = b.deleteBotMessage(live, chatID, msg.MessageID, msg.EphemeralMessageID, userID)
 		return nil
 	}
 
@@ -1862,14 +1904,11 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 		ChatID: tu.ID(chatID),
 		UserID: userID,
 	}); merr == nil {
-		if s := m.MemberStatus(); s == "left" || s == "kicked" {
+		if s := m.MemberStatus(); !m.MemberIsMember() {
 			if derr := b.deleteBotMessage(ctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID); derr != nil {
 				b.log.Debug("delete captcha of departed user", "err", derr, "chat", chatID)
 			}
-			b.recordLeftEvent(ctx, chatID, userID, "left before captcha")
-			b.log.Info("captcha aborted — user left before captcha",
-				"chat", chatID, "user", userID, "stage", stage)
-			b.releaseOnAbort(ctx, chatID, userID)
+			finish(storage.EventLeft, "left before captcha")
 			return nil
 		} else if s == "administrator" || s == "creator" {
 			// Промоушен в окне kickoff: рестрикт уже лёг, но в store/строке
@@ -1884,13 +1923,7 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 			if derr := b.deleteBotMessage(pctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID); derr != nil {
 				b.log.Debug("delete captcha of promoted admin", "err", derr, "chat", chatID)
 			}
-			if err := b.db.RecordEvent(pctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-				b.log.Warn("record pass event (promoted mid-kickoff)", "err", err,
-					"chat", chatID, "user", userID)
-			}
-			b.log.Info("captcha aborted — user promoted mid-kickoff",
-				"chat", chatID, "user", userID, "stage", stage)
-			b.releaseOnAbort(pctx, chatID, userID)
+			finish(storage.EventPass, "promoted mid-kickoff")
 			pcancel()
 			return nil
 		}
@@ -1899,12 +1932,33 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 	}
 
 	expires := time.Now().Add(interval)
+	if preparation != nil {
+		ready := *preparation
+		ready.MessageID, ready.EphemeralID = msg.MessageID, msg.EphemeralMessageID
+		ready.CorrectIdx, ready.ExpiresAt = ch.CorrectIdx, expires
+		activated, err := b.db.ActivatePreparedCaptcha(ctx, ready)
+		if !activated {
+			live, cancel := b.liveCtx()
+			defer cancel()
+			_ = b.deleteBotMessage(live, chatID, msg.MessageID, msg.EphemeralMessageID, userID)
+			if err != nil {
+				b.log.Warn("activate prepared captcha", "err", err, "chat", chatID, "user", userID)
+				finish(storage.EventAbort, "pending activation failed")
+			}
+			return nil
+		}
+	}
+
 	p := b.store.Put(chatID, userID, msg.MessageID, ch.CorrectIdx, expires, threadID, msg.EphemeralMessageID, stage)
 	if p == nil {
 		dctx, cancel := b.liveCtx()
 		defer cancel()
 		_ = b.deleteBotMessage(dctx, chatID, msg.MessageID, msg.EphemeralMessageID, userID)
 		return nil
+	}
+
+	if preparation != nil {
+		return p
 	}
 
 	if err := b.db.PutPending(ctx, storage.PendingRow{
@@ -1934,8 +1988,10 @@ func (b *Bot) sendCaptchaStage(ctx context.Context, settings storage.ChatSetting
 			// Воронку закрываем abort'ом: join уже записан, а капчи больше не
 			// будет. Detached-бюджет — на случай, если фейл был вызван именно
 			// отменой ctx (shutdown), а не самой БД.
-			b.recordAbortDetached(chatID, userID, "pending persist failed")
-			b.releaseOnAbort(ctx, chatID, userID)
+			if !errors.Is(err, storage.ErrAdmissionPending) {
+				b.recordAbortDetached(chatID, userID, "pending persist failed")
+				b.releaseOnAbort(ctx, chatID, userID)
+			}
 		}
 		return nil
 	}
@@ -1984,12 +2040,15 @@ func (b *Bot) sendNextCaptchaStage(parent context.Context, chatID, userID int64,
 		CorrectIdx: p.CorrectIdx, ExpiresAt: time.Now().Add(b.effectiveStageInterval(settings)),
 		ThreadID: p.ThreadID, EphemeralID: p.EphemeralID, Stage: p.Stage + 1,
 	}); err != nil {
+		if errors.Is(err, storage.ErrAdmissionPending) {
+			return nil
+		}
 		b.log.Warn("persist stage transition", "err", err, "chat", chatID, "user", userID)
 	}
 	if err := b.deleteBotMessage(ctx, chatID, p.MessageID, p.EphemeralID, userID); err != nil {
 		b.log.Debug("delete expired captcha stage", "err", err, "chat", chatID, "user", userID)
 	}
-	return b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1)
+	return b.sendCaptchaStage(ctx, settings, chatID, userID, p.ThreadID, p.Stage+1, nil)
 }
 
 // captchaStageLoop ведёт серию капчи: ждёт дедлайн текущей стадии, а по его
@@ -2017,66 +2076,78 @@ func (b *Bot) captchaStageLoop(chatID, userID int64, p *captcha.Pending) {
 		case <-timer.C:
 		}
 
-		// Единственный победитель дедлайна: identity-проверка отсекает гонку
-		// «колбэк успел изъять и решить капчу между таймером и Take».
-		var ok bool
-		var kickoff context.Context
-		if p.Stage < captchaStages {
-			_, kickoff, ok = b.store.TakeForKickoff(chatID, userID, p)
-		} else {
-			_, ok = b.store.TakeMatch(chatID, userID, func(live *captcha.Pending) bool { return live == p })
-		}
-		if !ok {
+		p = b.advanceCaptchaStage(ctx, chatID, userID, p)
+		if p == nil {
 			return
 		}
-
-		// Последняя стадия истекла: вся серия — одна попытка, наказание как
-		// у прежнего одиночного таймаута. Cleanup на detached 10-секундном
-		// контексте, чтобы shutdown не оборвал кик/бан на полпути;
-		// pending-строка держится до успешного наказания — она и есть
-		// механизм повтора при рестарте (иначе бессрочный капча-мьют остался
-		// бы с юзером навсегда).
-		if p.Stage >= captchaStages {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel() //nolint:gocritic // deferInLoop: intentional — each iteration has its own context for cleanup
-			if err := b.onFail(cleanupCtx, p, "таймаут"); err != nil {
-				b.log.Error("on fail timeout", "err", err, "chat", chatID, "user", userID)
-				return
-			}
-			if err := b.db.DeletePendingIfMsg(cleanupCtx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
-				b.log.Warn("delete pending row after timeout punish",
-					"err", err, "chat", chatID, "user", userID)
-			}
-			return
-		}
-
-		next := b.sendNextCaptchaStage(ctx, chatID, userID, p, kickoff)
-		if next == nil {
-			// Дубль-доставка успела раньше (её серия подхватит юзера) ИЛИ
-			// серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
-			// В обоих случаях pre-persist выше мог записать следующую стадию
-			// под СТАРЫМ message_id — гасим по guard'у, иначе рестарт поднял
-			// бы призрачную капчу с грейс-киком; для строки, перезаписанной
-			// дублем, это no-op.
-			if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
-				b.log.Warn("delete orphaned stage transition",
-					"err", err, "chat", chatID, "user", userID)
-			}
-			return
-		}
-		// Капча могла быть решена колбэком, пока уходила следующая стадия
-		// (секунды ретраев под 429): тогда Get промахнётся, а только что
-		// отправленное сообщение останется висеть с живой клавиатурой.
-		// Проверка через Get, НЕ Take: изымать живую стадию здесь нельзя.
-		if cur, ok := b.store.Get(chatID, userID); !ok || cur != next {
-			if derr := b.deleteBotMessage(ctx, chatID, next.MessageID, next.EphemeralID, userID); derr != nil {
-				b.log.Debug("delete captcha of already-resolved stage",
-					"err", derr, "chat", chatID, "user", userID, "msg", next.MessageID)
-			}
-			return
-		}
-		p = next
 	}
+}
+
+func (b *Bot) advanceCaptchaStage(ctx context.Context, chatID, userID int64, p *captcha.Pending) *captcha.Pending {
+	unlock, acquired := b.lockCheckRights(ctx, chatID, userID, p.Done())
+	if !acquired {
+		return nil
+	}
+	defer unlock()
+
+	// Единственный победитель дедлайна: identity-проверка отсекает гонку
+	// «колбэк успел изъять и решить капчу между таймером и Take».
+	var ok bool
+	var kickoff context.Context
+	if p.Stage < captchaStages {
+		_, kickoff, ok = b.store.TakeForKickoff(chatID, userID, p)
+	} else {
+		_, ok = b.store.TakeMatch(chatID, userID, func(live *captcha.Pending) bool { return live == p })
+	}
+	if !ok {
+		return nil
+	}
+
+	// Последняя стадия истекла: вся серия — одна попытка, наказание как
+	// у прежнего одиночного таймаута. Cleanup на detached 10-секундном
+	// контексте, чтобы shutdown не оборвал кик/бан на полпути;
+	// pending-строка держится до успешного наказания — она и есть
+	// механизм повтора при рестарте.
+	if p.Stage >= captchaStages {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := b.onFail(cleanupCtx, p, "таймаут"); err != nil {
+			b.log.Error("on fail timeout", "err", err, "chat", chatID, "user", userID)
+			return nil
+		}
+		if err := b.db.DeletePendingIfMsg(cleanupCtx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
+			b.log.Warn("delete pending row after timeout punish",
+				"err", err, "chat", chatID, "user", userID)
+		}
+		return nil
+	}
+
+	next := b.sendNextCaptchaStage(ctx, chatID, userID, p, kickoff)
+	if next == nil {
+		// Дубль-доставка успела раньше (её серия подхватит юзера) ИЛИ
+		// серия оборвалась (юзер ушёл / сбой): воронка закрыта внутри.
+		// В обоих случаях pre-persist выше мог записать следующую стадию
+		// под СТАРЫМ message_id — гасим по guard'у, иначе рестарт поднял
+		// бы призрачную капчу с грейс-киком; для строки, перезаписанной
+		// дублем, это no-op.
+		if err := b.db.DeletePendingIfMsg(ctx, chatID, userID, p.MessageID, p.EphemeralID); err != nil {
+			b.log.Warn("delete orphaned stage transition",
+				"err", err, "chat", chatID, "user", userID)
+		}
+		return nil
+	}
+	// Капча могла быть решена колбэком, пока уходила следующая стадия
+	// (секунды ретраев под 429): тогда Get промахнётся, а только что
+	// отправленное сообщение останется висеть с живой клавиатурой.
+	// Проверка через Get, НЕ Take: изымать живую стадию здесь нельзя.
+	if cur, ok := b.store.Get(chatID, userID); !ok || cur != next {
+		if derr := b.deleteBotMessage(ctx, chatID, next.MessageID, next.EphemeralID, userID); derr != nil {
+			b.log.Debug("delete captcha of already-resolved stage",
+				"err", derr, "chat", chatID, "user", userID, "msg", next.MessageID)
+		}
+		return nil
+	}
+	return next
 }
 
 // releaseMigratedCaptchas — basic-группа апгрейднулась до супергруппы:
@@ -2102,21 +2173,13 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 			b.log.Debug("delete migrated pending (already gone?)",
 				"err", err, "old", oldID, "user", p.UserID)
 		}
-		if err := b.db.RecordEvent(b.runCtx, newID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event (migrated captcha)", "err", err)
-		}
-		b.releaseOnAbort(b.runCtx, newID, p.UserID)
-		b.log.Info("captcha released across chat migration",
-			"old", oldID, "new", newID, "user", p.UserID)
+		b.releaseMigratedCaptcha(newID, p.UserID)
 	}
 	for _, userID := range preparing {
 		if released[userID] {
 			continue
 		}
-		b.releaseOnAbort(b.runCtx, newID, userID)
-		if err := b.db.RecordEvent(b.runCtx, newID, userID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event (migrated kickoff)", "err", err)
-		}
+		b.releaseMigratedCaptcha(newID, userID)
 	}
 	for _, p := range b.replies.TakeChat(oldID) {
 		p.Cancel()
@@ -2127,6 +2190,23 @@ func (b *Bot) releaseMigratedCaptchas(oldID, newID int64) {
 	if err := b.db.DeletePendingRepliesChat(b.runCtx, oldID); err != nil {
 		b.log.Debug("delete migrated pending replies (already gone?)",
 			"err", err, "old", oldID)
+	}
+}
+
+func (b *Bot) releaseMigratedCaptcha(chatID, userID int64) {
+	ctx, cancel := b.liveCtx()
+	defer cancel()
+	unlock, err := b.rights.lock(ctx, chatID, userID, false)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if err := b.checkManualMute(ctx, chatID, userID); err != nil {
+		return
+	}
+	b.releaseOnAbort(ctx, chatID, userID)
+	if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
+		b.log.Warn("record pass event (migrated captcha)", "err", err, "chat", chatID, "user", userID)
 	}
 }
 
@@ -2192,187 +2272,21 @@ func (b *Bot) recordAbortDetached(chatID, userID int64, why string) {
 	b.recordAbortEvent(ctx, chatID, userID, why)
 }
 
-// onSuccess завершает капчу победой. answer — «выбрал N-й (эмодзи)» с кнопки,
-// которую нажал юзер; на admin-approve пути пустой (выбора не было). Уходит
-// только в лог: уведомление о КАЖДОМ пройденном пассе владельцам не шлётся
-// (слишком шумно) — под mod_notify теперь ходят только события 2-го уровня
-// (ответ на приветствие с форвардом, кик за молчание) — см. notifyReplyAnswered.
-func (b *Bot) onSuccess(ctx context.Context, p *captcha.Pending, answer string) error {
-	if err := b.db.ResetAttempts(ctx, p.ChatID, p.UserID); err != nil {
-		// Потерянный сброс = следующий провал посчитает попытки с прошлого
-		// захода и недосчитается до пермабана — не молчим.
-		b.log.Warn("reset attempts", "err", err, "chat", p.ChatID, "user", p.UserID)
-	}
-	if err := b.db.UpsertMember(ctx, p.ChatID, p.UserID, time.Now()); err != nil {
-		b.log.Warn("upsert member", "err", err)
-	}
-	s := b.chatSettings(ctx, p.ChatID)
-	mode := effectiveWelcomeMode(s)
-	// «Прошёл» засчитывается только после ВСЕХ включённых проверок: в режимах
-	// «Ничего» и «Приветствие» (одна капча) — сразу здесь; в режиме «с
-	// ответом» — когда юзер реально ответил на приветствие
-	// (replyWaitSatisfied). Иначе пасс до таймаута задваивался последующим
-	// киком за молчание (join→pass→kick/noreply в воронке статистики).
-	if mode != welcomeReply {
-		if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event", "err", err)
-		}
-	}
-	b.log.Info("captcha passed", "chat", p.ChatID, "user", p.UserID, "answer", answer)
-	if err := b.deleteBotMessage(ctx, p.ChatID, p.MessageID, p.EphemeralID, p.UserID); err != nil {
-		b.log.Warn("delete captcha on pass",
-			"err", err, "chat", p.ChatID, "msg", p.MessageID)
-	}
-	// Размьют после прохода: обычный release (дефолтные права чата) или, при
-	// включённом карантине, рестрикт «только текст» на срок карантина.
-	// Проверенного юзера нельзя оставлять за бессрочным капча-мьютом, поэтому
-	// карантинный рестрикт при провале откатывается на release (fail-open:
-	// сетевой чих не должен ограничить новичка сверх карантина, но и не должен
-	// оставить его замьюченным), а общий провал — как раньше — добивается на
-	// detached-бюджете (15 c покрывают обе retryTG-лестницы: getChat + restrict).
-	post := func(c context.Context) error {
-		if s.QuarantineEnabled {
-			d := b.effectiveQuarantineDuration(s)
-			if err := b.quarantineRestrict(c, p.ChatID, p.UserID, d); err != nil {
-				b.log.Warn("quarantine restrict failed, falling back to release",
-					"err", err, "chat", p.ChatID, "user", p.UserID)
-			} else {
-				// Тоггл могли выключить, ПОКА шёл рестрикт (сам рестрикт —
-				// секунды ретраев под 429). Арм в чате с выключенной фичей
-				// оставил бы строку-призрака до reconcile-свипа: карантин
-				// отключён, но серверный text-only держится — отпускаем здесь,
-				// до арма. Гонка сводится к микросообщению «re-check до
-				// коммита тоггла», и его добивает итеративный отпуск
-				// quarantineReleaseChat.
-				if !b.chatSettings(c, p.ChatID).QuarantineEnabled {
-					b.log.Info("quarantine disabled mid-restrict, releasing",
-						"chat", p.ChatID, "user", p.UserID)
-					return b.release(c, p.ChatID, p.UserID)
-				}
-				b.armQuarantine(c, p.ChatID, p.UserID, time.Now().Add(d))
-				return nil
-			}
-		}
-		return b.release(c, p.ChatID, p.UserID)
-	}
-	// Ошибка post — ВСЕГДА от b.release: карантинная ветка провал рестрикта
-	// гасит логом и каскадом падает в release, armQuarantine ошибок не несёт,
-	// а mid-restrict тоггл выходит тем же release. Повторять весь post незачем
-	// — на detached-бюджете ретраится только сам release (15 c покрывают обе
-	// retryTG-лестницы: getChat + restrict).
-	if err := post(ctx); err != nil {
-		b.log.Error("release after captcha — retrying detached",
-			"err", err, "chat", p.ChatID, "user", p.UserID)
-		rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer rcancel()
-		if rerr := b.release(rctx, p.ChatID, p.UserID); rerr != nil {
-			return rerr
-		}
-	}
-	// Ожидание ответа взводим СРАЗУ после размьюта, до сетевой отправки
-	// приветствия: юзер уже может писать, и его первое сообщение должно
-	// застать ожидание активным (иначе гонка → кик написавшего). В режимах
-	// без проверки взводить нечего — просто шлём приветствие (регрессия
-	// v1.13–v1.19: ветка однофакторного режима теряла приветствие целиком).
-	var replyWait *replyPending
-	if mode == welcomeReply {
-		replyWait = b.maybeArmReplyWait(s, p.ChatID, p.UserID, p.ThreadID)
-	}
-	switch {
-	case replyWait != nil:
-		greetingID, greetingSent := b.maybeSendGreeting(ctx, s, welcomeReply, p.ChatID, p.UserID, p.ThreadID)
-		if greetingSent {
-			b.replies.SetGreetingMsgID(replyWait, greetingID)
-		} else {
-			// Приветствие-якорь с требованием не ушёл даже после ретраев
-			// (429-шторм масс-джойна, сеть): требование «напиши пару слов по делу»
-			// юзер выполнить не может — он его никогда не видел. Снимаем
-			// ожидание и закрываем воронку пассом: невозможность ответить —
-			// не вина юзера (та же логика, что у /mute замьюченного), иначе
-			// таймаут серии кикнул бы его за молчание по вине инфраструктуры.
-			if b.cancelReplyWaitIf(p.ChatID, p.UserID, replyWait) {
-				if err := b.db.RecordEvent(ctx, p.ChatID, p.UserID, storage.EventPass, time.Now(), ""); err != nil {
-					b.log.Warn("record pass event", "err", err)
-				}
-				b.log.Warn("reply wait disarmed — greeting send failed",
-					"chat", p.ChatID, "user", p.UserID)
-			}
-		}
-	case mode == welcomeReply:
-		// Армирование сорвалось (fail-open при провале персистентности,
-		// см. maybeArmReplyWait): ожидания нет и не будет — строчка
-		// «напиши пару слов по делу, иначе придётся зайти заново» была бы ложью,
-		// которую никто не проверяет. Шлём приветствие без требования.
-		b.maybeSendGreeting(ctx, s, welcomeGreet, p.ChatID, p.UserID, p.ThreadID)
-	case mode == welcomeGreet:
-		// Обычное приветствие после капчи (режим «Приветствие»).
-		b.maybeSendGreeting(ctx, s, welcomeGreet, p.ChatID, p.UserID, p.ThreadID)
-	}
-	// Затем — ИИ-оценка профиля новичка (асинхронная внутри).
-	b.maybeProfileCheck(p.ChatID, p.UserID, p.ThreadID)
-	return nil
-}
-
-// punishAttempt — общий карательный хвост капчи (onFail) и reply-wait
-// (replyWaitLoop): инкремент попыток с гвардией «ошибка счётчика запрещает
-// эскалацию до пермабана», порог effectiveMaxAttempts, banShort/kick, запись
+// punishAttempt — общий карательный хвост капчи и reply-wait. Состояние
+// попытки и санкции фиксируется до запроса Telegram. Запись
 // события с причиной. notify вызывается только ПОСЛЕ успешного действия —
 // бан, которого не было, не должен попадать в статистику. dbReason уходит в
 // events (константа Reason*), logReason — в логи и уведомления.
 func (b *Bot) punishAttempt(ctx context.Context, chatID, userID int64,
 	dbReason, logReason string, notify func(event storage.EventKind, count int),
 ) error {
-	// Промоушен — терминал и для карательного хвоста: юзер, ставший админом
-	// между Take проверки и этим наказанием (или во время простоя), не
-	// кикается; успешный возврат закрывает персистентную строку у
-	// вызывающих. Тихий пропуск с компенсирующим pass — канон гашения
-	// снаружи (/mute, unmod, executeSpamBan); EventFail не пишем, наказания
-	// не было. Ошибка API — fail-open (старое поведение), как в
-	// restorePending.
-	if isAdmin, err := b.isChatAdmin(ctx, chatID, userID); err == nil && isAdmin {
-		b.log.Info("punish skipped: user became admin", "chat", chatID, "user", userID,
-			"reason", logReason)
-		// Капча-мьют мог остаться незакрытым: событие промоушена,
-		// опоздавшее к этому хвосту, уже не найдёт pending (его снимет
-		// вызывающий) и release не сделает — закрываем здесь. Свежий
-		// detached-бюджет: окружающий cleanup-ctx всего 10 c, а двум
-		// лестницам release (~14 c чистого сна) туда не поместиться —
-		// оборванный release оставил бы мьют без единого повторителя.
-		b.releaseDetached(chatID, userID)
-		if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event (promoted admin)", "err", err,
-				"chat", chatID, "user", userID)
-		}
-		return nil
-	}
-	count, err := b.db.IncrementAttempt(ctx, chatID, userID, attemptsTTL)
-	incFailed := false
+	p, kind, err := b.decideAutomaticPunishment(ctx, chatID, userID, dbReason, logReason)
 	if err != nil {
-		b.log.Warn("increment attempt", "err", err, "chat", chatID, "user", userID)
-		count = 1        // считаем первой попыткой и едем дальше
-		incFailed = true // счётчику верить нельзя — эскалация до бана запрещена
-	}
-	if !incFailed && count >= b.effectiveMaxAttempts(b.chatSettings(ctx, chatID)) {
-		b.log.Info("banning user", "chat", chatID, "user", userID,
-			"reason", logReason, "attempts", count)
-		if err := b.banShort(ctx, chatID, userID); err != nil {
-			return err
-		}
-		if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventBan, time.Now(), dbReason); err != nil {
-			b.log.Warn("record ban event", "err", err)
-		}
-		notify(storage.EventBan, count)
-		return nil
-	}
-	b.log.Info("kicking user", "chat", chatID, "user", userID,
-		"reason", logReason, "attempts", count)
-	if err := b.kick(ctx, chatID, userID); err != nil {
 		return err
 	}
-	if err := b.db.RecordEvent(ctx, chatID, userID, storage.EventKick, time.Now(), dbReason); err != nil {
-		b.log.Warn("record kick event", "err", err)
+	if kind == storage.EventBan || kind == storage.EventKick {
+		notify(kind, p.Attempt)
 	}
-	notify(storage.EventKick, count)
 	return nil
 }
 

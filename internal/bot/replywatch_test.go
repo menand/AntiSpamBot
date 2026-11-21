@@ -18,6 +18,7 @@ import (
 const (
 	testOwnerID     = 900
 	testProbeChatID = -100200
+	replyProbeAdmin = `{"status":"administrator","user":{"id":42,"is_bot":true,"first_name":"Test"},"can_delete_messages":true}`
 )
 
 func newReplyWatchBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
@@ -28,6 +29,8 @@ func newReplyWatchBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 	b.cfg.OwnerIDs = map[int64]struct{}{testOwnerID: {}}
 	serviceableChat(t, b, db, testChatID)
 	fc.resp["copyMessage"] = `{"message_id":9001}`
+	fc.resp["getChat"] = `{"id":-100200,"type":"supergroup"}`
+	fc.resp["getChatMember"] = replyProbeAdmin
 	return b, db, fc
 }
 
@@ -365,10 +368,7 @@ func TestReplyWatchBrokenServiceChatFallsBackToOwnerDM(t *testing.T) {
 		Text: "ответ", AnsweredAt: time.Now().Add(-2 * time.Minute),
 		Stage: 0, NextAt: time.Now().Add(-time.Second),
 	})
-	fc.errSeq["copyMessage"] = []*telegoapi.Error{
-		{ErrorCode: 400, Description: "Bad Request: chat not found"},
-		nil,
-	}
+
 	fc.err["getChat"] = &telegoapi.Error{
 		ErrorCode: 400, Description: "Bad Request: chat not found",
 	}
@@ -382,14 +382,14 @@ func TestReplyWatchBrokenServiceChatFallsBackToOwnerDM(t *testing.T) {
 	if w.Stage != 1 {
 		t.Fatalf("stage = %d, want 1", w.Stage)
 	}
-	if n := fc.callCount("copyMessage"); n != 2 {
-		t.Fatalf("copyMessage calls = %d, want 2 (service + owner fallback)", n)
+	if n := fc.callCount("copyMessage"); n != 1 {
+		t.Fatalf("copyMessage calls = %d, want only the owner fallback", n)
 	}
 	bodies := fc.callBodies("copyMessage")
 	var fallback struct {
 		ChatID int64 `json:"chat_id"`
 	}
-	if err := json.Unmarshal([]byte(bodies[1]), &fallback); err != nil {
+	if err := json.Unmarshal([]byte(bodies[0]), &fallback); err != nil {
 		t.Fatalf("decode fallback body: %v", err)
 	}
 	if fallback.ChatID != testOwnerID {
@@ -532,7 +532,7 @@ func TestReplyWatchSourceUnavailableIsUnknown(t *testing.T) {
 		ErrorCode: 400, Description: "Bad Request: message to copy not found",
 	}
 	// Бот выгнан из чата-источника: тот же «not found», но это не удаление.
-	fc.resp["getChatMember"] = `{"status":"left","user":{"id":42,"is_bot":true,"first_name":"Test"}}`
+	fc.respSeq["getChatMember"] = []string{replyProbeAdmin, `{"status":"left","user":{"id":42,"is_bot":true,"first_name":"Test"}}`}
 
 	b.probeDueReplyWatches(context.Background())
 
@@ -614,6 +614,69 @@ func TestReplyWatchDeletedByLabels(t *testing.T) {
 	for reason, want := range cases {
 		if got := replyWatchDeletedBy(reason); got != want {
 			t.Fatalf("replyWatchDeletedBy(%q) = %q, want %q", reason, got, want)
+		}
+	}
+}
+
+func TestReplyWatchChecksDestinationPrivacyOnEveryProbe(t *testing.T) {
+	b, _, fc := newReplyWatchBot(t)
+	fc.respSeq["getChat"] = []string{
+		`{"id":-100200,"type":"supergroup"}`,
+		`{"id":-100200,"type":"supergroup","active_usernames":["public_alias"]}`,
+		`{"id":-100200,"type":"channel","username":"public_channel"}`,
+		`{"id":-100200,"type":"supergroup"}`,
+	}
+	w := storage.ReplyWatch{ChatID: testChatID, MessageID: 100}
+	for range 4 {
+		if res, _ := b.probeReplyMessage(t.Context(), w); res != replyProbeAlive {
+			t.Fatalf("expected a verified probe or owner fallback, got %v", res)
+		}
+	}
+	for i, want := range []int64{testProbeChatID, testOwnerID, testOwnerID, testProbeChatID} {
+		var request struct {
+			ChatID int64 `json:"chat_id"`
+		}
+		if err := json.Unmarshal([]byte(fc.callBodies("copyMessage")[i]), &request); err != nil || request.ChatID != want {
+			t.Fatalf("probe %d targeted %d, want %d: %v", i, request.ChatID, want, err)
+		}
+	}
+	if fc.callCount("getChatMember") != 2 || fc.callCount("deleteMessage") != 4 {
+		t.Fatalf("unexpected permission or cleanup calls: %v", fc.callList())
+	}
+}
+
+func TestReplyWatchCanUseConfiguredPrivateDialog(t *testing.T) {
+	b, _, fc := newReplyWatchBot(t)
+	b.cfg.ReplyWatchChatID = 901
+	fc.resp["getChat"] = `{"id":901,"type":"private","username":"user_with_alias"}`
+	res, _ := b.probeReplyMessage(t.Context(), storage.ReplyWatch{ChatID: testChatID, MessageID: 100})
+	bodies := fc.callBodies("copyMessage")
+	if res != replyProbeAlive || len(bodies) != 1 || !strings.Contains(bodies[0], `"chat_id":901`) || fc.callCount("getChatMember") != 0 {
+		t.Fatalf("private dialog did not receive a probe: %v / %v", res, fc.callList())
+	}
+}
+
+func TestReplyWatchDefersWhenNeitherDestinationIsAvailable(t *testing.T) {
+	b, db, fc := newReplyWatchBot(t)
+	now := time.Now()
+	putReplyWatch(t, db, storage.ReplyWatch{
+		ChatID: testChatID, UserID: testUserID, MessageID: 100,
+		Text: "ответ", AnsweredAt: now.Add(-2 * time.Minute), NextAt: now.Add(-time.Second),
+	})
+	fc.err["getChat"] = &telegoapi.Error{ErrorCode: 500, Description: "temporary"}
+	fc.err["copyMessage"] = &telegoapi.Error{ErrorCode: 400, Description: "Bad Request: chat not found"}
+	b.probeDueReplyWatches(t.Context())
+	w, found, err := db.GetReplyWatch(t.Context(), testChatID, 100)
+	if err != nil || !found || w.Stage != 0 || !w.NextAt.After(now) {
+		t.Fatalf("unconfirmed target did not defer the watch: %+v / %v / %v", w, found, err)
+	}
+	bodies := fc.callBodies("copyMessage")
+	if len(bodies) != 1 || !strings.Contains(bodies[0], `"chat_id":900`) {
+		t.Fatalf("unconfirmed destination received a copy attempt: %v", bodies)
+	}
+	for _, body := range fc.callBodies("sendMessage") {
+		if strings.Contains(body, "Сообщение удалено") {
+			t.Fatalf("destination error was interpreted as deletion: %s", body)
 		}
 	}
 }

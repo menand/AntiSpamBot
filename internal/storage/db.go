@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -88,6 +89,17 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"pending_captchas", "stage", `ALTER TABLE pending_captchas ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "stage", `ALTER TABLE pending_replies ADD COLUMN stage INTEGER NOT NULL DEFAULT 1`},
 		{"pending_replies", "thread_id", `ALTER TABLE pending_replies ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0`},
+		{"pending_captchas", "suspended", `ALTER TABLE pending_captchas ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0`},
+		{"pending_captchas", "generation", `ALTER TABLE pending_captchas ADD COLUMN generation TEXT NOT NULL DEFAULT ''`},
+		{"pending_captchas", "restrict_until", `ALTER TABLE pending_captchas ADD COLUMN restrict_until INTEGER NOT NULL DEFAULT 0`},
+		{"pending_replies", "suspended", `ALTER TABLE pending_replies ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0`},
+		{"pending_replies", "greeting_msg_id", `ALTER TABLE pending_replies ADD COLUMN greeting_msg_id INTEGER NOT NULL DEFAULT 0`},
+		{"pending_replies", "welcome_claimed", `ALTER TABLE pending_replies ADD COLUMN welcome_claimed INTEGER NOT NULL DEFAULT 0`},
+		{"pending_admissions", "ban_pending", `ALTER TABLE pending_admissions ADD COLUMN ban_pending INTEGER NOT NULL DEFAULT 0`},
+		{"pending_admissions", "pardon_id", `ALTER TABLE pending_admissions ADD COLUMN pardon_id INTEGER NOT NULL DEFAULT 0`},
+		{"spam_banned", "decision_id", `ALTER TABLE spam_banned ADD COLUMN decision_id INTEGER NOT NULL DEFAULT 0`},
+		{"spam_verdicts", "fanout_ready", `ALTER TABLE spam_verdicts ADD COLUMN fanout_ready INTEGER NOT NULL DEFAULT 0`},
+		{"spam_verdicts", "ban_reason", `ALTER TABLE spam_verdicts ADD COLUMN ban_reason TEXT NOT NULL DEFAULT ''`},
 		{"chat_settings", "welcome_mode", `ALTER TABLE chat_settings ADD COLUMN welcome_mode TEXT`},
 		{"chat_settings", "reply_text", `ALTER TABLE chat_settings ADD COLUMN reply_text TEXT`},
 		{"chat_settings", "reply_entities", `ALTER TABLE chat_settings ADD COLUMN reply_entities TEXT`},
@@ -97,11 +109,6 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		{"reply_watches", "edit_reports", `ALTER TABLE reply_watches ADD COLUMN edit_reports INTEGER NOT NULL DEFAULT 0`},
 		{"reply_watches", "edit_notified_at", `ALTER TABLE reply_watches ADD COLUMN edit_notified_at INTEGER NOT NULL DEFAULT 0`},
 		{"reply_watches", "report_attempts", `ALTER TABLE reply_watches ADD COLUMN report_attempts INTEGER NOT NULL DEFAULT 0`},
-		// owner_dm_links создана в v1.23.0 без bot_id; ALTER страхует dev-БД,
-		// где таблица успела появиться в прежнем виде (schema.sql не меняет
-		// существующую таблицу). Старые строки получат bot_id = 0 и просто
-		// перестанут находиться — публиковать по ним нельзя.
-		{"owner_dm_links", "bot_id", `ALTER TABLE owner_dm_links ADD COLUMN bot_id INTEGER NOT NULL DEFAULT 0`},
 		// Новые таблицы (spam_votes, spam_ballots) и индексы миграций не
 		// требуют: schema.sql идемпотентен и выполняется при каждом открытии.
 	}
@@ -118,6 +125,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			_ = raw.Close()
 			return nil, fmt.Errorf("apply migration %q: %w", m.stmt, err)
 		}
+	}
+
+	if err := migrateOwnerDMLinkKey(ctx, raw); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("migrate owner dm links: %w", err)
 	}
 
 	// Разовая конвертация легаси-пер-чатовых таймаутов (секунды одиночной
@@ -151,6 +163,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	`); err != nil {
 		_ = raw.Close()
 		return nil, fmt.Errorf("migrate greeting text to reply text: %w", err)
+	}
+
+	if _, err := raw.ExecContext(ctx, `INSERT OR IGNORE INTO bot_meta (key, value) VALUES (?, ?)`,
+		messageArchiveIDKey, rand.Text()); err != nil {
+		_ = raw.Close()
+		return nil, fmt.Errorf("initialize message archive identity: %w", err)
 	}
 
 	return &DB{sql: raw}, nil

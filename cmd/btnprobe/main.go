@@ -10,7 +10,7 @@
 // печатается — подставляйте его из своего .env, сами доступы в репозиторий
 // не зашиваются.
 //
-//	BOT_TOKEN=... go run ./cmd/btnprobe -chat <CHAT_ID> -mode mixed
+//	BOT_TOKEN=... go run -tags stdjson ./cmd/btnprobe -chat <CHAT_ID> -mode mixed
 //
 // Флаги:
 //

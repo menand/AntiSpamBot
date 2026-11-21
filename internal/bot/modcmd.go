@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -57,49 +58,55 @@ func (b *Bot) handleModCommand(ctx *th.Context, message telego.Message, permanen
 	// retryTG под 429 выжидают retry_after целиком), а после SIGTERM-дренажа
 	// хендлеров — свежий detached-бюджет. Без этого сигнал между баном и
 	// unban кика оставил бы юзера в перманентном бане без события, а админа —
-	// без ответа; провал кик-хвоста дополнительно добивает unban ниже.
+	// без ответа. Незавершённый кик возобновляется из SQLite.
 	mctx, cancelMut := b.liveCtx()
 	defer cancelMut()
-	reason := storage.ReasonModPrefix + fmt.Sprintf("%d", message.From.ID)
-	var actErr error
-	if permanent {
-		actErr = b.banRevoke(mctx, chatID, targetID)
-		if actErr == nil {
-			b.markReplyWatchesDeletedByUser(chatID, targetID, replyWatchDeletedByBan)
-		}
-	} else {
-		actErr = b.kickRevoke(mctx, chatID, targetID)
+	unlock, err := b.rights.lock(mctx, chatID, targetID, false)
+	if err != nil {
+		return err
 	}
-	if actErr != nil {
-		b.log.Warn("mod command action failed", "err", actErr, "chat", chatID, "target", targetID)
-		if !permanent {
-			// Лестница могла оборваться ПОСЛЕ бана, но ДО unban (429-растяжка
-			// съела бюджет ctx или грянул SIGTERM) — тогда юзер остался бы в
-			// перманентном бане без события. Добиваем unban-половину на
-			// свежем detached-бюджете: unban идемпотентен (OnlyIfBanned), юзера
-			// без бана вызов не трогает.
-			uctx, ucancel := detachedMutCtx()
-			if uerr := b.unban(uctx, chatID, targetID); uerr != nil {
-				b.log.Warn("compensating unban after failed kick", "err", uerr,
-					"chat", chatID, "target", targetID)
-			}
-			ucancel()
-		}
-		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на блокировку.")
+	defer unlock()
+	if err := b.checkManualMute(mctx, chatID, targetID); err != nil {
+		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Бот сверяет предыдущий мут. Повторите команду после сверки.")
 		return nil
 	}
-
+	reason := storage.ReasonModPrefix + fmt.Sprintf("%d", message.From.ID)
 	kind := storage.EventKick
 	if permanent {
 		kind = storage.EventBan
-	}
-	if err := b.db.RecordEvent(mctx, chatID, targetID, kind, time.Now(), reason); err != nil {
-		b.log.Warn("record mod event", "err", err, "chat", chatID, "target", targetID)
+		if err := b.banRevoke(mctx, chatID, targetID); err != nil {
+			b.log.Warn("manual ban failed", "err", err, "chat", chatID, "target", targetID)
+			text := "Не получилось — проверь мои права на блокировку."
+			if errors.Is(err, errBanUnconfirmed) {
+				text = "Telegram не подтвердил результат бана."
+			}
+			b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), text)
+			return nil
+		}
+		b.supersedePunishment(mctx, chatID, targetID)
+		b.markReplyWatchesDeletedByUser(chatID, targetID, replyWatchDeletedByBan)
+		if err := b.db.RecordEvent(mctx, chatID, targetID, kind, time.Now(), reason); err != nil {
+			b.log.Warn("record mod event", "err", err, "chat", chatID, "target", targetID)
+		}
+	} else {
+		decision, outcome, err := b.beginPunishment(mctx, chatID, targetID, reason, "", 0)
+		if err != nil || outcome != storage.EventKick {
+			b.log.Warn("manual kick incomplete", "err", err, "chat", chatID, "target", targetID)
+			text := "Кик не выполнен."
+			current, pending, readErr := b.db.GetPunishment(mctx, chatID, targetID)
+			if readErr != nil {
+				text = "Кик не подтверждён. Не удалось сверить, сохранена ли заявка."
+			} else if pending && current.Generation == decision.Generation && current.Reason == reason {
+				text = "Кик не подтверждён. Бот сверит заявку перед повтором."
+			}
+			b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), text)
+			return nil
+		}
 	}
 	b.cleanupTargetTraces(chatID, targetID)
 	// revoke обычно уже стирает исходное сообщение цели; ручное удаление —
 	// страховка на случай, если конкретно оно осталось (тот же приём, что и
-	// удаление TargetMsgID в resolveSpamVote), поэтому ошибку глушим тихо.
+	// удаление TargetMsgID в deleteSpamTarget), поэтому ошибку глушим тихо.
 	if targetMsgID != 0 {
 		if err := b.deleteMessage(b.runCtx, chatID, targetMsgID); err != nil {
 			b.log.Debug("delete mod target message (already gone?)", "err", err, "chat", chatID)
@@ -176,51 +183,40 @@ func (b *Bot) handleMuteCommand(ctx *th.Context, message telego.Message) error {
 		return nil
 	}
 
-	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
-		b.log.Debug("delete mute command", "err", err, "chat", chatID)
-	}
+	until := time.Now().Add(d)
 	// Мутационный хвост — на liveCtx (O1, как у /kick|/ban): живой runCtx,
 	// пока жив, а после SIGTERM-дренажа хендлеров — свежий detached-бюджет;
 	// рестрикт, события и ответ админу не должны оборваться на SIGTERM.
 	mctx, cancelMut := b.liveCtx()
 	defer cancelMut()
-	if err := b.mute(mctx, chatID, targetID, d); err != nil {
-		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
-		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на ограничение участников.")
+	unlock, err := b.rights.lock(mctx, chatID, targetID, true)
+	if err != nil {
+		return err
+	}
+	err = func() error {
+		defer unlock()
+		return b.applyManualMute(mctx, chatID, targetID, message.From.ID, until)
+	}()
+	if err := b.deleteMessage(b.runCtx, chatID, message.MessageID); err != nil {
+		b.log.Debug("delete mute command", "err", err, "chat", chatID)
+	}
+	if errors.Is(err, errMuteUnconfirmed) {
+		b.log.Warn("mute confirmation pending", "err", err, "chat", chatID, "target", targetID)
+		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message),
+			"Мьют сохранён. Бот сверит результат с Telegram, исходный срок сохранится.")
 		return nil
 	}
-	// Мьют команды строже текст-онли карантина и полностью его заменяет
-	// (иначе на до-таймауте /unmute карантинный рестрикт «всплыл» бы обратно
-	// из нетронутой строки, а цензор продолжил бы чистить админское решение).
-	// Снимаем состояние целиком БЕЗ серверного release: возврат дефолтных
-	// прав чата отменил бы только что наложенный мьют.
-	b.dropQuarantineState(chatID, targetID)
-	// Капча ещё идёт: рестрикт мьют Telegram заменяет целиком, поэтому
-	// release НЕ делаем (он бы отменил свежий мьют — та же дисциплина, что
-	// у dropQuarantineState). Саму капчу гасим: её таймаут иначе добавил бы
-	// kick поверх мьюта, а верный ответ через onSuccess снёс бы мьют админа.
-	// Воронку закрываем пассом — пройти проверку замьюченный не может.
-	if b.cancelCaptchaSilent(chatID, targetID) {
-		if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event (muted mid-captcha)", "err", err)
-		}
-	}
-	// Замьюченный физически не может выполнить «напиши пару слов по делу» — снимаем
-	// ожидание реплая тихо, иначе таймер кикнул бы его за молчание. Если
-	// ожидание было активным (reply-check), «прошёл» ещё не записан —
-	// фиксируем пасс здесь: капча уже позади, а невозможность ответить — не
-	// вина юзера (раньше этот пасс писался сразу на капче, поведение то же).
-	if b.cancelReplyWait(chatID, targetID) {
-		if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventPass, time.Now(), ""); err != nil {
-			b.log.Warn("record pass event (muted)", "err", err)
-		}
-	}
-	// Событие mute питает список «10 последних» команды /unmute (в воронку
-	// статистики не идёт). Наказательный минутный мьют punishNonAdmin сюда
-	// не пишется — это не админское решение о юзере.
-	if err := b.db.RecordEvent(mctx, chatID, targetID, storage.EventMute, time.Now(),
-		storage.ReasonModPrefix+fmt.Sprintf("%d", message.From.ID)); err != nil {
-		b.log.Warn("record mute event", "err", err)
+	if err != nil {
+		b.log.Warn("mute failed", "err", err, "chat", chatID, "target", targetID)
+		b.sendPlainCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "Не получилось — проверь мои права на ограничение участников.")
+		// Пока /mute стоял в очереди, допуск мог оставить решение для
+		// администратора. После отказа мута оно по-прежнему действует.
+		b.goSafe("retryAdmissionAfterMuteFailure", func() {
+			if err := b.retryAdmission(b.runCtx, chatID, targetID); err != nil {
+				b.log.Warn("retry admission after mute failure", "err", err, "chat", chatID, "target", targetID)
+			}
+		})
+		return nil
 	}
 	b.sendHTMLCtx(mctx, chatID, threadOf(message), b.modReceiver(chatID, message), "🔇 "+b.mentionFor(targetID)+" в рид-онли на "+muteLabel(d)+".")
 	b.log.Info("mute command", "chat", chatID, "target", targetID,
@@ -380,7 +376,7 @@ const groupCommandsList = "/spam — репорт на спамера (репл�
 	"/whitelist — впускать без капчи (список или @username)\n" +
 	"/trust — досрочно снять карантин новичка (реплаем или @username)\n" +
 	"\nКоманда владельца бота:\n" +
-	"/replywithbot <текст> (алиас /rwb) — ответить от имени бота на сообщение юзера (реплаем)"
+	"/replywithbot &lt;текст&gt; (алиас /rwb) — ответить от имени бота на сообщение юзера (реплаем)"
 
 func (b *Bot) groupHelpText() string {
 	t := "🛡 <b>Команды бота</b> (/spam доступна всем участникам с историей сообщений):\n" + groupCommandsList +

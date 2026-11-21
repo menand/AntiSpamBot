@@ -80,8 +80,8 @@ const (
 // уведомление. Вызывается из goSafe ДО первого тика: старт long polling не
 // должен ждать сетевые проверки.
 func (b *Bot) setupReplyWatch(ctx context.Context) {
-	if len(b.cfg.OwnerIDs) == 0 {
-		b.log.Warn("reply watch enabled but OWNER_IDS is empty; no watches will be created")
+	if b.replyWatchOwnerID() == 0 {
+		b.log.Warn("reply watch enabled but OWNER_IDS has no user IDs; no watches will be created")
 		return
 	}
 	if chats, err := b.db.ReplyWatchChats(ctx); err != nil {
@@ -94,8 +94,10 @@ func (b *Bot) setupReplyWatch(ctx context.Context) {
 	if target := b.cfg.ReplyWatchChatID; target == 0 {
 		b.log.Info("reply watch enabled", "target", "owner DM",
 			"owner", b.replyWatchOwnerID(), "owners", len(b.cfg.OwnerIDs))
+	} else if err := b.checkReplyWatchTarget(ctx, target); err != nil {
+		b.log.Warn("reply watch: configured target unavailable at startup", "target", target, "err", err)
 	} else {
-		b.checkReplyWatchTarget(ctx, target)
+		b.log.Info("reply watch enabled", "target", target)
 	}
 	pctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
@@ -107,49 +109,39 @@ func (b *Bot) setupReplyWatch(ctx context.Context) {
 	}
 }
 
-// checkReplyWatchTarget — проверка служебного чата на старте: существует ли,
-// виден ли копии посторонним и есть ли у бота право удалять копию. Без права
-// удаления каждый отчёт оставлял бы текст юзера в чате навсегда — такую
-// конфигурацию честно отключаем, а не «предупреждаем в лог».
-func (b *Bot) checkReplyWatchTarget(ctx context.Context, target int64) {
-	gctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+// checkReplyWatchTarget verifies an explicitly configured destination
+// before copying. A private group also needs verified delete rights.
+func (b *Bot) checkReplyWatchTarget(ctx context.Context, target int64) error {
+	gctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	chat, err := b.api.GetChat(gctx, &telego.GetChatParams{ChatID: tu.ID(target)})
 	if err != nil {
-		b.log.Warn("reply watch: probe chat unavailable at startup",
-			"target", target, "err", err)
-		return
+		return fmt.Errorf("get probe chat: %w", err)
 	}
-	b.log.Info("reply watch: probe chat", "target", target,
-		"type", chat.Type, "title", chat.Title)
-	if chat.Type == "private" {
-		return
+	if chat == nil || chat.ID != target {
+		return errors.New("probe chat identity could not be verified")
 	}
-	b.log.Warn("reply watch: probe chat is not private; copies of user messages are briefly visible to its members",
-		"target", target, "type", chat.Type, "username", chat.Username)
+	if chat.Type == telego.ChatTypePrivate && target > 0 {
+		return nil
+	}
+	if target >= 0 || (chat.Type != telego.ChatTypeGroup && chat.Type != telego.ChatTypeSupergroup) ||
+		chat.Username != "" || len(chat.ActiveUsernames) != 0 || chat.LinkedChatID != 0 || chat.IsDirectMessages {
+		return errors.New("probe chat is not a closed service group or private dialog")
+	}
 	if b.me == nil {
-		return
+		return errors.New("bot identity unavailable")
 	}
 	member, err := b.api.GetChatMember(gctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(target),
 		UserID: b.me.ID,
 	})
 	if err != nil {
-		b.log.Warn("reply watch: cannot verify delete rights in probe chat",
-			"target", target, "err", err)
-		return
+		return fmt.Errorf("verify probe chat delete rights: %w", err)
 	}
-	if replyWatchCanDeleteCopies(member) {
-		return
+	if !replyWatchCanDeleteCopies(member) {
+		return errors.New("bot cannot delete copies in probe chat")
 	}
-	b.log.Error("reply watch: no right to delete probe copies — probes disabled until restart",
-		"target", target, "type", chat.Type)
-	b.replyWatchBlocked.Store(true)
-	b.notifyReplyWatchDisabled(
-		"В служебном чате для проверки ответов у бота нет права удалять сообщения — " +
-			"копии пользовательских сообщений остались бы там навсегда. " +
-			"Проверки ответов выключены до перезапуска: выдай право \"Удалять сообщения\" " +
-			"или укажи другой REPLY_WATCH_CHAT_ID.")
+	return nil
 }
 
 // replyWatchCanDeleteCopies — может ли бот удалять сообщения в служебном чате.
@@ -188,7 +180,7 @@ func (b *Bot) startReplyWatch(m *telego.Message) {
 		// пользовательский текст без гарантии удаления нельзя.
 		return
 	}
-	if len(b.cfg.OwnerIDs) == 0 {
+	if b.replyWatchOwnerID() == 0 {
 		// Некому отправлять отчёты — наблюдение бессмысленно и только
 		// копило бы строки/ошибки "no probe target".
 		return
@@ -519,57 +511,43 @@ const (
 )
 
 func (b *Bot) probeReplyMessage(ctx context.Context, w storage.ReplyWatch) (replyProbeResult, time.Duration) {
-	target := b.replyWatchTarget()
-	if target == 0 {
-		b.log.Warn("reply watch: no probe target", "chat", w.ChatID, "msg", w.MessageID)
-		return replyProbeUnknown, 0
-	}
-	res, delay, err := b.copyProbe(ctx, w, target)
-	if res != replyProbeTargetUnavailable {
-		if res == replyProbeUnknown && err != nil {
-			b.log.Warn("reply watch: probe failed (not deleted)", "err", err,
-				"chat", w.ChatID, "msg", w.MessageID, "target", target)
+	if target := b.cfg.ReplyWatchChatID; target != 0 {
+		err := b.checkReplyWatchTarget(ctx, target)
+		if err == nil {
+			res, delay, copyErr := b.copyProbe(ctx, w, target)
+			if res != replyProbeTargetUnavailable {
+				b.logUnknownReplyProbe(res, copyErr, w, target)
+				return res, delay
+			}
+			if !b.confirmProbeTargetGone(ctx, target, copyErr) {
+				b.logUnknownReplyProbe(replyProbeUnknown, copyErr, w, target)
+				return replyProbeUnknown, 0
+			}
+			err = copyErr
 		}
-		return res, delay
-	}
-	if b.cfg.ReplyWatchChatID == 0 || target != b.cfg.ReplyWatchChatID {
-		if b.replyWatchWarnPending.Load() && !b.replyWatchBrokenNotified.Load() &&
-			b.notifyReplyWatchProbeBroken(err) {
+		b.log.Warn("reply watch: configured probe target unavailable", "err", err, "target", target)
+		if !b.replyWatchBrokenNotified.Load() && b.notifyReplyWatchProbeBroken(err) {
 			b.replyWatchBrokenNotified.Store(true)
-			b.replyWatchWarnPending.Store(false)
-		}
-		b.log.Warn("reply watch: fallback target unavailable", "err", err,
-			"chat", w.ChatID, "msg", w.MessageID, "target", target)
-		return replyProbeUnknown, 0
-	}
-	if !b.confirmProbeTargetGone(ctx, target, err) {
-		b.log.Warn("reply watch: destination error is not probe-chat outage", "err", err,
-			"chat", w.ChatID, "msg", w.MessageID, "target", target)
-		return replyProbeUnknown, 0
-	}
-	b.replyWatchFallback.Store(true)
-	if !b.replyWatchBrokenNotified.Load() {
-		if b.notifyReplyWatchProbeBroken(err) {
-			b.replyWatchBrokenNotified.Store(true)
-		} else {
-			b.replyWatchWarnPending.Store(true)
 		}
 	}
 	owner := b.replyWatchOwnerID()
 	if owner == 0 {
-		return replyProbeUnknown, 0
+		return replyProbeRetry, probeRetryDelay(0)
 	}
-	res, delay, ferr := b.copyProbe(ctx, w, owner)
+	res, delay, err := b.copyProbe(ctx, w, owner)
 	if res == replyProbeTargetUnavailable {
-		b.log.Warn("reply watch: owner-DM fallback unavailable", "err", ferr,
-			"chat", w.ChatID, "msg", w.MessageID, "owner", owner)
-		return replyProbeUnknown, 0
+		b.log.Warn("reply watch: owner-DM probe unavailable", "err", err, "owner", owner)
+		return replyProbeRetry, probeRetryDelay(0)
 	}
-	if res == replyProbeUnknown && ferr != nil {
-		b.log.Warn("reply watch: fallback probe failed (not deleted)", "err", ferr,
-			"chat", w.ChatID, "msg", w.MessageID, "owner", owner)
-	}
+	b.logUnknownReplyProbe(res, err, w, owner)
 	return res, delay
+}
+
+func (b *Bot) logUnknownReplyProbe(result replyProbeResult, err error, w storage.ReplyWatch, target int64) {
+	if result == replyProbeUnknown && err != nil {
+		b.log.Warn("reply watch: probe failed (not deleted)", "err", err,
+			"chat", w.ChatID, "msg", w.MessageID, "target", target)
+	}
 }
 
 func (b *Bot) copyProbe(ctx context.Context, w storage.ReplyWatch, target int64) (replyProbeResult, time.Duration, error) {
@@ -740,27 +718,16 @@ func (b *Bot) notifyReplyWatchProbeBroken(cause error) bool {
 		return false
 	}
 	text := fmt.Sprintf("\u26a0\ufe0f <b>Служебный чат для проверки ответов недоступен</b>\n"+
-		"<code>%s</code>\n\nПробы переключены на ЛС владельца до перезапуска бота.\n"+
+		"<code>%s</code>\n\nПока служебный чат недоступен, пробы используют ЛС владельца.\n"+
 		"Проверь права бота и REPLY_WATCH_CHAT_ID.",
 		html.EscapeString(truncateLabel(cause.Error(), replyWatchBrokenCauseLimit)))
 	return b.sendNotificationHTMLCtx(ctx, b.sortedOwnerIDs(), text, "reply watch probe broken")
 }
 
-func (b *Bot) replyWatchTarget() int64 {
-	owner := b.replyWatchOwnerID()
-	if b.cfg.ReplyWatchChatID == 0 {
-		return owner
-	}
-	if b.replyWatchFallback.Load() && owner != 0 {
-		return owner
-	}
-	return b.cfg.ReplyWatchChatID
-}
-
 func (b *Bot) replyWatchOwnerID() int64 {
 	var out int64
 	for id := range b.cfg.OwnerIDs {
-		if out == 0 || id < out {
+		if id > 0 && (out == 0 || id < out) {
 			out = id
 		}
 	}
@@ -770,7 +737,9 @@ func (b *Bot) replyWatchOwnerID() int64 {
 func (b *Bot) sortedOwnerIDs() []int64 {
 	out := make([]int64, 0, len(b.cfg.OwnerIDs))
 	for id := range b.cfg.OwnerIDs {
-		out = append(out, id)
+		if id > 0 {
+			out = append(out, id)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out

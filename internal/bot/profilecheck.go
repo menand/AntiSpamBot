@@ -33,8 +33,16 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 	if !b.spamAIEnabled() {
 		return
 	}
-	s := b.chatSettings(b.runCtx, chatID)
-	if !s.SpamCheckEnabled {
+	gate := b.cachedSpamGate(chatID, b.db.GetChatSettings)
+	if !gate.enabled {
+		return
+	}
+	s, err := b.db.GetChatSettings(b.runCtx, chatID)
+	if err != nil {
+		b.log.Warn("profile check settings", "err", err, "chat", chatID)
+		return
+	}
+	if !s.SpamCheckEnabled || gate.ctx.Err() != nil {
 		return
 	}
 	// Те же гейты доверия, что у спам-чека сообщений (перезашедший старожил
@@ -73,16 +81,22 @@ func (b *Bot) maybeProfileCheck(chatID, userID int64, threadID int) {
 			delete(b.spamInflight, k)
 			b.spamMu.Unlock()
 		}()
-		b.runProfileCheck(chatID, userID, threadID, s)
+		b.runProfileCheck(gate.ctx, chatID, userID, threadID, s)
 	})
 }
 
-func (b *Bot) runProfileCheck(chatID, userID int64, threadID int, s storage.ChatSettings) {
+func (b *Bot) runProfileCheck(gateCtx context.Context, chatID, userID int64, threadID int, s storage.ChatSettings) {
+	if gateCtx.Err() != nil {
+		return
+	}
 	facts := b.buildProfileFactsFromAPI(chatID, userID)
 
-	ctx, cancel := context.WithTimeout(b.runCtx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(gateCtx, 60*time.Second)
 	defer cancel()
 	spam, provider, err := b.classifyVerdict(ctx, groq.ProfileSystemPrompt, facts, chatID, userID)
+	if gateCtx.Err() != nil {
+		return
+	}
 	if err != nil {
 		// Fail-open: сбой всех провайдеров — профиль не трогаем.
 		b.log.Warn("profile check failed (fail-open)", "err", err,

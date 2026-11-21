@@ -128,10 +128,16 @@ func (b *Bot) archiveDay(ctx context.Context, dir, day string) error {
 		return fmt.Errorf("stat existing archive: %w", statErr)
 	}
 
-	// Сливаем: существующие + новые, дедуп по (chat, tg_msg_id, kind, ts).
+	// Сливаем существующие и новые записи, сохраняя разные версии правок.
+	archiveID, err := b.db.MessageArchiveID(ctx)
+	if err != nil {
+		return fmt.Errorf("read archive identity: %w", err)
+	}
 	fresh := make([]archive.Entry, 0, len(msgs))
 	for _, m := range msgs {
-		fresh = append(fresh, entryFromStored(m))
+		entry := archive.FromStored(m)
+		entry.ArchiveID = archiveID
+		fresh = append(fresh, entry)
 	}
 	entries := archive.MergeEntries(existing, fresh)
 
@@ -215,29 +221,4 @@ func writeArchive(final string, data []byte) error {
 		return fmt.Errorf("sync archive directory: %w", err)
 	}
 	return nil
-}
-
-func entryFromStored(m storage.StoredMessage) archive.Entry {
-	e := archive.Entry{
-		Chat:     m.ChatID,
-		User:     m.UserID,
-		TGMsgID:  m.TGMsgID,
-		TS:       m.TS.Unix(),
-		Kind:     m.Kind,
-		Text:     m.Text,
-		HasMedia: m.HasMedia,
-	}
-	if m.ReplyMsgID != nil {
-		e.ReplyMsgID = m.ReplyMsgID
-	}
-	if m.ReplyUID != nil {
-		e.ReplyUID = m.ReplyUID
-	}
-	if m.ReplyAuthor != nil {
-		e.ReplyAuthor = *m.ReplyAuthor
-	}
-	if m.ReplyText != nil {
-		e.ReplyText = *m.ReplyText
-	}
-	return e
 }

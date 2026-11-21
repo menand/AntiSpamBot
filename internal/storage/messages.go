@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -85,13 +86,35 @@ type MessageFilter struct {
 // по фильтру и возвращает их в хронологическом порядке. Используется msgtool
 // для быстрых запросов по свежему окну; старое ищется стримингом по архивам.
 func (d *DB) QueryMessages(ctx context.Context, f MessageFilter) ([]StoredMessage, error) {
+	return queryMessages(ctx, d.sql, f, nil)
+}
+
+func queryMessages(ctx context.Context, reader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, f MessageFilter, chatIDs []int64) ([]StoredMessage, error) {
+	rows, err := queryMessageRows(ctx, reader, f, chatIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
+	return scanStoredMessages(rows)
+}
+
+func queryMessageRows(ctx context.Context, reader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, f MessageFilter, chatIDs []int64) (*sql.Rows, error) {
 	q := `SELECT id, chat_id, user_id, tg_msg_id, ts, kind, text, has_media,
 			reply_msg_id, reply_uid, reply_author, reply_text
 		FROM messages WHERE 1=1`
 	args := make([]any, 0, 6)
 	if f.ChatID != 0 {
-		q += ` AND chat_id = ?`
-		args = append(args, f.ChatID)
+		if len(chatIDs) == 0 {
+			chatIDs = []int64{f.ChatID}
+		}
+		q += ` AND chat_id IN (` + strings.Repeat("?,", len(chatIDs)-1) + `?)`
+		for _, id := range chatIDs {
+			args = append(args, id)
+		}
 	}
 	if f.UserID != 0 {
 		q += ` AND user_id = ?`
@@ -122,12 +145,11 @@ func (d *DB) QueryMessages(ctx context.Context, f MessageFilter) ([]StoredMessag
 		q += ` LIMIT ?`
 		args = append(args, f.Limit)
 	}
-	rows, err := d.sql.QueryContext(ctx, q, args...)
+	rows, err := reader.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query messages: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
-	return scanStoredMessages(rows)
+	return rows, nil
 }
 
 // UnarchivedDaysBefore возвращает отсортированные дни ('YYYY-MM-DD'), в которых
@@ -176,37 +198,41 @@ func (d *DB) MessagesForDay(ctx context.Context, day string) ([]StoredMessage, e
 func scanStoredMessages(rows *sql.Rows) ([]StoredMessage, error) {
 	var out []StoredMessage
 	for rows.Next() {
-		var m StoredMessage
-		var ts int64
-		var hasMedia int
-		var text, replyAuthor, replyText sql.NullString
-		var replyMsgID, replyUID sql.NullInt64
-		if err := rows.Scan(&m.ID, &m.ChatID, &m.UserID, &m.TGMsgID, &ts, &m.Kind, &text,
-			&hasMedia, &replyMsgID, &replyUID, &replyAuthor, &replyText); err != nil {
-			return nil, fmt.Errorf("scan message: %w", err)
-		}
-		m.TS = time.Unix(ts, 0)
-		m.Text = text.String
-		m.HasMedia = hasMedia != 0
-		if replyMsgID.Valid {
-			v := replyMsgID.Int64
-			m.ReplyMsgID = &v
-		}
-		if replyUID.Valid {
-			v := replyUID.Int64
-			m.ReplyUID = &v
-		}
-		if replyAuthor.Valid && replyAuthor.String != "" {
-			v := replyAuthor.String
-			m.ReplyAuthor = &v
-		}
-		if replyText.Valid && replyText.String != "" {
-			v := replyText.String
-			m.ReplyText = &v
+		m, err := scanStoredMessage(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+func scanStoredMessage(row interface{ Scan(...any) error }) (StoredMessage, error) {
+	var m StoredMessage
+	var ts int64
+	var hasMedia int
+	var text, replyAuthor, replyText sql.NullString
+	var replyMsgID, replyUID sql.NullInt64
+	if err := row.Scan(&m.ID, &m.ChatID, &m.UserID, &m.TGMsgID, &ts, &m.Kind, &text,
+		&hasMedia, &replyMsgID, &replyUID, &replyAuthor, &replyText); err != nil {
+		return m, fmt.Errorf("scan message: %w", err)
+	}
+	m.TS = time.Unix(ts, 0)
+	m.Text = text.String
+	m.HasMedia = hasMedia != 0
+	if replyMsgID.Valid {
+		m.ReplyMsgID = &replyMsgID.Int64
+	}
+	if replyUID.Valid {
+		m.ReplyUID = &replyUID.Int64
+	}
+	if replyAuthor.Valid && replyAuthor.String != "" {
+		m.ReplyAuthor = &replyAuthor.String
+	}
+	if replyText.Valid && replyText.String != "" {
+		m.ReplyText = &replyText.String
+	}
+	return m, nil
 }
 
 // DeleteDayThrough удаляет hot-строки дня с id <= throughID. Вызывается только

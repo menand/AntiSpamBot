@@ -37,7 +37,9 @@ const (
 	EventPass    EventKind = "pass"
 	EventKick    EventKind = "kick"
 	EventBan     EventKind = "ban"
-	EventSpamBan EventKind = "spamban" // бан по вердикту ИИ-антиспама (вне воронки капчи)
+	EventSpamBan EventKind = "spamban" // общий счётчик спам-банов; закрывает ожидание цели
+	// EventFunnelClose закрывает вход без отдельного бана в этой сводке, например при кросс-бане.
+	EventFunnelClose EventKind = "funnel_close"
 	// EventLeft — юзер вышел (или был убран админом), не дождавшись конца
 	// капчи: ни пасс, ни провал. Воронка становится честной: входило =
 	// прошло + кикнуто + забанено + вышло само + сорвалось + в процессе. Без
@@ -137,19 +139,21 @@ func (d *DB) IncMessage(ctx context.Context, chatID int64, when time.Time, newco
 }
 
 type Stats struct {
-	Joined      int
-	Passed      int
-	Kicked      int // воронка капчи: БЕЗ командных киков (mod:<id>)
-	Banned      int // воронка капчи: БЕЗ командных банов (mod:<id>)
-	ModKicked   int // /kick командой админа — вне воронки, см. renderStats
-	ModBanned   int // /ban командой админа — аналогично
-	SpamBanned  int // баны ИИ-антиспама; отдельно от воронки капчи
-	Left        int // вышли сами посреди капчи (ни пасс, ни кик)
-	Aborted     int // капча сорвалась по вине инфраструктуры (не «вышли сами»)
-	MsgNewcomer int
-	MsgOldtimer int
-	PeriodFrom  time.Time
-	PeriodUntil time.Time
+	Joined                int
+	Passed                int
+	Kicked                int  // воронка капчи: БЕЗ командных киков (mod:<id>)
+	Banned                int  // воронка капчи: БЕЗ командных банов (mod:<id>)
+	ModKicked             int  // /kick командой админа — вне воронки, см. renderStats
+	ModBanned             int  // /ban командой админа — аналогично
+	SpamBanned            int  // баны ИИ-антиспама; отдельно от воронки капчи
+	Left                  int  // вышли сами посреди капчи (ни пасс, ни кик)
+	Aborted               int  // капча сорвалась по вине инфраструктуры (не «вышли сами»)
+	Pending               int  // входы окна, открытые на его исключительную верхнюю границу
+	LegacyPendingEstimate bool // часть входов сопоставлена по истории событий
+	MsgNewcomer           int
+	MsgOldtimer           int
+	PeriodFrom            time.Time
+	PeriodUntil           time.Time
 }
 
 // ChatEarliestEventAt — время самого раннего события чата. Фолбэк для
@@ -194,7 +198,7 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 			rows.Close() //nolint:errcheck,sqlclosecheck // cleanup, error intentionally ignored
 			return s, fmt.Errorf("scan event: %w", err)
 		}
-		switch EventKind(kind) { //nolint:exhaustive // EventMute/EventSuspect не влияют на stats
+		switch EventKind(kind) { //nolint:exhaustive // EventMute/EventSuspect/EventFunnelClose не имеют отдельных счётчиков
 		case EventJoin:
 			s.Joined = n
 		case EventPass:
@@ -216,6 +220,25 @@ func (d *DB) QueryStats(ctx context.Context, chatID int64, from, until time.Time
 	rows.Close() //nolint:errcheck // cleanup, error intentionally ignored
 	if err := rows.Err(); err != nil {
 		return s, fmt.Errorf("events rows: %w", err)
+	}
+
+	// Legacy rows have no explicit entry. Bound the best-effort match to
+	// this user and this join, counting each entry at most once.
+	err = d.sql.QueryRowContext(ctx, `
+		SELECT COALESCE(SUM(CASE
+			WHEN f.join_event_id IS NOT NULL THEN f.closed_at IS NULL OR f.closed_at >= ?3
+			ELSE NOT EXISTS (
+				SELECT 1 FROM events e
+				WHERE e.chat_id = j.chat_id AND e.user_id = j.user_id AND e.at < ?3
+				  AND (e.at, e.id) > (j.at, j.id)
+				  AND e.kind IN ('join', 'pass', 'kick', 'ban', 'spamban', 'left', 'abort', 'funnel_close')
+			)
+		END), 0), COALESCE(MAX(f.join_event_id IS NULL), 0)
+		FROM events j LEFT JOIN funnel_entries f ON f.join_event_id = j.id
+		WHERE j.chat_id = ?1 AND j.kind = 'join' AND j.at >= ?2 AND j.at < ?3
+	`, chatID, from.Unix(), until.Unix()).Scan(&s.Pending, &s.LegacyPendingEstimate)
+	if err != nil {
+		return s, fmt.Errorf("query funnel entries: %w", err)
 	}
 
 	// Таблицы с дневной гранулярностью используют [fromDay, untilDay) —

@@ -9,7 +9,7 @@ import (
 
 // TestLiveIsSpam бьёт в настоящий Gemini API — прогоняется вручную:
 //
-//	GEMINI_API_KEY=... go test -run TestLive ./internal/gemini -v
+//	GEMINI_API_KEY=... go test -tags stdjson -run TestLive ./internal/gemini -v
 //
 // Без ключа (CI, обычный прогон) тест скипается. Кейсы — заведомо
 // однозначные (пересекаются с groq-тестом).

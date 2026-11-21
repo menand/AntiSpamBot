@@ -67,6 +67,18 @@ func (b *Bot) maybeSendGreeting(ctx context.Context, s storage.ChatSettings, mod
 // (0 — не отправлено) и флаг доставки. Режим none — сообщений нет вовсе
 // ((0, true): «доставлять было нечего», вызывающий не считает это провалом).
 func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, mode welcomeMode, chatID, userID int64, threadID, stage int) (int, bool) {
+	msgID, sent := b.sendWelcomeAnchor(ctx, s, mode, chatID, userID, threadID, stage)
+	// Помним id обычного приветствия для будущей очистки при спам-бане.
+	if sent && msgID > 0 {
+		if err := b.db.PutGreeting(ctx, chatID, userID, msgID, time.Now()); err != nil {
+			b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
+		}
+	}
+	return msgID, sent
+}
+
+// Якорь действующей проверки записывается отдельно, вместе с её строкой.
+func (b *Bot) sendWelcomeAnchor(ctx context.Context, s storage.ChatSettings, mode welcomeMode, chatID, userID int64, threadID, stage int) (int, bool) {
 	if mode == welcomeNone {
 		return 0, true
 	}
@@ -103,14 +115,9 @@ func (b *Bot) sendGreetingAnchor(ctx context.Context, s storage.ChatSettings, mo
 		var e error
 		sent, e = b.api.SendMessage(ctx, params)
 		return e
-	}); err != nil || sent == nil {
+	}); err != nil || sent == nil || sent.MessageID <= 0 {
 		b.log.Warn("send greeting", "err", err, "chat", chatID, "user", userID)
 		return 0, false
-	}
-	// Помним id приветствия: при спам-бане юзера revoke стирает только его
-	// сообщения, «Добро пожаловать» бота сносим сами по этой записи.
-	if err := b.db.PutGreeting(ctx, chatID, userID, sent.MessageID, time.Now()); err != nil {
-		b.log.Warn("remember greeting msg", "err", err, "chat", chatID, "user", userID)
 	}
 	return sent.MessageID, true
 }

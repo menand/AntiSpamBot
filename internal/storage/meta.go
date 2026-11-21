@@ -33,3 +33,10 @@ func (d *DB) SetMeta(ctx context.Context, key, value string) error {
 	}
 	return nil
 }
+
+// messageArchiveIDKey identifies archives made from this database and its backups.
+const messageArchiveIDKey = "message_archive_id"
+
+func (d *DB) MessageArchiveID(ctx context.Context) (string, error) {
+	return d.GetMeta(ctx, messageArchiveIDKey)
+}

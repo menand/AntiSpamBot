@@ -35,7 +35,15 @@ const (
 	cbChats = "menu:chats"
 )
 
+func isOwnPrivateChat(chat telego.Chat, userID int64) bool {
+	return userID > 0 && chat.Type == telego.ChatTypePrivate && chat.ID == userID
+}
+
 func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) error {
+	if query.Message == nil || !isOwnPrivateChat(query.Message.GetChat(), query.From.ID) {
+		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+		return nil
+	}
 	// Ветка eph отвечает на callback САМА (единственный answer с текстом
 	// предупреждения при первом включении): повторный answer по тому же ID
 	// Telegram отклоняет с QUERY_ID_INVALID, алерт бы молча терялся.
@@ -43,9 +51,6 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 	}
 
-	if query.Message == nil {
-		return nil
-	}
 	parts := strings.Split(query.Data, ":")
 	if len(parts) < 2 {
 		return nil
@@ -148,7 +153,7 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 		// его из необходимого (from/chat). Проще, чем дублировать логику здесь.
 		synthetic := telego.Message{
 			From: &query.From,
-			Chat: telego.Chat{ID: query.Message.GetChat().ID, Type: "private"},
+			Chat: query.Message.GetChat(),
 		}
 		return b.handleLogsCommand(ctx, synthetic)
 	case "stats":
@@ -350,14 +355,8 @@ func (b *Bot) handleMenuCallback(ctx *th.Context, query telego.CallbackQuery) er
 				"⚠️ Ни GROQ_API_KEY, ни GEMINI_API_KEY, ни GIGACHAT_AUTH_KEY не заданы на сервере — включить ИИ-антиспам нельзя.", false, nil)
 			return nil
 		}
-		if err := b.db.SetSpamCheckEnabled(b.runCtx, chatID, !s.SpamCheckEnabled); err != nil {
+		if err := b.setSpamCheckEnabled(chatID, !s.SpamCheckEnabled); err != nil {
 			b.log.Warn("set spam_check_enabled", "err", err)
-		} else {
-			// Единственный писатель флага — публикуем новое значение сразу,
-			// а не через сброс: иначе читатель горячего пути, промахнувшийся
-			// по кэшу до записи и доложивший старьё после сброса, навсегда
-			// закэшировал бы устаревший тумблер.
-			b.setSpamGateCache(chatID, !s.SpamCheckEnabled)
 		}
 		b.toggleMu.Unlock()
 		return b.renderChatSettings(ctx, query, chatID)

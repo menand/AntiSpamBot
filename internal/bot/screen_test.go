@@ -12,6 +12,7 @@ import (
 
 	"github.com/mymmrac/telego"
 	"github.com/mymmrac/telego/telegoapi"
+	th "github.com/mymmrac/telego/telegohandler"
 
 	"github.com/menand/AntiSpamBot/internal/storage"
 )
@@ -398,5 +399,68 @@ func TestAccessRefusalsReplaceThemselves(t *testing.T) {
 	}
 	if bodies := fc.callBodies("deleteMessage"); len(bodies) != 1 || !strings.Contains(bodies[0], `"message_id":501`) {
 		t.Fatalf("deleted %v, want previous refusal 501", bodies)
+	}
+}
+
+func TestPersonalMenuNeedsOwnPrivateChat(t *testing.T) {
+	b, db, fc := newFlowBot(t)
+	serviceableChat(t, b, db, testChatID)
+	const owner = int64(781)
+	b.cfg.OwnerIDs = map[int64]struct{}{owner: {}}
+	logPath := filepath.Join(t.TempDir(), "bot.log")
+	if err := os.WriteFile(logPath, []byte("test log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.LogFile = logPath
+	fc.resp["sendDocument"] = privateSentJSON(owner, 401)
+	stats := fmt.Sprintf("estats:%d:w:0", testChatID)
+	router, err := th.NewBotHandler(b.api, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router.HandleCallbackQuery(b.handleMenuCallback, th.CallbackDataPrefix("menu:"))
+	router.HandleCallbackQuery(b.handleMenuCallback, th.CallbackDataPrefix("estats:"))
+	press := func(chat telego.Chat, sender int64, data string) {
+		t.Helper()
+		update := telego.Update{CallbackQuery: &telego.CallbackQuery{
+			ID: "q", From: telego.User{ID: sender}, Data: data,
+			Message: &telego.Message{MessageID: 201, Chat: chat},
+		}}
+		if err := router.BaseGroup().HandleUpdate(t.Context(), b.api, update); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, chat := range []telego.Chat{
+		{ID: testChatID, Type: telego.ChatTypeSupergroup},
+		{ID: owner, Type: telego.ChatTypeGroup},
+		{ID: owner + 1, Type: telego.ChatTypePrivate},
+	} {
+		for _, action := range []string{"menu:logs", stats, "menu:main", "menu:eph:" + fmt.Sprint(testChatID)} {
+			press(chat, owner, action)
+		}
+		msg := privateMsg(owner, "/logs")
+		msg.Chat = chat
+		if err := b.handleLogsCommand(nil, msg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := fc.callList(); len(got) != 12 || fc.callCount("answerCallbackQuery") != 12 {
+		t.Fatalf("foreign context exposed a menu action: %v", got)
+	}
+	press(telego.Chat{ID: owner + 1, Type: telego.ChatTypePrivate}, owner+1, "menu:logs")
+	if fc.callCount("sendDocument") != 0 {
+		t.Fatal("non-owner received a log")
+	}
+
+	ownChat := telego.Chat{ID: owner, Type: telego.ChatTypePrivate}
+	press(ownChat, owner, "menu:logs")
+	press(ownChat, owner, stats)
+	if fc.callCount("sendDocument") != 1 {
+		t.Fatalf("owner did not receive the document privately: %v", fc.callList())
+	}
+	if bodies := fc.callBodies("editMessageText"); len(bodies) != 1 ||
+		!strings.Contains(bodies[0], `"chat_id":781`) ||
+		!strings.Contains(bodies[0], "Топ писателей") {
+		t.Fatalf("owner did not receive stats in their own private chat: %v", bodies)
 	}
 }

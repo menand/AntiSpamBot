@@ -186,7 +186,7 @@ func TestOnSuccessRealDisarm(t *testing.T) {
 			}
 
 			pend := putCaptcha(b, db, testChatID, testUserID, 77)
-			if err := b.onSuccess(ctx, pend, ""); err != nil {
+			if err := completeTestCaptcha(ctx, b, pend); err != nil {
 				t.Fatal(err)
 			}
 
@@ -326,7 +326,7 @@ func TestRunCaptchaAborts(t *testing.T) {
 		b.cancelCaptchaSilent(testChatID, testUserID) // прибираем captchaStageLoop
 	})
 
-	t.Run("PutPending упал (БД закрыта) — fail-open впускает", func(t *testing.T) {
+	t.Run("подготовка не записалась — права не меняются", func(t *testing.T) {
 		b, db, fc := newFlowBot(t)
 		_ = db.Close() // все записи падают — коррелирует с близким рестартом
 
@@ -335,8 +335,8 @@ func TestRunCaptchaAborts(t *testing.T) {
 		if _, ok := b.store.Get(testChatID, testUserID); ok {
 			t.Fatal("unpersistable captcha must be dropped")
 		}
-		if fc.callCount("restrictChatMember") < 2 {
-			t.Fatalf("initial restrict + releaseOnAbort expected, calls: %v", fc.callList())
+		if fc.callCount("restrictChatMember") != 0 {
+			t.Fatalf("failed preparation must not change permissions, calls: %v", fc.callList())
 		}
 	})
 }
@@ -385,7 +385,11 @@ func TestBanEverywhereCrossChat(t *testing.T) {
 		return false
 	}
 
-	links := b.banEverywhere(origin, testUserID)
+	verdict := seedConfirmedCrossBan(t, b, origin, target, trusted, pendingChat)
+	links, err := b.banEverywhere(ctx, verdict)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

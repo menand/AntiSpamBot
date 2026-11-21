@@ -3,8 +3,56 @@ package archive
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestVerifyDirectoryChecksEveryDayWithoutEntryData(t *testing.T) {
+	dir := t.TempDir()
+	if err := VerifyDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	valid, err := Encode([]Entry{{Chat: 1, User: 2, Kind: "text", Text: "synthetic"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, FileNameForDay("2026-10-12")), valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyDirectory(dir); err != nil {
+		t.Fatal(err)
+	}
+	const secretValue = "1234567890123456789012345"
+	for _, tc := range []struct{ name, raw, want string }{
+		{name: "corrupt zstd", raw: "not zstd", want: "zstd decode"},
+		{name: "empty file", want: "empty archive"},
+		{name: "malformed JSONL", raw: "{\"c\":1}\n{private text\n", want: "JSONL line 2: invalid JSON"},
+		{name: "wrong JSONL type", raw: "{\"c\":1}\n{\"u\":" + secretValue + "}\n", want: "JSONL line 2: invalid archive entry fields"},
+		{name: "null entry", raw: "{\"c\":1}\nnull\n", want: "JSONL line 2: expected a JSON object"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(tc.raw)
+			if strings.HasPrefix(tc.want, "JSONL") {
+				var err error
+				data, err = zstdEncode(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			name := FileNameForDay("2026-10-13")
+			if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := VerifyDirectory(dir)
+			if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("wrong validation error: %v", err)
+			}
+			if strings.Contains(err.Error(), secretValue) || strings.Contains(err.Error(), "private text") {
+				t.Fatalf("verification printed entry data: %v", err)
+			}
+		})
+	}
+}
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
 	uid := int64(42)

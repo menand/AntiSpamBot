@@ -21,12 +21,15 @@ permissions:
 
 jobs:
   check:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       # Теги баз читаются из Dockerfile — нужен checkout (хардкод здесь пережил
       # бамп 1.26→1.27 и месяц следил бы за устаревшим тегом).
       - uses: actions/checkout@v7
+        with:
+          ref: refs/heads/main
 
       - uses: docker/setup-buildx-action@v4
 
@@ -61,12 +64,12 @@ jobs:
           echo "Base image update detected:"
           echo "  golang: current=${{ steps.current.outputs.golang }} baked=${{ steps.baked.outputs.golang }}"
           echo "  alpine: current=${{ steps.current.outputs.alpine }} baked=${{ steps.baked.outputs.alpine }}"
-          if [ -n "$(gh run list --workflow=ci.yml --limit 5 -R "${{ github.repository }}" --json status -q '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .status' 2>/dev/null | head -1)" ]; then
+          if [ -n "$(gh run list --workflow=ci.yml --branch main --limit 5 -R "${{ github.repository }}" --json status -q '.[] | select(.status == "in_progress" or .status == "queued" or .status == "pending") | .status' 2>/dev/null | head -1)" ]; then
             echo "CI already running, skipping dispatch"
             exit 0
           fi
           echo "Dispatching ci.yml (rebuild_image=true)..."
-          gh workflow run ci.yml -f rebuild_image=true -R "${{ github.repository }}"
+          gh workflow run ci.yml --ref main -f rebuild_image=true -R "${{ github.repository }}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

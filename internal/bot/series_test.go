@@ -47,8 +47,11 @@ func TestCaptchaSeriesThreeStages(t *testing.T) {
 		}
 	}
 	kinds := statsKinds(t, db, testChatID, testUserID)
+	if kinds[storage.EventJoin] != 1 {
+		t.Fatalf("want one entry for the whole series: %v", kinds)
+	}
 	for k, n := range kinds {
-		if n != 0 {
+		if k != storage.EventJoin && n != 0 {
 			t.Fatalf("промежуточный таймаут записал событие %s (%v)", k, kinds)
 		}
 	}
@@ -179,9 +182,9 @@ func TestReplyWaitLatePassKeepsReminder(t *testing.T) {
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 2, 0)
+		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 2, 500)
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
-			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 2,
+			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 2, GreetingMsgID: 500,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -212,9 +215,9 @@ func TestReplyWaitLatePassKeepsReminder(t *testing.T) {
 		if err := db.PutGreeting(ctx, testChatID, testUserID, 500, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 0)
+		p := b.replies.Put(testChatID, testUserID, time.Now().Add(time.Minute), 0, 1, 500)
 		if err := db.PutPendingReply(ctx, storage.PendingReply{
-			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 1,
+			ChatID: testChatID, UserID: testUserID, ExpiresAt: p.ExpiresAt, Stage: 1, GreetingMsgID: 500,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -238,7 +241,10 @@ func TestCaptchaSeriesDepartedMidSeries(t *testing.T) {
 	b, db, fc := newFlowBot(t)
 	serviceableChat(t, b, db, testChatID)
 	b.cfg.CaptchaStageInterval = 40 * time.Millisecond
-	fc.resp["getChatMember"] = `{"status":"left","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`
+	fc.respSeq["getChatMember"] = []string{
+		`{"status":"member","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`,
+		`{"status":"left","user":{"id":7,"is_bot":false,"first_name":"Юзер"}}`,
+	}
 
 	// Живая строка стадии 1 с вот-вот истекающим дедлайном.
 	if err := db.PutPending(ctx, storage.PendingRow{
@@ -283,10 +289,9 @@ func TestReplyWaitSeriesThreeStages(t *testing.T) {
 	}
 
 	s := storage.ChatSettings{GreetingEnabled: true, ReplyCheckEnabled: true}
-	if _, ok := b.sendGreetingAnchor(ctx, s, welcomeReply, testChatID, testUserID, 77, 1); !ok {
+	if p := b.maybeArmReplyWait(s, testChatID, testUserID, 77); p == nil || !b.sendReplyGreeting(ctx, s, p) {
 		t.Fatal("anchor send failed")
 	}
-	b.maybeArmReplyWait(s, testChatID, testUserID, 77)
 
 	waitFor(t, func() bool {
 		k := statsKinds(t, db, testChatID, testUserID)

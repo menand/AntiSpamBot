@@ -254,7 +254,7 @@ func TestEntryFromStoredCarriesReply(t *testing.T) {
 		TS: time.Unix(1760000000, 0), Kind: "text", Text: "Как твои руки?",
 		ReplyMsgID: &rid, ReplyUID: &uid, ReplyAuthor: &author, ReplyText: &text,
 	}
-	e := entryFromStored(with)
+	e := archive.FromStored(with)
 	if e.ReplyMsgID == nil || *e.ReplyMsgID != 7 || e.ReplyUID == nil || *e.ReplyUID != 42 {
 		t.Fatalf("reply ids: %+v", e)
 	}
@@ -266,7 +266,7 @@ func TestEntryFromStoredCarriesReply(t *testing.T) {
 	}
 
 	// Без цитаты — все reply-поля пустые, а не мусорные указатели.
-	plain := entryFromStored(storage.StoredMessage{
+	plain := archive.FromStored(storage.StoredMessage{
 		ChatID: -1001, TS: time.Unix(1760000000, 0), Kind: "text", Text: "t",
 	})
 	if plain.ReplyMsgID != nil || plain.ReplyUID != nil || plain.ReplyAuthor != "" || plain.ReplyText != "" {

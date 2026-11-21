@@ -280,7 +280,7 @@ func (b *Bot) leaveRejectedChat(chatID int64) {
 }
 
 // leaveChatAndCleanup выводит бота по запросу владельца или после отклонения.
-// Активные капчи блокируют выход, чтобы не оставить людей с бессрочным мутом.
+// Активные капчи и допуски с незавершённым снятием прав блокируют выход.
 // Новые капчи на время выхода запрещены. Реестр удаляется после успешного
 // LeaveChat; onDone получает результат. Ошибка оставляет возможность повтора.
 func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) {
@@ -302,10 +302,10 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 				onDone(fmt.Errorf("leaveChatAndCleanup panicked"))
 			}
 		}()
-		pending, err := b.db.HasPendingChat(b.runCtx, chatID)
+		pending, err := b.db.HasPendingChatRestrictions(b.runCtx, chatID)
 		if err != nil || pending || b.store.HasChat(chatID) {
 			if err == nil {
-				err = fmt.Errorf("в чате есть незавершённые капчи: сначала впусти или исключи участников и повтори выход, иначе они останутся в муте")
+				err = fmt.Errorf("в чате есть незавершённые капчи или ещё восстанавливаются права. Дождись завершения проверок и повтори выход")
 			}
 			completed = true
 			if onDone != nil {

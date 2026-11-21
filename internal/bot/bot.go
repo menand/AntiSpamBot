@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,16 +53,9 @@ type Bot struct {
 	// цензора: каждое сообщение ограниченного юзера проверяется из памяти.
 	quar *quarantineStore
 
-	// Отслеживание удаления/правки осмысленного ответа: одноразовое
-	// уведомление о сломанном служебном чате и флаг переключения проб на ЛС
-	// владельца после подтверждённой аварии. replyWatchBlocked — копии не
-	// удаляются (нет права) или право отобрали: пробы выключаются до
-	// перезапуска, иначе текст юзера оседал бы в служебном чате навсегда.
-	// replyWatchChats — дешёвый предфильтр правок: транзакцию открываем
-	// только для чатов, где наблюдение хоть раз создавалось.
+	// Reply-watch проверяет служебный чат перед каждой пробой.
+	// Неудачное удаление копий отключает пробы до перезапуска.
 	replyWatchBrokenNotified atomic.Bool
-	replyWatchWarnPending    atomic.Bool
-	replyWatchFallback       atomic.Bool
 	replyWatchBlocked        atomic.Bool
 	replyWatchDeleteFailures atomic.Int32
 	replyWatchChats          sync.Map
@@ -92,14 +82,11 @@ type Bot struct {
 	gigac        llmClassifier
 	spamMu       sync.Mutex
 	spamInflight map[chatUser]struct{}
-	// Кэш тумблера ИИ-антиспама per-chat: гейт стоит на самом горячем пути
-	// (хвост каждого группового сообщения при настроенных LLM-ключах), а
-	// читать полные chat_settings ради одного бита при SetMaxOpenConns(1)
-	// дорого. Единственный писатель флага — тоггл menu:spam, он же и
-	// сбрасывает запись; ошибка чтения не кэшируется. Неограниченный размер
-	// по тому же соглашению, что approvalCache (~1 байт на известный чат).
+	rights       memberRightsQueue
+	// Кэш флага и контекста ИИ-проверок чата. Выключение отменяет
+	// текущий контекст, включая запасные попытки цепочки провайдеров.
 	spamGateMu    sync.Mutex
-	spamGateCache map[int64]bool
+	spamGateCache map[int64]spamGate
 	// editChecked — время последней спам-проверки ПРАВКИ по (chat, user):
 	// правки не инкрементят счётчик сообщений, и без кулдауна новичок мог бы
 	// бесконечными правками одного сообщения жечь LLM-квоту. Unbounded по
@@ -137,13 +124,9 @@ type Bot struct {
 	leaveMu       sync.Mutex
 	leaveInflight map[int64]bool
 
-	// Расширенный сбор статистики (cfg.MessageCaptureEnabled). Канал
-	// буферизует записи сообщений, отдельная writer-горутина пачками пишет их
-	// в БД — чтобы SQLite-вставка не стояла на горячем пути модерации. Если
-	// канал переполнен (БД отстаёт), запись отбрасывается: лучше потерять
-	// статистику, чем тормозить обработку сообщений. captureDone закрывается
-	// writer-горутиной при выходе — Run дожидается её перед db.Close(), иначе
-	// финальный флаш упал бы на закрытой БД.
+	// The update handlers produce capture entries. Run stops them before
+	// closing the queue and waiting for the writer.
+	captureMu   sync.RWMutex
 	captureCh   chan storage.StoredMessage
 	captureDone chan struct{}
 }
@@ -182,10 +165,8 @@ func New(cfg *config.Config, log *slog.Logger, version string) (*Bot, error) {
 		digestSent:     make(map[int64]string),
 		adminCache:     make(map[chatUser]adminCacheEntry),
 		approvalCache:  make(map[int64]bool),
-		spamGateCache:  make(map[int64]bool),
+		spamGateCache:  make(map[int64]spamGate),
 		leaveInflight:  make(map[int64]bool),
-		captureCh:      make(chan storage.StoredMessage, captureBufSize),
-		captureDone:    make(chan struct{}),
 	}, nil
 }
 
@@ -196,7 +177,9 @@ func (b *Bot) Username() string {
 	return b.me.Username
 }
 
-func (b *Bot) Run(ctx context.Context) error {
+func (b *Bot) Run(parent context.Context) error {
+	ctx, stopRun := context.WithCancel(parent)
+	defer stopRun()
 	b.runCtx = ctx
 	b.startedAt = time.Now()
 
@@ -205,12 +188,17 @@ func (b *Bot) Run(ctx context.Context) error {
 		return fmt.Errorf("open storage: %w", err)
 	}
 	b.db = db
-	// Финальный флаш writer-горутины захвата ждём отдельным defer'ом, который
-	// регистрируется НИЖЕ — сразу после запуска самой горутины (defer'ы идут
-	// LIFO, так waitCaptureDone выполнится ПЕРЕД db.Close). Здесь же ставить
-	// waitCaptureDone нельзя: при раннем выходе Run (ошибка GetMe) горутина
-	// ещё не запущена, captureDone не закроется, и дефер ждал бы зря таймаут.
-	defer func() { _ = db.Close() }()
+	var bh *th.BotHandler
+	announced := false
+	defer func() {
+		b.stopUpdateHandling(stopRun, bh)
+		if announced {
+			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			b.notifyOwners(shutCtx, "🔴 <b>Бот остановлен</b>")
+		}
+		_ = db.Close()
+	}()
 
 	me, err := b.api.GetMe(ctx)
 	if err != nil {
@@ -218,12 +206,19 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	b.me = me
 
-	restored, err := b.restorePending(ctx)
+	muteRestoreCtx, cancelMuteRestore := context.WithTimeout(ctx, 30*time.Second)
+	b.reconcileManualMutes(muteRestoreCtx)
+	cancelMuteRestore()
+
+	punishRestoreCtx, cancelPunishRestore := context.WithTimeout(ctx, 30*time.Second)
+	b.reconcilePunishments(punishRestoreCtx)
+	cancelPunishRestore()
+	restored, err := b.retryPendingRestore(ctx, "captchas", b.restorePending)
 	if err != nil {
-		b.log.Error("restore pending captchas", "err", err)
+		return err
 	}
-	if _, err := b.restorePendingReplies(ctx); err != nil {
-		b.log.Error("restore pending replies", "err", err)
+	if _, err := b.retryPendingRestore(ctx, "replies", b.restorePendingReplies); err != nil {
+		return err
 	}
 	b.restoreQuarantine(ctx)
 
@@ -249,7 +244,11 @@ func (b *Bot) Run(ctx context.Context) error {
 		// не приходит), и стартовый гейт chatServiceable в reconcileSpamVotes
 		// выиграл бы гонку и исполнил вердикт мёртвого чата.
 		b.reconcileChats(ctx)
+		b.goSafe("manualMuteRetryLoop", func() { b.manualMuteRetryLoop(ctx) })
+		b.goSafe("captchaRestoreLoop", func() { b.captchaRestoreLoop(ctx) })
+		b.goSafe("admissionRetryLoop", func() { b.admissionRetryLoop(ctx) })
 		b.reconcileSpamVotes(ctx)
+		b.goSafe("spamVerdictRetryLoop", func() { b.spamVerdictRetryLoop(ctx) })
 		// Карантин-реконсиляция — здесь же, в стартовой горутине: крэш между
 		// выключением тоггла и отпуском юзеров не должен пережить рестарт
 		// (restoreQuarantine уже отфильтровал такие чаты, но страховой свип
@@ -263,19 +262,9 @@ func (b *Bot) Run(ctx context.Context) error {
 	})
 	b.goSafe("spamVoteSweepLoop", func() { b.spamVoteSweepLoop(ctx) })
 	b.goSafe("announceVersion", func() { b.announceVersion(ctx) })
-	b.goSafe("healthbeat", func() { b.healthbeat(ctx) })
-	// Расширенный сбор статистики: пишущая горутина захвата включается только
-	// флагом MESSAGE_CAPTURE_ENABLED (captureCh иначе никто не читает).
-	// Архиватор запускается ВСЕГДА: он дешёвый (первый прогон и часовой тик —
-	// no-op на пустой таблице), а если захват когда-то выключили, уже
-	// накопленные hot-строки должны доархивироваться, а не зависнуть вечно.
-	if b.cfg.MessageCaptureEnabled {
-		b.goSafe("captureWriter", func() { b.captureWriter(ctx) })
-		// Дефер регистрируется только ЗДЕСЬ — после фактического запуска
-		// writer-горутины. Идёт раньше `db.Close` (LIFO), так что финальный
-		// detached-флаш успевает долить хвост на живую БД, а не на закрытую.
-		defer b.waitCaptureDone()
-	}
+	b.startCaptureWriter()
+	// Архиватор работает даже при выключенном захвате, чтобы обработать
+	// накопленные ранее горячие строки.
 	b.goSafe("archiveLoop", func() { b.archiveLoop(ctx) })
 	if b.cfg.ReplyWatchEnabled {
 		// Диагностика/свип — в той же горутине, что и цикл: сетевые проверки
@@ -308,11 +297,7 @@ func (b *Bot) Run(ctx context.Context) error {
 		"🟢 <b>Бот запущен</b>\nЮзернейм: @%s\nВерсия: <code>%s</code>\nВосстановлено капч: %d",
 		b.Username(), b.version, restored))
 
-	defer func() {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		b.notifyOwners(shutCtx, "🔴 <b>Бот остановлен</b>")
-	}()
+	announced = true
 
 	updates, err := b.api.UpdatesViaLongPolling(ctx, &telego.GetUpdatesParams{
 		AllowedUpdates: []string{"message", "edited_message", "callback_query", "chat_member", "my_chat_member"},
@@ -321,11 +306,10 @@ func (b *Bot) Run(ctx context.Context) error {
 		return fmt.Errorf("long polling: %w", err)
 	}
 
-	bh, err := th.NewBotHandler(b.api, updates)
+	bh, err = th.NewBotHandler(b.api, updates)
 	if err != nil {
 		return fmt.Errorf("bot handler: %w", err)
 	}
-	defer func() { _ = bh.Stop() }()
 
 	if err := b.setCommands(ctx); err != nil {
 		b.log.Warn("set commands", "err", err)
@@ -415,11 +399,12 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspam:"))  // rpspam:<userID> (first click)
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamc:")) // rpspamc:<userID> (confirm)
 	bh.HandleCallbackQuery(b.handleReplySpamCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("rpspamx:")) // rpspamx:<userID> (cancel)
-	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))         // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|welcome|wset|wtxt|daily|sil|spam|eph|qr|max|tmo|hour|swl|svm|qper|cmode|leave|leavec:<chatID>:<val> (gr|rpl|grtxt — legacy-алиасы: ре-рендер настроек / контекстный ввод)
-	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))       // estats:<chatID>:<list>:<page>
-	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))       // sv:1|0 (vote)
-	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))      // mc:<u|f|m|w>:<userID>|x
-	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:"))     // appr:y|n:<chatID>
+	// Общий обработчик проверяет личный диалог до разбора menu: и estats:.
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))     // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|welcome|wset|wtxt|daily|sil|spam|eph|qr|max|tmo|hour|swl|svm|qper|cmode|leave|leavec:<chatID>:<val> (gr|rpl|grtxt — legacy-алиасы: ре-рендер настроек / контекстный ввод)
+	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))   // estats:<chatID>:<list>:<page>
+	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))   // sv:1|0 (vote)
+	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))  // mc:<u|f|m|w>:<userID>|x
+	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:")) // appr:y|n:<chatID>
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))
 	bh.HandleMessage(b.handleChatsCommand, th.CommandEqual("chats"))
 	bh.HandleMessage(b.handleLogsCommand, th.CommandEqual("logs"))
@@ -446,7 +431,18 @@ func (b *Bot) Run(ctx context.Context) error {
 	bh.HandleMessage(b.handleGroupMessage)                         // фолбэк: сервис-сообщения + счётчики в группах
 	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
 
+	healthCtx, cancelHealth := context.WithCancel(ctx)
+	defer cancelHealth()
+	b.goSafe("healthbeat", func() { b.healthbeat(healthCtx, bh.IsRunning) })
 	return bh.Start()
+}
+
+func (b *Bot) stopUpdateHandling(stop context.CancelFunc, handler *th.BotHandler) {
+	stop()
+	if handler != nil {
+		_ = handler.Stop()
+	}
+	b.stopCaptureWriter()
 }
 
 // privateMessagePredicate матчит некомандные сообщения в личке, которые
@@ -487,22 +483,54 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	mutes, err := b.manualMuteKeys(ctx)
+	if err != nil {
+		return 0, err
+	}
+	punishments, err := b.db.LoadPunishments(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range punishments {
+		mutes[chatUser{p.ChatID, p.UserID}] = true
+	}
+	serviceable := make(map[int64]bool)
+	for _, row := range rows {
+		if mutes[chatUser{row.ChatID, row.UserID}] {
+			continue
+		}
+		if err := b.checkPendingRestoreChat(ctx, row.ChatID, serviceable); err != nil {
+			return 0, err
+		}
+	}
 	now := time.Now()
-	staleChats := map[int64]struct{}{}
 	restored := 0
-	// Общий бюджет на все liveness-пробы истёкших строк: без него массовый
-	// джойн перед падением тянул бы рестарт по 10 c за строку. Исчерпался —
-	// оставшиеся строки наказываются по грейсу (fail-open к старому пути).
-	lctx, lcancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// Общий бюджет проверки членства. Таймер перед санкцией повторяет
+	// проверку роли, если на старте её подтвердить не удалось.
+	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
 	defer lcancel()
 	for _, row := range rows {
-		// Чат мог стать необслуживаемым за время простоя (вышли из
-		// ALLOWED_CHATS, владелец отклонил, бота кикнули): таймеры наказаний
-		// в него стрелять не должны. Стартуем раньше reconcileChats, который
-		// вычистил бы строки только позже, а грейс-таймер истёкших успевает
-		// до него — сносим сразу.
-		if !b.chatServiceable(row.ChatID) {
-			staleChats[row.ChatID] = struct{}{}
+		if mutes[chatUser{row.ChatID, row.UserID}] {
+			continue
+		}
+		if !serviceable[row.ChatID] {
+			if b.chatAllowed(row.ChatID) && !row.Suspended {
+				if err := b.db.DeletePendingIfMsg(ctx, row.ChatID, row.UserID, row.MessageID, row.EphemeralID); err != nil {
+					b.log.Warn("delete pending captcha of unapproved chat", "err", err, "chat", row.ChatID, "user", row.UserID)
+				}
+			}
+			continue
+		}
+		if row.Preparing() || row.Suspended {
+			if err := b.restoreCaptchaCheckpoint(lctx, row); err != nil {
+				b.log.Warn("restore captcha checkpoint", "err", err, "chat", row.ChatID, "user", row.UserID)
+			}
+			continue
+		}
+		if _, active := b.store.Get(row.ChatID, row.UserID); active {
+			continue
+		}
+		if b.restoredCaptchaUserDeparted(lctx, row) {
 			continue
 		}
 		expires := row.ExpiresAt
@@ -510,15 +538,6 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 		stage := row.Stage
 		if expired {
 			expires = now.Add(1 * time.Second)
-			// Истекла, пока бот лежал: юзер мог выйти офлайн (лево-апдейт
-			// потерян), и слепой grace-кик породил бы фантомный kick в
-			// воронке плюс бесполезный ban/unban-раунд. Та же liveness-
-			// проверка, что у живого пути перед Put: ушедшему — left и
-			// снятие мьюта, присутствующему — штатный грейс-таймаут. Ошибка
-			// API — старое поведение (наказание, fail-open).
-			if b.restoredCaptchaUserDeparted(lctx, row) {
-				continue
-			}
 			// Простой съел серию: рестарт считает её исчерпанной и по грейсу
 			// исполняет наказание — как прежний одиночный таймаут. Кламп к
 			// финальной стадии заставляет цикл карать, а не слать очередное
@@ -531,14 +550,7 @@ func (b *Bot) restorePending(ctx context.Context) (int, error) {
 		b.goSafe("captchaStageLoop", func() { b.captchaStageLoop(row.ChatID, row.UserID, p) })
 		restored++
 	}
-	for chatID := range staleChats {
-		if err := b.db.DeletePendingChat(ctx, chatID); err != nil {
-			b.log.Warn("delete pendings of unserviceable chat",
-				"err", err, "chat", chatID)
-		}
-	}
-	b.log.Info("restored pending captchas", "count", restored,
-		"total", len(rows), "skipped_chats", len(staleChats))
+	b.log.Info("restored pending captchas", "count", restored, "total", len(rows))
 	return restored, nil
 }
 
@@ -557,7 +569,7 @@ func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.Pendi
 			"chat", row.ChatID, "user", row.UserID)
 		return false
 	}
-	if s := m.MemberStatus(); s != "left" && s != "kicked" {
+	if m.MemberIsMember() {
 		return false
 	}
 	if err := b.db.DeletePending(ctx, row.ChatID, row.UserID); err != nil {
@@ -566,33 +578,20 @@ func (b *Bot) restoredCaptchaUserDeparted(ctx context.Context, row storage.Pendi
 	b.recordLeftEvent(ctx, row.ChatID, row.UserID, "left while offline")
 	// releaseOnAbort на живом ctx съел бы бюджет рестарта лестницей ретраев —
 	// гоняем асинхронно на своём bounded-бюджете.
-	rowChatID, rowUserID := row.ChatID, row.UserID
-	b.goSafe("releaseDepartedRestore", func() {
-		rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer rcancel()
-		b.releaseOnAbort(rctx, rowChatID, rowUserID)
-	})
+	if m.MemberStatus() == telego.MemberStatusLeft {
+		rowChatID, rowUserID := row.ChatID, row.UserID
+		if unlock, err := b.rights.lock(ctx, rowChatID, rowUserID, false); err == nil {
+			b.goSafe("releaseDepartedRestore", func() {
+				defer unlock()
+				rctx, rcancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer rcancel()
+				b.releaseOnAbort(rctx, rowChatID, rowUserID)
+			})
+		}
+	}
 	b.log.Info("expired captcha closed — user left while offline",
 		"chat", row.ChatID, "user", row.UserID)
 	return true
-}
-
-// healthbeat раз в минуту освежает файл-сердцебиение рядом с БД. HEALTHCHECK
-// образа смотрит на его свежесть: зависший процесс (дедлок, клин long-poll)
-// снаружи выглядит «running», и restart-policy его не трогает. Молчащий лог
-// признаком смерти служить не может — в тихом чате бот не пишет в лог часами.
-func (b *Bot) healthbeat(ctx context.Context) {
-	path := filepath.Join(filepath.Dir(b.cfg.DBPath), ".heartbeat")
-	for {
-		if err := os.WriteFile(path, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o600); err != nil {
-			b.log.Warn("healthbeat write", "err", err, "path", path)
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Minute):
-		}
-	}
 }
 
 // goSafe запускает fn в горутине с recover: паника логируется, процесс живёт.

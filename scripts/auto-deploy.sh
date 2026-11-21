@@ -2,15 +2,12 @@
 # Auto-deploy: pull the CI-built image from GHCR and restart when it changed.
 # Сборка происходит на GitHub Actions (ci.yml, job image) ПОСЛЕ зелёных
 # тестов — ВДС только забирает готовый образ, локальных билдов больше нет.
-# git-обновление здесь нужно лишь для самого скрипта и docker-compose.yml.
-#
-# Гонка «коммит запушен, образ ещё собирается» безопасна by design: pull
-# приносит прежний latest, image ID не меняется, тик молчит; следующий тик
-# подхватит готовый образ.
+# Этот установленный скрипт только выбирает выпуск. Управляющий код и
+# Compose берутся из ревизии уже опубликованного образа.
 #
 # Smoke + карантин: после деплоя проверяем, что контейнер жив (Running,
-# RestartCount стабилен, heartbeat свежий, getMe отвечает). Жёсткий провал — возвращаем прежний
-# образ и кладём ID в карантин (QUARANTINE). Петли нет: пока упавший образ
+# RestartCount стабилен, heartbeat свежий). При жёстком провале возвращаем
+# предыдущий комплект и помещаем ID образа в карантин (QUARANTINE). Петли нет: пока упавший образ
 # (тот же ID) в карантине, тик молчит; новый ID (реальный фикс) проходит.
 # Карантин живёт ВНЕ репо и volume контейнера — переживает git-pull и рестарты.
 #
@@ -29,6 +26,7 @@ cd "$REPO_DIR"
 
 DEPLOY_LOG="/var/log/antispam-deploy.log"
 QUARANTINE="/var/lib/antispam/bad-images"
+RELEASE_STATE="/var/lib/antispam/releases"
 IMAGE="ghcr.io/menand/antispambot:latest"
 ENV_FILE="$REPO_DIR/.env"
 
@@ -81,37 +79,6 @@ running_image_matches() {
     [ -n "$target" ] && [ "$manifest" = "$target" ]
 }
 
-# Проверяем и новый образ, и результат отката. Успех compose сам по себе
-# ничего не говорит о жизнеспособности запущенного контейнера.
-smoke_image() {
-    local expected="$1" r1 r2
-    SMOKE_FAIL=""
-    sleep 10
-    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != running ]; then
-        SMOKE_FAIL="контейнер не запущен"
-        return 1
-    fi
-    r1=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || true)
-    if [ "$r1" != 0 ]; then
-        SMOKE_FAIL="контейнер уже перезапускался ($r1)"
-        return 1
-    fi
-    sleep 25
-    if [ "$(docker inspect --format '{{.State.Status}}' menand-antispam 2>/dev/null || true)" != running ]; then
-        SMOKE_FAIL="контейнер остановился во время проверки"
-        return 1
-    fi
-    r2=$(docker inspect --format '{{.RestartCount}}' menand-antispam 2>/dev/null || true)
-    if [ "$r1" != "$r2" ]; then
-        SMOKE_FAIL="контейнер перезапустился ($r1 → $r2)"
-    elif ! docker exec menand-antispam /usr/local/bin/healthcheck >/dev/null 2>&1; then
-        SMOKE_FAIL="heartbeat не прошёл проверку свежести"
-    elif ! running_image_matches "$expected"; then
-        SMOKE_FAIL="запущен другой образ"
-    fi
-    [ -z "$SMOKE_FAIL" ]
-}
-
 # DM владельцам из OWNER_IDS. Возвращает успех, если хотя бы одна отправка
 # прошла (curl без ошибок) — notify_once держит маркер только при успехе.
 # Токен не логируется и не попадает в argv: URL передаётся через конфиг на
@@ -150,120 +117,280 @@ notify_once() {
     fi
 }
 
-# Подтягиваем ветку со скриптами/Compose без исторических тегов: несовпадение
-# старого локального тега с origin не должно блокировать обновление ветки.
-# Версию запущенного бота читаем из образа, а не через git describe на VDS.
-# Расхождение репо (локальный хотфикс,
-# правка compose руками) раньше убивало весь скрипт через set -e ДО всякой
-# логики деплоя — и каждый следующий тик умирал там же молча. Теперь: раз в
-# сутки владельцам уходит сигнал, тик завершается с ошибкой в лог.
-if ! git fetch --quiet --no-tags origin main; then
-    echo "!!! $(date -Is) git fetch failed; deploy skipped"
-    notify_once "fetch" "⚠️ Проверка обновления отложена: не удалось получить скрипты и Compose из Git. Контейнер не изменялся. Повторная попытка — автоматически через минуту; предупреждение не чаще раза в сутки. Подробности в журнале автодеплоя." || true
-    exit 1
-fi
-if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-    if ! git merge --ff-only --quiet origin/main; then
-        echo "!!! $(date -Is) git merge --ff-only failed (repo diverged); deploy skipped"
-        notify_once "merge" "⚠️ Автодеплой стоит: репо на сервере разошлось с origin/main. Нужен ручной git stash/reset на ВДС." || true
-        exit 1
-    fi
-fi
+container_field() {
+    docker inspect --format "$1" menand-antispam 2>/dev/null || true
+}
 
-before=$(docker inspect --format '{{.Image}}' menand-antispam 2>/dev/null || true)
-# pull молчит в логе при успехе, но провал теперь различим: заглушенный
-# «|| true» превращал вечный сбой pull (токен, DNS, диск) в тихое «нечего
-# деплоить» — бот не обновлялся бы вообще без единого сигнала.
-pull_failed=0
-pull_out="$(docker compose pull --quiet bot 2>&1)" || pull_failed=1
-if [ "$pull_failed" -eq 1 ]; then
-    echo "!!! $(date -Is) docker compose pull failed: ${pull_out:0:300}"
-    notify_once "pull" "⚠️ Обновление отложено: не удалось скачать образ. Контейнер не изменялся. Повторная попытка — автоматически через минуту; предупреждение не чаще раза в сутки. Подробности в журнале автодеплоя." || true
-    exit 1
-fi
-after=$(docker image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || true)
-
-# Нечего деплоить (или CI ещё не дособрал образ) — молчим, лог не растёт.
-if [ -z "$after" ] || [ "$before" = "$after" ] || running_image_matches "$after"; then
-    exit 0
-fi
-
-# Проваленный ранее образ (тот же ID) — не деплоим снова, петли нет.
-if is_quarantined "$after"; then
-    exit 0
-fi
-
-BEFORE_VERSION=$(image_version "$before")
-AFTER_VERSION=$(image_version "$after")
-BEFORE_REVISION=$(image_revision "$before")
-AFTER_REVISION=$(image_revision "$after")
-CHANGES=$(deployment_changes "$before" "$after" "$BEFORE_VERSION" "$AFTER_VERSION" "$BEFORE_REVISION" "$AFTER_REVISION")
-ALPINE_INFO=$(alpine_details "$before" "$after")
-
-echo "=== $(date -Is) deploying image $(short_id "$after") ==="
-SMOKE_FAIL=""
-if ! docker compose up -d --no-build --no-deps bot; then
-    # Compose мог уже остановить старый контейнер до ошибки создания нового.
-    # Поэтому ошибка команды требует той же попытки отката, что и smoke fail.
-    SMOKE_FAIL="команда запуска Compose завершилась ошибкой"
-else
-    smoke_image "$after" || true
-fi
-
-if [ -n "$SMOKE_FAIL" ]; then
-    # Жёсткий провал — откат на прежний образ + карантин. Prune НЕ делаем:
-    # старый образ ещё нужен, а упавший остаётся в registry для диагностики.
-    mkdir -p "$(dirname "$QUARANTINE")" || true
-    if ! grep -qxF "$after" "$QUARANTINE" 2>/dev/null; then
-        echo "$after" >> "$QUARANTINE" 2>/dev/null || true
-    fi
-    if [ -z "$before" ]; then
-        echo "!!! $(date -Is) SMOKE FAIL ($SMOKE_FAIL); no previous image for rollback"
-        notify_owners "🚨 Первый деплой провалился ($SMOKE_FAIL), предыдущего образа для отката нет. Нужно вмешательство" || true
-        exit 1
-    fi
-    DEPLOY_FAIL="$SMOKE_FAIL"
-    echo "!!! $(date -Is) SMOKE FAIL ($DEPLOY_FAIL); rolling back to $(short_id "$before")"
-    ROLLBACK_OK=0
-    if docker tag "$before" "$IMAGE" && docker compose up -d --no-build --no-deps bot; then
-        if smoke_image "$before"; then
-            ROLLBACK_OK=1
+image_ref() {
+    local ref
+    while IFS= read -r ref; do
+        if [[ $ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ ]]; then
+            printf '%s' "$ref"
+            return
         fi
-    else
-        SMOKE_FAIL="команда отката Compose завершилась ошибкой"
+    done < <(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$1" 2>/dev/null)
+    return 1
+}
+
+check_revision() {
+    [[ $1 =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$1" origin/main
+}
+
+# Paths to .env and the project directory are always those of the original
+# checkout. The override pins the image and, on an existing install, /data.
+run_bundle() {
+    local bundle="$1" override="$1/pinned.yml"
+    if [ "$first_install" -eq 1 ]; then
+        override="$bundle/launch.yml"
+        if [ "$resume_first" -eq 1 ] && { [ -f "$bundle/instance" ] || [ -n "$(container_field '{{.Image}}')" ]; }; then
+            remember_first_instance "$bundle"
+            return
+        fi
     fi
-    if [ "$ROLLBACK_OK" -eq 1 ]; then
-        echo "!!! $(date -Is) rollback done; image $(short_id "$after") quarantined"
-        notify_owners "⚠️ Обновление $BEFORE_VERSION → $AFTER_VERSION отменено.
-Причина: $DEPLOY_FAIL.
-Восстановлена версия: $BEFORE_VERSION; прежний образ работает, heartbeat свежий, перезапусков нет.
-Отклонённый образ $(short_id "$after") в карантине и повторно не устанавливается." || true
-    else
-        echo "!!! $(date -Is) ROLLBACK FAILED ($SMOKE_FAIL) — manual intervention required!"
-        notify_owners "🚨 Обновление до $AFTER_VERSION не прошло: $DEPLOY_FAIL.
-Откат на $BEFORE_VERSION НЕ подтверждён: $SMOKE_FAIL.
-Нужно вмешательство; работоспособность бота не подтверждена." || true
+    docker compose --project-name "$project" --project-directory "$REPO_DIR" \
+        --env-file "$ENV_FILE" -f "$bundle/docker-compose.yml" -f "$override" \
+        up -d --no-build --no-deps --pull never bot || return 1
+    if [ "$first_install" -eq 1 ]; then
+        remember_first_instance "$bundle" || return 1
     fi
+}
+
+remember_first_instance() {
+    local bundle="$1" observed marker mounted actual_project
+    observed=$(container_field '{{.Id}} {{.State.StartedAt}}')
+    marker=$(container_field '{{with index .Config.Labels "io.menand.antispam.first-release"}}{{.}}{{end}}')
+    mounted=$(container_field '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "volume")}}{{.Name}}{{end}}{{end}}')
+    actual_project=$(container_field '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}')
+    if [[ ! $observed =~ ^[a-zA-Z0-9]+\ [0-9]{4}- ]] || [ "$marker" != "${bundle##*/}" ] ||
+       [ "$mounted" != "$volume" ] || [ "$actual_project" != "$project" ] || ! running_image_matches "$after"; then
+        SMOKE_FAIL="не совпали метка, проект, образ или том первой установки"
+        return 1
+    fi
+    if [ -f "$bundle/instance" ] && [ "$(cat "$bundle/instance")" != "$observed" ]; then
+        SMOKE_FAIL="экземпляр первой установки изменился"
+        return 1
+    fi
+    first_instance="$observed"
+    printf '%s\n' "$first_instance" > "$bundle/instance.tmp" && mv -f "$bundle/instance.tmp" "$bundle/instance"
+}
+
+snapshot_bundle() {
+    local dir="$1" revision="$2" ref="$3" volume="$4"
+    git show "$revision:docker-compose.yml" > "$dir/docker-compose.yml" || return 1
+    printf '%s\n' "$ref" > "$dir/image"
+    printf '%s\n' "$revision" > "$dir/revision"
+    printf '%s\n' "$project" > "$dir/project"
+    printf '%s\n' "$volume" > "$dir/volume"
+    {
+        printf 'services:\n  bot:\n    image: "%s"\n' "$ref"
+        if [ -n "$volume" ]; then
+            printf '    volumes:\n      - bot-data:/data\nvolumes:\n  bot-data:\n    external: true\n    name: "%s"\n' "$volume"
+        fi
+    } > "$dir/pinned.yml"
+}
+
+write_bundle_pointer() {
+    local dir="$1" name="$2" pointer
+    pointer=$(mktemp "$RELEASE_STATE/$name.XXXXXX") || return 1
+    printf '%s\n' "${dir##*/}" > "$pointer" || return 1
+    mv -f "$pointer" "$RELEASE_STATE/$name"
+}
+
+save_confirmed_bundle() {
+    local dir="$1" old_ref rotate=1
+    if [ "$dir" = "${candidate:-}" ] && [ -n "$previous" ]; then
+        if ! old_ref=$(cat "$previous/image") ||
+           { [ "$old_ref" != "$candidate_ref" ] && ! write_bundle_pointer "$previous" previous; }; then
+            echo "!!! release cleanup postponed: could not record previous release"
+            rotate=0
+        fi
+    fi
+    write_bundle_pointer "$dir" current || return 1
+    if [ "$first_install" -eq 1 ]; then
+        rm -f "$RELEASE_STATE/pending" || echo "!!! release cleanup: could not clear pending pointer"
+    fi
+    if [ "$dir" = "${candidate:-}" ] && [ "$rotate" -eq 1 ]; then
+        rotate_release_bundles "$dir" || echo "!!! release cleanup postponed"
+    fi
+}
+
+is_release_bundle() {
+    [[ ${1##*/} =~ ^bundle[.][A-Za-z0-9]+$ ]] && [ -d "$1" ] && [ ! -L "$1" ]
+}
+
+rotate_release_bundles() {
+    local current="$1" pointer selected bundle kept ref other other_ref containers images shared
+    local retained=("$current")
+    [ -n "$project" ] && [ -n "$volume" ] || return 1
+    for pointer in previous pending; do
+        [ -f "$RELEASE_STATE/$pointer" ] || continue
+        selected=$(cat "$RELEASE_STATE/$pointer") || return 1
+        [[ $selected =~ ^bundle[.][A-Za-z0-9]+$ ]] && is_release_bundle "$RELEASE_STATE/$selected" || return 1
+        retained+=("$RELEASE_STATE/$selected")
+    done
+    images=$(docker image ls --digests --format '{{.Repository}}@{{.Digest}}' "${IMAGE%:*}") || return 1
+    for bundle in "$RELEASE_STATE"/bundle.*; do
+        is_release_bundle "$bundle" || continue
+        for kept in "${retained[@]}"; do
+            [ "$bundle" != "$kept" ] || continue 2
+        done
+        [ "$(cat "$bundle/project" 2>/dev/null)" = "$project" ] &&
+            [ "$(cat "$bundle/volume" 2>/dev/null)" = "$volume" ] || continue
+        ref=$(cat "$bundle/image" 2>/dev/null) || continue
+        [[ $ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ ]] || continue
+
+        shared=0
+        for other in "$RELEASE_STATE"/bundle.*; do
+            [ "$other" != "$bundle" ] && is_release_bundle "$other" || continue
+            [ -f "$other/image" ] || continue
+            read -r other_ref < "$other/image" || return 1
+            if [ "$other_ref" = "$ref" ]; then
+                shared=1
+                break
+            fi
+        done
+        if [ "$shared" -eq 0 ] && { grep -qxF "$ref" <<< "$images" || docker image inspect "$ref" >/dev/null 2>&1; }; then
+            if ! containers=$(docker ps -aq --filter "ancestor=$ref"); then
+                echo "!!! release cleanup: could not check containers for $ref"
+                continue
+            fi
+            [ -z "$containers" ] || continue
+            if ! docker image rm "$ref"; then
+                echo "!!! release cleanup: could not remove $ref"
+                continue
+            fi
+        fi
+        rm -rf -- "$bundle" || echo "!!! release cleanup: could not remove ${bundle##*/}"
+    done
+}
+
+first_install=0
+resume_first=0
+first_instance=""
+rejected_first=0
+if [ -f "$RELEASE_STATE/pending" ] && [ ! -f "$RELEASE_STATE/current" ]; then
+    selected=$(cat "$RELEASE_STATE/pending")
+    [[ $selected =~ ^bundle[.][A-Za-z0-9]+$ ]] || exit 1
+    candidate="$RELEASE_STATE/$selected"
+    candidate_ref=$(cat "$candidate/image")
+    revision=$(cat "$candidate/revision")
+    project=$(cat "$candidate/project")
+    volume=$(cat "$candidate/volume")
+    [[ $candidate_ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ && $revision =~ ^[0-9a-f]{40}$ &&
+       $project =~ ^[a-z0-9][a-z0-9_-]*$ && $volume = "${project}_bot-data" ]] || exit 1
+    after=$(docker image inspect --format '{{.Id}}' "$candidate_ref" 2>/dev/null || true)
+    if ! is_quarantined "$candidate_ref" && ! is_quarantined "$after"; then
+        [ -n "$after" ] && [ -f "$candidate/launch.yml" ] && [ -f "$candidate/docker-compose.yml" ] || exit 1
+        before=""
+        previous=""
+        first_install=1
+        resume_first=1
+        # shellcheck source=/dev/null
+        source "$candidate/deploy-release.sh"
+        exit
+    fi
+    rejected_first=1
+fi
+
+# Fetch updates the remote-tracking branch only. An interrupted first install
+# is checked against its saved digest before considering a newer tag.
+if ! git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main; then
+    echo "!!! $(date -Is) git fetch failed; deploy skipped"
+    notify_once "fetch" "⚠️ Проверка обновления отложена: Git недоступен. Контейнер не изменялся. Повторная попытка — автоматически через минуту." || true
     exit 1
 fi
 
-# getMe — мягкий сигнал: сетевой сбой не откатывает проверенный контейнер.
-TOKEN="$(parse_env BOT_TOKEN || true)"
-GETME_OK=0
-if [ -n "$TOKEN" ]; then
-    if printf 'url = "https://api.telegram.org/bot%s/getMe"\n' "$TOKEN" |
-        curl -fs --max-time 5 -K - | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-        GETME_OK=1
+before=$(container_field '{{.Image}}')
+before_revision=$(container_field '{{with index .Config.Labels "org.opencontainers.image.revision"}}{{.}}{{end}}')
+if [ "$rejected_first" -eq 1 ]; then
+    before=""
+fi
+before_ref=""
+if [ -n "$before" ]; then
+    before_ref=$(image_ref "$before" || true)
+    if [ -z "$before_ref" ]; then
+        # containerd может хранить config ID отдельно от локального индекса.
+        manifest=$(container_field '{{with index . "ImageManifestDescriptor"}}{{index . "digest"}}{{end}}')
+        if [[ $manifest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            before_ref="${IMAGE%:*}@$manifest"
+        fi
     fi
 fi
-if [ "$GETME_OK" -eq 1 ]; then
-    # Без --force и только прежний образ бота; чужие образы не затрагиваем.
-    if [ -n "$before" ]; then
-        docker image rm "$before" >/dev/null 2>&1 || true
-    fi
-    echo "=== $(date -Is) deploy done ($(short_id "$after")) ==="
-else
-    echo "!!! $(date -Is) getMe failed but container is running; keeping $(short_id "$after")"
+if ! pull_out=$(docker pull "$IMAGE" 2>&1); then
+    echo "!!! $(date -Is) docker pull failed: ${pull_out:0:300}"
+    notify_once "pull" "⚠️ Обновление отложено: не удалось скачать образ. Контейнер не изменялся. Повторная попытка — автоматически через минуту; предупреждение не чаще раза в сутки." || true
+    exit 1
 fi
-notify_owners "$(deployment_notice "$BEFORE_VERSION" "$AFTER_VERSION" "$after" "$CHANGES" "$GETME_OK" "$ALPINE_INFO")" || true
-exit 0
+candidate_ref=$(image_ref "$IMAGE") || { echo "!!! immutable image reference unavailable"; exit 1; }
+after=$(docker image inspect --format '{{.Id}}' "$candidate_ref" 2>/dev/null || true)
+[ -n "$after" ] || exit 1
+
+previous=""
+if [ -f "$RELEASE_STATE/current" ]; then
+    selected=$(cat "$RELEASE_STATE/current")
+    [[ $selected =~ ^bundle[.][A-Za-z0-9]+$ ]] || exit 1
+    previous="$RELEASE_STATE/$selected"
+    [ -f "$previous/docker-compose.yml" ] && [ -f "$previous/pinned.yml" ] || exit 1
+    if [ -f "$RELEASE_STATE/pending" ] && [ "$(cat "$RELEASE_STATE/pending")" = "$selected" ]; then
+        rm -f "$RELEASE_STATE/pending"
+    fi
+fi
+if running_image_matches "$after" && { [ -z "$previous" ] || [ "$(cat "$previous/image")" = "$candidate_ref" ]; }; then
+    exit 0
+fi
+if is_quarantined "$after" || is_quarantined "$candidate_ref"; then
+    exit 0
+fi
+
+revision=$(image_revision "$candidate_ref")
+if ! check_revision "$revision"; then
+    echo "!!! candidate revision is missing from origin/main; deploy skipped"
+    exit 1
+fi
+if [ -n "$previous" ]; then
+    project=$(cat "$previous/project")
+    volume=$(cat "$previous/volume")
+    before_ref=$(cat "$previous/image")
+    before=$(docker image inspect --format '{{.Id}}' "$before_ref" 2>/dev/null || true)
+    [ -n "$before" ] || { echo "!!! previous image unavailable; deploy skipped"; exit 1; }
+elif [ -n "$before" ]; then
+    project=$(container_field '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}')
+    volume=$(container_field '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "volume")}}{{.Name}}{{end}}{{end}}')
+    if [ -z "$project" ] || [ -z "$volume" ] || [ -z "$before_ref" ] ||
+       ! check_revision "$before_revision" ||
+       ! docker image inspect "$before_ref" >/dev/null 2>&1; then
+        echo "!!! running release cannot be saved for rollback; deploy skipped"
+        exit 1
+    fi
+elif [ "$rejected_first" -eq 0 ]; then
+    project=${COMPOSE_PROJECT_NAME:-$(parse_env COMPOSE_PROJECT_NAME || true)}
+    if [ -z "$project" ]; then
+        project=$(printf '%s' "${REPO_DIR##*/}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9_-]//g;s/^[^a-z0-9]+//')
+    fi
+    volume="${project}_bot-data"
+fi
+[[ $project =~ ^[a-z0-9][a-z0-9_-]*$ && ( -z "$volume" || $volume =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ) ]] || exit 1
+
+mkdir -p "$RELEASE_STATE"
+if [ -z "$previous" ] && [ -n "$before" ]; then
+    previous=$(mktemp -d "$RELEASE_STATE/bundle.XXXXXX")
+    snapshot_bundle "$previous" "$before_revision" "$before_ref" "$volume"
+    save_confirmed_bundle "$previous"
+fi
+candidate=$(mktemp -d "$RELEASE_STATE/bundle.XXXXXX")
+snapshot_bundle "$candidate" "$revision" "$candidate_ref" "$volume"
+for file in deploy-release.sh deploy-notify.sh; do
+    git show "$revision:scripts/$file" > "$candidate/$file" || exit 1
+done
+if [ -z "$previous" ]; then
+    first_install=1
+    # The first launch creates its volume. Rollback uses the external pin.
+    {
+        printf 'services:\n  bot:\n    image: "%s"\n' "$candidate_ref"
+        printf '    labels:\n      io.menand.antispam.first-release: "%s"\n' "${candidate##*/}"
+        printf 'volumes:\n  bot-data:\n    name: "%s"\n' "$volume"
+    } > "$candidate/launch.yml"
+    write_bundle_pointer "$candidate" pending
+fi
+# shellcheck source=/dev/null
+source "$candidate/deploy-release.sh"

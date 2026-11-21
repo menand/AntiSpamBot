@@ -30,7 +30,7 @@ type OwnerDMLink struct {
 // же dm_message_id столкнулась бы с новой и увела ответ в чужой чат.
 func (d *DB) PutOwnerDMLink(ctx context.Context, botID, ownerID int64, dmMsgID int, chatID int64,
 	threadID, sourceMsgID int, isForward bool, at time.Time) error {
-	if botID == 0 || ownerID == 0 || dmMsgID <= 0 || chatID == 0 || sourceMsgID <= 0 {
+	if botID <= 0 || ownerID == 0 || dmMsgID <= 0 || chatID == 0 || sourceMsgID <= 0 {
 		return nil
 	}
 	forward := 0
@@ -52,6 +52,9 @@ func (d *DB) PutOwnerDMLink(ctx context.Context, botID, ownerID int64, dmMsgID i
 // другого бота в той же БД): вызывающий уходит в обычную обработку личных
 // сообщений.
 func (d *DB) OwnerDMLink(ctx context.Context, botID, ownerID int64, dmMsgID int) (OwnerDMLink, bool, error) {
+	if botID <= 0 {
+		return OwnerDMLink{}, false, nil
+	}
 	var (
 		link    OwnerDMLink
 		forward int
@@ -84,4 +87,79 @@ func (d *DB) PruneOwnerDMLinks(ctx context.Context, before time.Time) (int64, er
 		return 0, fmt.Errorf("prune owner dm links: rows affected: %w", err)
 	}
 	return n, nil
+}
+
+// migrateOwnerDMLinkKey handles both legacy layouts, including databases
+// where ALTER added bot_id but left the original two-column primary key.
+func migrateOwnerDMLinkKey(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	key, hasBotID, err := ownerDMLinkKey(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if len(key) == 3 && key[0] == "bot_id" && key[1] == "owner_id" && key[2] == "dm_message_id" {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		ALTER TABLE owner_dm_links RENAME TO owner_dm_links_legacy;
+		CREATE TABLE owner_dm_links (
+			bot_id        INTEGER NOT NULL,
+			owner_id      INTEGER NOT NULL,
+			dm_message_id INTEGER NOT NULL,
+			chat_id       INTEGER NOT NULL,
+			thread_id     INTEGER NOT NULL DEFAULT 0,
+			source_msg_id INTEGER NOT NULL,
+			is_forward    INTEGER NOT NULL DEFAULT 0,
+			at            INTEGER NOT NULL,
+			PRIMARY KEY (bot_id, owner_id, dm_message_id)
+		);
+	`); err != nil {
+		return fmt.Errorf("rebuild owner dm links: %w", err)
+	}
+	botValue := "0"
+	if hasBotID {
+		botValue = "COALESCE(bot_id, 0)"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO owner_dm_links (bot_id, owner_id, dm_message_id, chat_id, thread_id, source_msg_id, is_forward, at)
+		SELECT `+botValue+`, owner_id, dm_message_id, chat_id, thread_id, source_msg_id, is_forward, at
+		FROM owner_dm_links_legacy
+	`); err != nil {
+		return fmt.Errorf("copy owner dm links: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		DROP TABLE owner_dm_links_legacy;
+		CREATE INDEX idx_owner_dm_links_at ON owner_dm_links(at);
+	`); err != nil {
+		return fmt.Errorf("restore owner dm link index: %w", err)
+	}
+	return tx.Commit()
+}
+
+func ownerDMLinkKey(ctx context.Context, tx *sql.Tx) ([]string, bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name, pk FROM pragma_table_info('owner_dm_links') ORDER BY pk`)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close() //nolint:errcheck
+	var key []string
+	hasBotID := false
+	for rows.Next() {
+		var name string
+		var position int
+		if err := rows.Scan(&name, &position); err != nil {
+			return nil, false, err
+		}
+		hasBotID = hasBotID || name == "bot_id"
+		if position > 0 {
+			key = append(key, name)
+		}
+	}
+	return key, hasBotID, rows.Err()
 }

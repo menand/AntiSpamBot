@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -89,27 +90,26 @@ func (b *Bot) maybeSendDMReports(ctx context.Context, now time.Time, from, until
 const reportRuneBudget = 3500
 
 func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.Time, today string) {
-	chats, err := b.userChats(ctx, userID)
+	chats, incomplete, err := b.dailyReportChats(ctx, userID)
 	if err != nil {
 		b.log.Warn("dm report: user chats", "err", err, "user", userID)
 		return
 	}
-	if len(chats) == 0 {
-		// Пусто = либо юзера правда разжаловали везде, либо getChatMember
-		// временно падал (userChats не различает). День НЕ закрываем: ретрай
-		// на следующем тике дёшев (кэш админства), а закрытие по сбою API
-		// молча съело бы отчёт.
-		b.log.Debug("dm report: no chats for subscriber", "user", userID)
+	messageID, lastHash, err := b.db.DailyReportProgress(ctx, userID, today)
+	if err != nil {
+		b.log.Warn("dm report: progress", "err", err, "user", userID)
 		return
 	}
 
 	var sb strings.Builder
 	sb.WriteString("📬 <b>Итог дня по чатам</b> (вчера)\n")
 	budget := reportRuneBudget
+	lines := 0
 	for i, c := range chats {
 		s, err := b.db.QueryStats(ctx, c.ChatID, from, until)
 		if err != nil {
 			b.log.Warn("dm report: query stats", "err", err, "chat", c.ChatID)
+			incomplete = true
 			continue
 		}
 		line := reportLine(c, s)
@@ -120,37 +120,76 @@ func (b *Bot) sendDMReport(ctx context.Context, userID int64, from, until time.T
 		} else {
 			budget -= n
 		}
+		lines++
 		sb.WriteString("\n" + line)
 	}
+	if lines > 0 {
+		text := sb.String()
+		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+		if lastHash != hash {
+			if !b.deliverDMReport(ctx, userID, today, messageID, text, hash) {
+				return
+			}
+		}
+	}
+	if !incomplete {
+		if err := b.db.MarkDailyReportSent(ctx, userID, today); err != nil {
+			b.log.Warn("dm report: mark complete", "err", err, "user", userID)
+		}
+	}
+}
 
-	if _, err := b.api.SendMessage(ctx, tu.Message(tu.ID(userID), sb.String()).
-		WithParseMode(telego.ModeHTML).
-		WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})); err != nil {
-		// 403 = ЛС закрыта навсегда (юзер заблокировал бота / аккаунт удалён) —
-		// отписываем, иначе ретрай долбился бы в закрытую ЛС каждый тик до
-		// скончания веков.
-		var apiErr *telegoapi.Error
+func (b *Bot) deliverDMReport(ctx context.Context, userID int64, day string, messageID int, text, hash string) bool {
+	preview := &telego.LinkPreviewOptions{IsDisabled: true}
+	var err error
+	var apiErr *telegoapi.Error
+	if messageID > 0 {
+		_, err = b.api.EditMessageText(ctx, &telego.EditMessageTextParams{
+			ChatID: tu.ID(userID), MessageID: messageID, Text: text,
+			ParseMode: telego.ModeHTML, LinkPreviewOptions: preview,
+		})
+		if isNotModified(err) {
+			err = nil
+		} else if errors.As(err, &apiErr) && apiErr.ErrorCode == 400 &&
+			strings.TrimPrefix(apiErr.Description, "Bad Request: ") == "message to edit not found" {
+			messageID, err = 0, nil
+		}
+	}
+	if messageID <= 0 && err == nil {
+		var sent *telego.Message
+		sent, err = b.api.SendMessage(ctx, tu.Message(tu.ID(userID), text).
+			WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(preview))
+		if err == nil {
+			if sent == nil || sent.MessageID <= 0 {
+				err = errors.New("telegram did not return a report message ID")
+			} else {
+				messageID = sent.MessageID
+			}
+		}
+	}
+	if err != nil {
 		if errors.As(err, &apiErr) && apiErr.ErrorCode == 403 {
 			b.log.Info("dm report: user blocked bot, unsubscribing", "user", userID)
 			if err := b.db.SetDailyReport(ctx, userID, false); err != nil {
 				b.log.Warn("dm report: unsubscribe", "err", err, "user", userID)
 			}
-			return
+		} else {
+			b.log.Warn("dm report: deliver", "err", err, "user", userID)
 		}
-		// Прочие ошибки — не помечаем: ретрай на следующем тике до конца дня
-		// (семантика чат-дайджеста).
-		b.log.Warn("dm report: send", "err", err, "user", userID)
-		return
+		return false
 	}
-	if err := b.db.MarkDailyReportSent(ctx, userID, today); err != nil {
-		b.log.Warn("dm report: mark sent", "err", err, "user", userID)
+	saveCtx, cancel := b.liveCtx()
+	defer cancel()
+	if err := b.db.SaveDailyReportProgress(saveCtx, userID, day, messageID, hash); err != nil {
+		b.log.Warn("dm report: save progress", "err", err, "user", userID)
+		return false
 	}
-	b.log.Info("dm report sent", "user", userID, "chats", len(chats))
+	return true
 }
 
 // reportLine — однострочная сводка чата для ЛС-отчёта: только счётчики, без
 // имён и топов («без излишних деталей»). Бан = обычные + спам-вердикты.
-// Хвост — «в процессе N» (та же формула, что на экране статистики: pendingCount)
+// Хвост — «в процессе N» (те же входы окна, что на экране статистики)
 // и «сообщений: M» всегда. Пустота — как в digestHasContent: день с
 // сообщениями, но без событий воронки не называется «без событий».
 func reportLine(c storage.ChatInfo, s storage.Stats) string {
@@ -179,8 +218,11 @@ func reportLine(c storage.ChatInfo, s storage.Stats) string {
 	if s.Aborted > 0 {
 		line += fmt.Sprintf(", не проверено %d", s.Aborted)
 	}
-	if pending := pendingCount(s); pending > 0 {
-		line += fmt.Sprintf(", в процессе %d", pending)
+	if s.Pending > 0 || s.LegacyPendingEstimate {
+		line += fmt.Sprintf(", в процессе %d", s.Pending)
+		if s.LegacyPendingEstimate {
+			line += " (оценка по истории)"
+		}
 	}
 	line += fmt.Sprintf(", сообщений: %d", msgs)
 	return line
@@ -254,6 +296,6 @@ func (b *Bot) sendDailyDigest(ctx context.Context, chatID int64, from, until tim
 // капчу в 00:01).
 func digestHasContent(s storage.Stats, topWriters, topFailers, newMembers, banned []storage.UserCount) bool {
 	return s.Joined+s.Passed+s.Kicked+s.Banned+s.ModKicked+s.ModBanned+s.SpamBanned+s.Left+s.Aborted+
-		s.MsgNewcomer+s.MsgOldtimer+
+		s.MsgNewcomer+s.MsgOldtimer+s.Pending+
 		len(topWriters)+len(topFailers)+len(newMembers)+len(banned) > 0
 }

@@ -8,12 +8,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
-	"unicode"
 )
 
 const (
@@ -169,39 +169,30 @@ func (c *Client) Classify(ctx context.Context, system, facts string) (bool, erro
 	return ParseVerdict(cr.Choices[0].Message.Content)
 }
 
-// ParseVerdict превращает ответ модели в бинарный вердикт (true = спам).
-// Промпт требует ровно одно слово (SPAM/OK), но парсер чуть снисходительнее:
-// стерпит кавычки, точку, русское написание и обрамляющий текст. Всё
-// неоднозначное — ошибка, а не догадка: fail-open честнее ложного вердикта.
-// Экспортирован, потому что провайдеро-независим: им же пользуются
-// фолбек-клиенты internal/gemini и internal/gigachat (у тех нет
-// гарантированного формата ответа).
+// ParseVerdict accepts a complete SPAM/OK answer or an explicit equivalent.
+// Free-form explanations, questions and mixed answers trigger provider fallback.
 func ParseVerdict(content string) (bool, error) {
-	// Сравнение по целым словам, не подстрокам: «SPAM_PROBABILITY» (легаси
-	// JSON-ответ) не должен читаться как вердикт SPAM.
-	isWord := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' }
-	var spam, ok bool
-	prev := ""
-	for _, tok := range strings.FieldsFunc(strings.ToUpper(content), func(r rune) bool { return !isWord(r) }) {
-		switch tok {
-		case "SPAM", "СПАМ":
-			// Отрицание перед словом («не спам», «NOT SPAM») — это вердикт OK,
-			// а не SPAM: инверсия здесь означала бы ложный глобальный бан.
-			if prev == "НЕ" || prev == "NOT" || prev == "NO" {
-				ok = true
-			} else {
-				spam = true
-			}
-		case "OK", "ОК":
-			ok = true
+	answer := strings.ToUpper(strings.Join(strings.Fields(content), " "))
+	answer = strings.TrimSpace(strings.TrimRight(answer, ".!"))
+	if label, value, ok := strings.Cut(answer, ":"); ok {
+		switch strings.TrimSpace(label) {
+		case "VERDICT", "ВЕРДИКТ", "ОТВЕТ":
+			answer = strings.TrimSpace(value)
 		}
-		prev = tok
 	}
-	switch {
-	case spam && !ok:
+	for _, pair := range [][2]string{{`"`, `"`}, {"'", "'"}, {"«", "»"}, {"“", "”"}, {"‘", "’"}, {"`", "`"}} {
+		if len(answer) >= len(pair[0])+len(pair[1]) && strings.HasPrefix(answer, pair[0]) && strings.HasSuffix(answer, pair[1]) {
+			answer = strings.TrimSpace(answer[len(pair[0]) : len(answer)-len(pair[1])])
+			break
+		}
+	}
+	answer = strings.TrimSpace(strings.TrimRight(answer, ".!"))
+	switch answer {
+	case "SPAM", "СПАМ":
 		return true, nil
-	case ok && !spam:
+	case "OK", "ОК", "NOT SPAM", "NO SPAM", "НЕ СПАМ", "ЭТО НЕ СПАМ", "OK, ЭТО НЕ SPAM":
 		return false, nil
+	default:
+		return false, errors.New("no unambiguous SPAM/OK verdict")
 	}
-	return false, fmt.Errorf("no unambiguous SPAM/OK verdict in %q", content)
 }

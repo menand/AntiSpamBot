@@ -194,20 +194,39 @@ func newFlowBot(t *testing.T) (*Bot, *storage.DB, *fakeCaller) {
 
 		// Пустые ключи = провайдеры выключены (как без env в проде);
 		// тесты ИИ-цепочки подменяют поля фейками llmClassifier.
-		groqc:         groq.New("", ""),
-		gemic:         gemini.New("", ""),
-		gigac:         gigachat.New("", "", "", groq.SystemPrompt),
-		chatCache:     map[int64]storage.ChatInfo{},
-		userCache:     map[int64]storage.UserInfo{},
-		greetInput:    map[int64]greetInputState{},
-		adminCache:    map[chatUser]adminCacheEntry{},
-		approvalCache: map[int64]bool{},
-		spamGateCache: map[int64]bool{},
-		editChecked:   map[chatUser]time.Time{},
-		spamInflight:  map[chatUser]struct{}{},
-		leaveInflight: map[int64]bool{},
+		groqc:          groq.New("", ""),
+		gemic:          gemini.New("", ""),
+		gigac:          gigachat.New("", "", "", groq.SystemPrompt),
+		chatCache:      map[int64]storage.ChatInfo{},
+		userCache:      map[int64]storage.UserInfo{},
+		greetInput:     map[int64]greetInputState{},
+		adminCache:     map[chatUser]adminCacheEntry{},
+		approvalCache:  map[int64]bool{},
+		spamGateCache:  map[int64]spamGate{},
+		profileChecked: map[int64]time.Time{},
+		editChecked:    map[chatUser]time.Time{},
+		spamInflight:   map[chatUser]struct{}{},
+		leaveInflight:  map[int64]bool{},
 	}
 	return b, db, fc
+}
+
+func completeTestCaptcha(ctx context.Context, b *Bot, p *captcha.Pending) error {
+	unlock, err := b.rights.lock(ctx, p.ChatID, p.UserID, false)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	taken, err := b.takeCaptchaAnswer(ctx, p.ChatID, p.UserID,
+		&telego.Message{MessageID: p.MessageID, EphemeralMessageID: p.EphemeralID},
+		func(*captcha.Pending) bool { return true })
+	if err != nil {
+		return err
+	}
+	if taken == nil {
+		return fmt.Errorf("captcha was not accepted")
+	}
+	return b.onSuccess(ctx, taken, "")
 }
 
 // serviceableChat регистрирует чат в реестре (rememberChat пишет строку с
@@ -493,7 +512,7 @@ func TestWaitReplyTimeoutLadder(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond), 0, captchaStages, 0)
+			p := b.replies.Put(testChatID, testUserID, time.Now().Add(-time.Millisecond), 0, captchaStages, 500)
 
 			b.replyWaitLoop(testChatID, testUserID, p)
 

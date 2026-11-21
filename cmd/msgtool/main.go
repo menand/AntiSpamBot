@@ -20,6 +20,7 @@
 //	-limit N    — максимум строк (0 = без лимита)
 //	-db PATH    — путь к SQLite (дефолт bot.db)
 //	-archive P  — каталог архива (дефолт <dir(db)>/archive)
+//	-verify-archive — проверить все дневные файлы без вывода записей
 package main
 
 import (
@@ -72,8 +73,19 @@ func main() {
 		sinceS   = flag.String("since", "", "дата начала YYYY-MM-DD (вкл)")
 		untilS   = flag.String("until", "", "дата конца YYYY-MM-DD (вкл)")
 		limit    = flag.Int("limit", 0, "максимум строк (0 = без лимита)")
+		verify   = flag.Bool("verify-archive", false, "проверить все файлы архива без вывода записей")
 	)
 	flag.Parse()
+	archDir := *archiveP
+	if archDir == "" {
+		archDir = filepath.Join(filepath.Dir(*dbPath), "archive")
+	}
+	if *verify {
+		if err := archive.VerifyDirectory(archDir); err != nil {
+			fatal("archive verification", err)
+		}
+		return
+	}
 
 	since, err := parseDay(*sinceS)
 	if err != nil {
@@ -89,11 +101,6 @@ func main() {
 		until = until.AddDate(0, 0, 1)
 	}
 
-	archDir := *archiveP
-	if archDir == "" {
-		archDir = filepath.Join(filepath.Dir(*dbPath), "archive")
-	}
-
 	ctx := context.Background()
 	out := bufio.NewWriter(os.Stdout)
 	// Обычный выход (return из main) обязан сбросить буфер: без defer весь
@@ -104,126 +111,30 @@ func main() {
 	flushOut = func() { _ = out.Flush() }
 
 	enc := json.NewEncoder(out)
-	remaining := *limit // 0 = без лимита
-	emit := func(e wireEntry) bool {
+	emit := func(e wireEntry) {
 		if err := enc.Encode(e); err != nil {
 			fatal("encode", err)
 		}
-		if *limit > 0 {
-			remaining--
-			return remaining > 0
-		}
-		return true
 	}
 
-	// 1) Архив: старые дни (стриминг по нужным файлам).
-	days, err := archive.ListDays(archDir)
+	filter := storage.MessageFilter{ChatID: *chatID, UserID: *userID, Word: *word, From: since, Until: until, Limit: *limit}
+	history, err := readHotHistory(ctx, *dbPath, filter)
 	if err != nil {
-		// Не глушим: permissions-ошибка не должна тихо редуцировать вывод
-		// до hot-окна — оператор увидит неполную выборку и решит сам.
-		fmt.Fprintf(os.Stderr, "warn: list archive: %v\n", err)
+		fmt.Fprintf(os.Stderr, "warn: hot window skipped: %v\n", err)
 	}
-	for _, day := range days {
-		if !dayInRange(day, since, until) {
-			continue
-		}
-		entries, err := archive.ReadDay(archDir, day)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warn: read archive %s: %v\n", day, err)
-			continue
-		}
-		stop := false
-		for _, e := range entries {
-			if !entryMatches(e.Chat, e.User, e.Text, e.ReplyText, *chatID, *userID, *word) {
-				continue
-			}
-			if !emit(fromArchive(e)) {
-				stop = true
-				break
-			}
-		}
-		if stop {
-			_ = out.Flush()
-			return
-		}
-	}
-
-	// 2) Hot-окно: последние дни в SQLite (read-only, не мешает боту).
-	if _, err := os.Stat(*dbPath); err != nil { //nolint:gosec // operator-selected local database path
-		// Явный -db указал на несуществующий файл — сообщаем, а не выдаём
-		// пустой вывод с exit 0.
-		fmt.Fprintf(os.Stderr, "warn: db not found, hot window skipped: %s\n", *dbPath)
-		return
-	}
-	db, err := storage.OpenReadOnly(ctx, *dbPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warn: open db: %v\n", err)
-		return
-	}
-	defer db.Close() //nolint:errcheck
-	// Прокидываем остаток лимита в SQL: иначе QueryMessages загрузил бы всё
-	// окно в память, а вывел бы первые N.
-	hotLimit := 0
-	if *limit > 0 {
-		hotLimit = remaining
-	}
-	msgs, err := db.QueryMessages(ctx, storage.MessageFilter{
-		ChatID: *chatID,
-		UserID: *userID,
-		Word:   *word,
-		From:   since,
-		Until:  until,
-		Limit:  hotLimit,
-	})
-	if err != nil {
-		fatal("query hot messages", err)
-	}
-	for _, m := range msgs {
-		if !emit(fromHot(m)) {
-			break
-		}
-	}
+	defer history.close()
+	history.visit(archDir, filter, func(err error) {
+		fmt.Fprintf(os.Stderr, "warn: %v\n", err)
+	}, emit)
 }
 
-func fromArchive(e archive.Entry) wireEntry {
+func fromEntry(e archive.Entry, source string) wireEntry {
 	return wireEntry{
-		Source:      "archive",
-		Chat:        e.Chat,
-		User:        e.User,
-		TGMsgID:     e.TGMsgID,
-		Time:        time.Unix(e.TS, 0).UTC().Format(time.RFC3339),
-		Kind:        e.Kind,
-		Text:        e.Text,
-		HasMedia:    e.HasMedia,
-		ReplyMsgID:  e.ReplyMsgID,
-		ReplyUID:    e.ReplyUID,
-		ReplyAuthor: e.ReplyAuthor,
-		ReplyText:   e.ReplyText,
+		Source: source, Chat: e.Chat, User: e.User, TGMsgID: e.TGMsgID,
+		Time: time.Unix(e.TS, 0).UTC().Format(time.RFC3339), Kind: e.Kind, Text: e.Text,
+		HasMedia: e.HasMedia, ReplyMsgID: e.ReplyMsgID, ReplyUID: e.ReplyUID,
+		ReplyAuthor: e.ReplyAuthor, ReplyText: e.ReplyText,
 	}
-}
-
-func fromHot(m storage.StoredMessage) wireEntry {
-	return wireEntry{
-		Source:      "hot",
-		Chat:        m.ChatID,
-		User:        m.UserID,
-		TGMsgID:     m.TGMsgID,
-		Time:        m.TS.UTC().Format(time.RFC3339),
-		Kind:        m.Kind,
-		Text:        m.Text,
-		HasMedia:    m.HasMedia,
-		ReplyMsgID:  m.ReplyMsgID,
-		ReplyUID:    m.ReplyUID,
-		ReplyAuthor: derefStr(m.ReplyAuthor),
-		ReplyText:   derefStr(m.ReplyText),
-	}
-}
-
-func derefStr(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
 }
 
 // entryMatches — общая фильтрация для archive/hot записей. replyText может быть
@@ -243,13 +154,13 @@ func entryMatches(chat, user int64, text, replyText string, fChat, fUser int64, 
 	return true
 }
 
-// parseDay толкует YYYY-MM-DD в полночь UTC; пустая строка = нулевое время.
+// parseDay толкует YYYY-MM-DD в полночь МСК; пустая строка = нулевое время.
 func parseDay(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return time.Time{}, nil
 	}
-	t, err := time.Parse("2006-01-02", s)
+	t, err := time.ParseInLocation("2006-01-02", s, storage.StatsLocation)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("ожидалась дата YYYY-MM-DD, получено %q", s)
 	}
@@ -258,14 +169,13 @@ func parseDay(s string) (time.Time, error) {
 
 // dayInRange — попадает ли день ('YYYY-MM-DD' как имя файла) в [since, until).
 func dayInRange(day string, since, until time.Time) bool {
-	d, err := time.Parse("2006-01-02", day)
-	if err != nil {
+	if _, err := time.Parse("2006-01-02", day); err != nil {
 		return false
 	}
-	if !since.IsZero() && d.Before(since) {
+	if !since.IsZero() && day < storage.DayOf(since) {
 		return false
 	}
-	if !until.IsZero() && !d.Before(until) {
+	if !until.IsZero() && day >= storage.DayOf(until) {
 		return false
 	}
 	return true
