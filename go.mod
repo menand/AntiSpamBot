@@ -4,7 +4,7 @@ go 1.27.4
 
 require (
 	github.com/joho/godotenv v1.5.1
-	github.com/klauspost/compress v1.20.4
+	github.com/klauspost/compress v1.20.5
 	github.com/mymmrac/telego v1.13.0
 	github.com/rivo/uniseg v0.4.7
 	golang.org/x/image v0.48.0
