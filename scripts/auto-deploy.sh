@@ -132,6 +132,17 @@ image_ref() {
     return 1
 }
 
+ensure_rollback_image() {
+    local ref="$1" id
+    [[ $ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ ]] || return 1
+    if ! id=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null) || [ -z "$id" ]; then
+        docker pull "$ref" >/dev/null || return 1
+        id=$(docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null) || return 1
+    fi
+    [ -n "$id" ] || return 1
+    printf '%s\n' "$id"
+}
+
 check_revision() {
     [[ $1 =~ ^[0-9a-f]{40}$ ]] && git merge-base --is-ancestor "$1" origin/main
 }
@@ -283,7 +294,7 @@ if [ -f "$RELEASE_STATE/rollback" ]; then
     [[ $candidate_ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ &&
        $before_ref =~ ^ghcr[.]io/menand/antispambot@sha256:[0-9a-f]{64}$ &&
        $project =~ ^[a-z0-9][a-z0-9_-]*$ && $volume =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || exit 1
-    before=$(docker image inspect --format '{{.Id}}' "$before_ref")
+    before=$(ensure_rollback_image "$before_ref") || { echo "!!! rollback image unavailable; retry pending"; exit 1; }
     after=$(docker image inspect --format '{{.Id}}' "$candidate_ref" 2>/dev/null || true)
     resume_rollback=1
     # shellcheck source=/dev/null
@@ -373,14 +384,14 @@ if [ -n "$previous" ]; then
     project=$(cat "$previous/project")
     volume=$(cat "$previous/volume")
     before_ref=$(cat "$previous/image")
-    before=$(docker image inspect --format '{{.Id}}' "$before_ref" 2>/dev/null || true)
-    [ -n "$before" ] || { echo "!!! previous image unavailable; deploy skipped"; exit 1; }
+    before=$(ensure_rollback_image "$before_ref") || { echo "!!! previous image unavailable; deploy skipped"; exit 1; }
 elif [ -n "$before" ]; then
     project=$(container_field '{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}')
     volume=$(container_field '{{range .Mounts}}{{if and (eq .Destination "/data") (eq .Type "volume")}}{{.Name}}{{end}}{{end}}')
     if [ -z "$project" ] || [ -z "$volume" ] || [ -z "$before_ref" ] ||
        ! check_revision "$before_revision" ||
-       ! docker image inspect "$before_ref" >/dev/null 2>&1; then
+       ! before=$(ensure_rollback_image "$before_ref") ||
+       ! running_image_matches "$before"; then
         echo "!!! running release cannot be saved for rollback; deploy skipped"
         exit 1
     fi

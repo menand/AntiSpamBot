@@ -13,6 +13,7 @@ import (
 func TestAutoDeploy(t *testing.T) {
 	for _, scenario := range []string{
 		"success", "tag-conflict", "unchanged", "containerd-unchanged", "containerd-success",
+		"containerd-rollback-image-recovered", "containerd-rollback-image-unavailable",
 		"up-noop", "containerd-up-noop", "up-failed", "unhealthy", "previous-heartbeat", "early-restart",
 		"rollback-unhealthy", "rollback-wrong-image", "rollback-up-failed",
 		"fetch-failed", "pull-failed", "getme-failed", "notification-failed", "first-failed", "first-success",
@@ -123,9 +124,18 @@ case "$1 $2" in
     esac;;
   'image inspect')
     if [ "$3" = --platform ]; then
-      if [ "$7" = sha256:index-old ]; then echo "sha256:$old"; else echo "sha256:$new"; fi
+      case "$7" in sha256:index-old|"sha256:$old") echo "sha256:$old";; *) echo "sha256:$new";; esac
       exit 0
     fi
+    case "$SCENARIO" in containerd-rollback-image-*)
+      ref=${5:-$3}
+      if [ "$ref" = "$repo@sha256:$old" ]; then
+        [ -e "$FAKE_DIR/rollback-image" ] || exit 1
+        [ "$4" != '{{.Id}}' ] || echo "sha256:$old"
+        exit 0
+      fi
+      if [ "$ref" = sha256:config-old ]; then exit 0; fi;;
+    esac
     [ "$3" = --format ] || exit 0
     case "$5" in
       *config-*) exit 1;;
@@ -150,6 +160,9 @@ case "$1 $2" in
   "pull $repo:latest")
     [ "${OFFLINE:-}" != yes ] || exit 1
     case "$SCENARIO" in notification-failed|pull-failed) exit 1;; esac;;
+  "pull $repo@sha256:$old")
+    [ "$SCENARIO" = containerd-rollback-image-recovered ] || exit 1
+    touch "$FAKE_DIR/rollback-image";;
   'compose --project-name')
     [ "$3" = antispambot ] || exit 2
     [ "$5" = "$FAKE_DIR" ] && [ "$7" = "$FAKE_DIR/.env" ] || exit 2
@@ -246,6 +259,19 @@ esac
 				}
 				if !strings.Contains(calls, "image inspect --platform linux/amd64 --format {{.Id}} sha256:index-new") {
 					t.Fatal("manifest comparison must use the pulled immutable image and the container's platform")
+				}
+			case "containerd-rollback-image-recovered", "containerd-rollback-image-unavailable":
+				pull := "pull ghcr.io/menand/antispambot@sha256:" + strings.Repeat("a", 64) + "\n"
+				pullAt, composeAt := strings.Index(calls, pull), strings.Index(calls, "compose --project-name")
+				if pullAt < 0 {
+					t.Fatalf("must recover the rollback image by digest: %v\n%s\n%s", runErr, out, calls)
+				}
+				if scenario == "containerd-rollback-image-recovered" {
+					if runErr != nil || composeAt < pullAt || !strings.Contains(string(out), "deploy done") {
+						t.Fatalf("must deploy after restoring the rollback image: %v\n%s\n%s", runErr, out, calls)
+					}
+				} else if runErr == nil || composeAt >= 0 {
+					t.Fatalf("must keep the running container without a rollback image: %v\n%s\n%s", runErr, out, calls)
 				}
 			case "fetch-failed", "pull-failed":
 				if runErr == nil || strings.Contains(calls, "compose --project-name") {
