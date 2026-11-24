@@ -554,6 +554,56 @@ func TestApprovalCallbackDecisions(t *testing.T) {
 	})
 }
 
+func TestRejectApprovalPreservesPrompt(t *testing.T) {
+	const chatID, ownerID, promptID = -100555, 999, 123
+	for _, tc := range []struct {
+		name, wantText string
+		pendingCaptcha bool
+	}{
+		{"success", "🚪 Бот вышел из чата", false},
+		{"failure", "⚠️ Чат отклонён, но боту не удалось выйти", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, db, fc := newFlowBot(t)
+			b.cfg.OwnerIDs = map[int64]struct{}{ownerID: {}}
+			if err := db.SetChatApproval(b.runCtx, chatID, storage.ChatPending); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := "answerCallbackQuery,leaveChat,editMessageReplyMarkup,sendMessage"
+			if tc.pendingCaptcha {
+				b.store.BeginKickoff(chatID, testUserID)
+				wantCalls = "answerCallbackQuery,editMessageReplyMarkup,sendMessage"
+			}
+			if err := b.handleApprovalCallback(nil, telego.CallbackQuery{
+				ID: "q", From: telego.User{ID: ownerID}, Data: "appr:n:" + strconv.Itoa(chatID),
+				Message: &telego.Message{MessageID: promptID, Chat: telego.Chat{ID: ownerID, Type: "private"}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			if fc.callCount("editMessageText") != 0 {
+				t.Fatal("reject overwrote the original prompt")
+			}
+			waitFor(t, func() bool { return fc.callCount("sendMessage") != 0 })
+			calls := fc.callList()
+			if strings.Join(calls, ",") != wantCalls {
+				t.Fatalf("unexpected Telegram calls: %v", calls)
+			}
+			var sent struct {
+				ChatID          int64                  `json:"chat_id"`
+				Text            string                 `json:"text"`
+				ReplyParameters telego.ReplyParameters `json:"reply_parameters"`
+			}
+			if err := json.Unmarshal([]byte(fc.callBodies("sendMessage")[0]), &sent); err != nil {
+				t.Fatal(err)
+			}
+			if sent.ChatID != ownerID || sent.Text != tc.wantText || sent.ReplyParameters.MessageID != promptID {
+				t.Fatalf("unexpected reply: %+v", sent)
+			}
+		})
+	}
+}
+
 // TestGoldenVoteInstantResolve — админский клик sv: исполняет вердикт без
 // кворума (живая проверка админства мимо кэша); автор за себя не голосует
 // даже будучи админом.
