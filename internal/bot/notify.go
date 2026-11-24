@@ -104,7 +104,7 @@ func (b *Bot) notifyReplyAnswered(m *telego.Message, p *replyPending) {
 			// нужен, иначе владельцу нечего «процитировать» в чат.
 			b.linkOwnerDMSource(ownerID, sent.MessageID, m.Chat.ID, threadID, m.MessageID, true)
 		}
-		if sent := b.sendNotificationOne(b.runCtx, ownerID, card, "notify reply-answered"); sent != nil {
+		if sent := b.sendNotificationOne(b.runCtx, ownerID, card, "notify reply-answered", nil); sent != nil {
 			// Карточка тоже пригодна для ответа (без частичной цитаты).
 			b.linkOwnerDMSource(ownerID, sent.MessageID, m.Chat.ID, threadID, m.MessageID, false)
 		}
@@ -194,10 +194,14 @@ func (b *Bot) sendNotificationHTML(targets []int64, text, logKey string) {
 // sendNotificationOne отправляет одно HTML-сообщение получателю и возвращает
 // его (nil при ошибке). Идентификатор нужен вызывающим, которые связывают
 // сообщение в ЛС с чатом (ответ владельца реплаем публикуется в чате).
-func (b *Bot) sendNotificationOne(ctx context.Context, userID int64, text, logKey string) *telego.Message {
-	sent, err := b.api.SendMessage(ctx, tu.Message(tu.ID(userID), text).
+func (b *Bot) sendNotificationOne(ctx context.Context, userID int64, text, logKey string, kb *telego.InlineKeyboardMarkup) *telego.Message {
+	params := tu.Message(tu.ID(userID), text).
 		WithParseMode(telego.ModeHTML).
-		WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true}))
+		WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true})
+	if kb != nil {
+		params.WithReplyMarkup(kb)
+	}
+	sent, err := b.api.SendMessage(ctx, params)
 	if err != nil {
 		b.log.Warn(logKey, "err", err, "owner", userID)
 		return nil
@@ -216,7 +220,7 @@ func (b *Bot) sendNotificationHTMLCtx(ctx context.Context, targets []int64, text
 	}
 	delivered := false
 	for _, ownerID := range targets {
-		if b.sendNotificationOne(ctx, ownerID, text, logKey) != nil {
+		if b.sendNotificationOne(ctx, ownerID, text, logKey, nil) != nil {
 			delivered = true
 		}
 	}

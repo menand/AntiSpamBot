@@ -616,13 +616,16 @@ func TestNotifyReplyAnsweredLinksMessages(t *testing.T) {
 // связываются с сообщением нарушителя (топик сохраняется), а при запрещённом
 // форварде фича деградирует до ответа на карточку, а не пропадает.
 func TestNotifySpamSuspicionLinksMessages(t *testing.T) {
+	const otherChatID = -100201
 	cases := []struct {
 		name            string
 		forwardFails    bool
 		wantForwardLink bool
+		longText        bool
 	}{
 		{name: "форвард прошёл", wantForwardLink: true},
 		{name: "форвард запрещён", forwardFails: true},
+		{name: "длинный защищённый текст", forwardFails: true, longText: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -630,6 +633,20 @@ func TestNotifySpamSuspicionLinksMessages(t *testing.T) {
 			ctx := context.Background()
 			if err := db.SetSpamNotify(ctx, ownerDMOwnerID, true); err != nil {
 				t.Fatalf("enable spam notify: %v", err)
+			}
+			b.rememberChat(ctx, storage.ChatInfo{ChatID: otherChatID, Title: "Другой <чат>", Type: "supergroup"})
+			b.rememberChat(ctx, storage.ChatInfo{ChatID: -100202, Title: "Старая группа", Type: "supergroup"})
+			member := defaultChatMember(nil)
+			fc.respSeq["getChatMember"] = []string{member, member, strings.Replace(member, `"member"`, `"left"`, 1)}
+			joined := time.Date(2026, 10, 12, 10, 30, 0, 0, storage.StatsLocation)
+			if err := db.UpsertMember(ctx, testChatID, testUserID, joined); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.UpsertMember(ctx, otherChatID, testUserID, joined); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.RecordMessage(ctx, otherChatID, testUserID, joined); err != nil {
+				t.Fatal(err)
 			}
 			fc.resp["forwardMessage"] = `{"message_id":777,"date":1700000000,
 				"chat":{"id":9001,"type":"private"}}`
@@ -645,7 +662,11 @@ func TestNotifySpamSuspicionLinksMessages(t *testing.T) {
 				From:            &telego.User{ID: testUserID, FirstName: "Гость"},
 				Text:            "купите крипту",
 			}
-			b.notifySpamSuspicion(msg, "🤖 ИИ-антиспам")
+			if tc.longText {
+				msg.Text = strings.Repeat("💬", 2048)
+				fc.respSeq["sendMessage"] = []string{`{"message_id":778}`, fc.resp["sendMessage"]}
+			}
+			b.notifySpamSuspicion(msg, "🤖 ИИ-антиспам", 99)
 
 			if tc.wantForwardLink {
 				link, ok, err := db.OwnerDMLink(ctx, testBotID, ownerDMOwnerID, 777)
@@ -660,8 +681,96 @@ func TestNotifySpamSuspicionLinksMessages(t *testing.T) {
 				t.Fatalf("card link = %+v ok=%v err=%v", cardLink, ok, err)
 			}
 			cards := sendBodiesTo(t, fc, ownerDMOwnerID)
+			if tc.longText {
+				if len(cards) != 2 || cards[0]["text"] != msg.Text {
+					t.Fatal("the full protected message must be sent separately")
+				}
+				cards = cards[1:]
+			}
 			if len(cards) != 1 || !strings.Contains(cards[0]["text"].(string), "Ответь на это сообщение") {
 				t.Fatalf("card must carry the reply hint, got %v", cards)
+			}
+			cardText := cards[0]["text"].(string)
+			if strings.Contains(cardText, "Старая группа") {
+				t.Fatal("old membership must not be shown as current")
+			}
+			for _, want := range []string{
+				"Последний вход: <b>12.10.2026</b>", "Сообщения: сегодня",
+				"Другой &lt;чат&gt;» · последний вход 12.10.2026 · 1 сообщение",
+			} {
+				if !strings.Contains(cardText, want) {
+					t.Fatalf("missing %q in %s", want, cardText)
+				}
+			}
+			if tc.forwardFails && !tc.longText && !strings.Contains(cardText, msg.Text) {
+				t.Fatal("protected message text must remain in the card")
+			}
+			kb, err := json.Marshal(cards[0]["reply_markup"])
+			if err != nil || !strings.Contains(string(kb), "sv:1:99") || !strings.Contains(string(kb), "sv:0:99") {
+				t.Fatalf("card must carry both buttons for the group vote: %s (err=%v)", kb, err)
+			}
+		})
+	}
+}
+
+func TestOwnerDMSpamVoteResolvesGroupVote(t *testing.T) {
+	const botMsgID, targetMsgID, dmMsgID = 99, 700, 555
+	for _, tc := range []struct {
+		name, data string
+		ban        bool
+	}{
+		{"spam", "sv:1:99", true},
+		{"not spam", "sv:0:99", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, db, fc := setupOwnerDMReply(t)
+			ctx := b.runCtx
+			if err := db.PutSpamVote(ctx, storage.SpamVote{
+				ChatID: testChatID, BotMsgID: botMsgID, TargetMsgID: targetMsgID, AuthorID: testUserID, CreatedAt: time.Now(),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			b.linkOwnerDMSource(ownerDMOwnerID, dmMsgID, testChatID, 0, targetMsgID, false)
+			b.linkOwnerDMSource(ownerDMOwnerID, dmMsgID+1, testChatID, 0, targetMsgID+1, false)
+			query := telego.CallbackQuery{
+				ID: "q", From: telego.User{ID: ownerDMOwnerID}, Data: tc.data,
+				Message: &telego.Message{MessageID: dmMsgID, Chat: telego.Chat{ID: ownerDMOwnerID, Type: telego.ChatTypePrivate}},
+			}
+			for _, msg := range []*telego.Message{
+				{MessageID: dmMsgID + 1, Chat: query.Message.GetChat()},
+				{MessageID: dmMsgID, Chat: telego.Chat{ID: testChatID, Type: telego.ChatTypeSupergroup}},
+			} {
+				invalid := query
+				invalid.Message = msg
+				if err := b.handleSpamVoteCallback(nil, invalid); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outsider := query
+			outsider.From.ID++
+			outsider.Message = &telego.Message{MessageID: dmMsgID, Chat: telego.Chat{ID: outsider.From.ID, Type: telego.ChatTypePrivate}}
+			b.linkOwnerDMSource(outsider.From.ID, dmMsgID, testChatID, 0, targetMsgID, false)
+			if err := b.handleSpamVoteCallback(nil, outsider); err != nil {
+				t.Fatal(err)
+			}
+			if _, found, err := db.GetSpamVote(ctx, testChatID, botMsgID); err != nil || !found {
+				t.Fatalf("a vote from the wrong card or chat must leave the vote open: found=%v err=%v", found, err)
+			}
+
+			for range 2 {
+				if err := b.handleSpamVoteCallback(nil, query); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, found, err := db.GetSpamVote(ctx, testChatID, botMsgID); err != nil || found {
+				t.Fatalf("the original vote must close: found=%v err=%v", found, err)
+			}
+			if got := fc.callCount("banChatMember"); got != boolInt(tc.ban) {
+				t.Fatalf("banChatMember calls = %d, want %d", got, boolInt(tc.ban))
+			}
+			if got := fc.callBodies("editMessageReplyMarkup"); len(got) != 2 ||
+				!strings.Contains(got[0], `"chat_id":9001`) || !strings.Contains(got[0], `"message_id":555`) {
+				t.Fatalf("expected to remove buttons on the DM card, got %v", got)
 			}
 		})
 	}

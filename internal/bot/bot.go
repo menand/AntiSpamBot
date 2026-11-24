@@ -395,7 +395,7 @@ func (b *Bot) Run(parent context.Context) error {
 	// Общий обработчик проверяет личный диалог до разбора menu: и estats:.
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("menu:"))     // menu:main|help|add|chats|logs|aicheck|spamnotify|modnotify|capnotify|dreport|vernotify|stats|settings|welcome|wset|wtxt|daily|sil|spam|eph|qr|max|tmo|hour|swl|svm|qper|cmode|leave|leavec:<chatID>:<val> (gr|rpl|grtxt — legacy-алиасы: ре-рендер настроек / контекстный ввод)
 	bh.HandleCallbackQuery(b.handleMenuCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("estats:"))   // estats:<chatID>:<list>:<page>
-	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))   // sv:1|0 (vote)
+	bh.HandleCallbackQuery(b.handleSpamVoteCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("sv:"))   // sv:1|0[:botMsgID]
 	bh.HandleCallbackQuery(b.handleModChoiceCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("mc:"))  // mc:<u|f|m|w>:<userID>|x
 	bh.HandleCallbackQuery(b.handleApprovalCallback, th.AnyCallbackQueryWithMessage(), th.CallbackDataPrefix("appr:")) // appr:y|n:<chatID>
 	bh.HandleMessage(b.handleStatsCommand, th.CommandEqual("stats"))

@@ -150,8 +150,9 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 			mentionOrID(infos, targetID),
 			0, 0, effectiveSpamVoteMargin(s))).
 			WithParseMode(telego.ModeHTML).
+			WithMessageThreadID(threadOf(*r)).
 			WithReplyParameters(&telego.ReplyParameters{MessageID: r.MessageID}).
-			WithReplyMarkup(spamVoteKeyboard()),
+			WithReplyMarkup(spamVoteKeyboard(0)),
 		storage.SpamVote{
 			ChatID:      chatID,
 			TargetMsgID: r.MessageID,
@@ -185,7 +186,7 @@ func (b *Bot) handleSpamCommand(ctx *th.Context, message telego.Message) error {
 		b.log.Warn("record suspect event (report)", "err", err, "chat", chatID, "target", targetID)
 	}
 	// Уведомление подписанным владельцам — синхронно, мы уже в хендлере.
-	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From))
+	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From), msgID)
 
 	b.log.Info("spam report", "chat", chatID, "target", targetID,
 		"by", message.From.ID, "bot_msg", msgID,
@@ -273,7 +274,7 @@ func (b *Bot) execGoldenSpamReport(message telego.Message, r *telego.Message, ta
 
 	// Улика владельцам до бана: revoke сотрёт сообщение вместе с форвардом.
 	// После победы в гонке — двойного форварда от второго админа не будет.
-	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From))
+	b.notifySpamSuspicion(*r, "🚩 Репорт от "+userLabel(*message.From), 0)
 
 	role := "админ"
 	if b.isOwner(message.From.ID) {

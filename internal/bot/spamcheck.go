@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"strconv"
 	"strings"
 	"time"
 
@@ -308,18 +309,20 @@ func (b *Bot) runSpamCheck(gateCtx context.Context, message telego.Message, s st
 		return
 	}
 
-	if _, out := b.createSpamPlashka("AI spam",
+	botMsgID, out := b.createSpamPlashka("AI spam",
 		tu.Message(tu.ID(chatID), spamVoteText(0, 0, effectiveSpamVoteMargin(s))).
 			WithParseMode(telego.ModeHTML).
+			WithMessageThreadID(threadOf(message)).
 			WithReplyParameters(&telego.ReplyParameters{MessageID: message.MessageID}).
-			WithReplyMarkup(spamVoteKeyboard()),
+			WithReplyMarkup(spamVoteKeyboard(0)),
 		storage.SpamVote{
 			ChatID:      chatID,
 			TargetMsgID: message.MessageID,
 			AuthorID:    user.ID,
 			Prob:        100, // легаси-колонка NOT NULL, вердикт теперь бинарный — нигде не отображается
 			CreatedAt:   time.Now(),
-		}); out != plashkaSent {
+		})
+	if out != plashkaSent {
 		return
 	}
 	// История подозрений для /info: только при живой плашке.
@@ -327,7 +330,7 @@ func (b *Bot) runSpamCheck(gateCtx context.Context, message telego.Message, s st
 		b.log.Warn("record suspect event (AI)", "err", err, "chat", chatID, "user", user.ID)
 	}
 	// Уже в своей горутине (maybeSpamCheck) — уведомляем синхронно.
-	b.notifySpamSuspicion(message, "🤖 ИИ-антиспам")
+	b.notifySpamSuspicion(message, "🤖 ИИ-антиспам", botMsgID)
 }
 
 // spamNotifyTargets — владельцы, включившие ЛС-уведомления о спаме. Один
@@ -351,20 +354,26 @@ func (b *Bot) spamNotifyTargets(ctx context.Context) []int64 {
 // сообщения + карточку. source — кто поднял подозрение («🤖 ИИ-антиспам» или
 // «🚩 Репорт от …», содержит пользовательские имена — потому экранируется).
 // Best effort: ошибки только в Warn.
-func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
+func (b *Bot) notifySpamSuspicion(message telego.Message, source string, botMsgID int) {
 	targets := b.spamNotifyTargets(b.runCtx)
 	if len(targets) == 0 {
 		return
 	}
 	chatID := message.Chat.ID
-	baseInfo := fmt.Sprintf("🚨 %s — подозрение на спам в %s\nАвтор: %s",
+	baseInfo := fmt.Sprintf("🚨 %s — подозрение на спам в %s",
 		html.EscapeString(source),
 		chatLinkHTML(storage.ChatInfo{
 			ChatID:   chatID,
 			Title:    message.Chat.Title,
 			Username: message.Chat.Username,
-		}),
-		html.EscapeString(userLabel(*message.From)))
+		}))
+	var authorInfo string
+	var keyboard *telego.InlineKeyboardMarkup
+	if botMsgID > 0 {
+		keyboard = spamVoteKeyboard(botMsgID)
+	} else {
+		authorInfo = "Автор: " + html.EscapeString(userLabel(*message.From))
+	}
 
 	// Текст сообщения для фоллбека, если форвард запрещён
 	msgText := message.Text
@@ -380,21 +389,40 @@ func (b *Bot) notifySpamSuspicion(message telego.Message, source string) {
 			MessageID:  message.MessageID,
 		})
 		info := baseInfo
-		if forwardErr != nil {
-			// Форвард может быть запрещён (protected content)
-			b.log.Warn("forward spam suspicion", "err", forwardErr, "owner", ownerID)
-			if msgText != "" {
-				info += fmt.Sprintf("\n\n🔒 <b>Защищённый контент</b> (форвард запрещён):\n%s",
-					html.EscapeString(msgText))
-			} else {
-				info += "\n\n🔒 <b>Защищённый контент</b> (форвард запрещён, текста нет)"
-			}
-		} else if sent != nil {
+		if forwardErr == nil && sent != nil {
 			// Ответ реплаем на форвард = ответ на сообщение нарушителя.
 			b.linkOwnerDMSource(ownerID, sent.MessageID, chatID, threadID, message.MessageID, true)
 		}
-		info += ownerDMReplyHint
-		if card := b.sendNotificationOne(b.runCtx, ownerID, info, "notify spam suspicion"); card != nil {
+		if authorInfo == "" {
+			ctx, cancel := context.WithTimeout(b.runCtx, 5*time.Second)
+			authorInfo = renderUserInfoCard(b.buildUserInfoCard(ctx, chatID, message.From.ID)) +
+				b.otherUserChatsInfo(ctx, chatID, message.From.ID)
+			cancel()
+		}
+		details := "\n\n" + authorInfo + ownerDMReplyHint
+		if forwardErr != nil {
+			b.log.Warn("forward spam suspicion", "err", forwardErr, "owner", ownerID)
+			info += "\n\n🔒 <b>Защищённый контент</b> (форвард запрещён)"
+			switch {
+			case msgText == "":
+				info += ". Текста нет."
+			case utf16Units(info+details+msgText)+2 <= ownerDMMessageLimit:
+				info += ":\n" + html.EscapeString(msgText)
+			default:
+				// Текст Telegram уже ограничил при отправке оригинала.
+				copied, err := b.api.SendMessage(b.runCtx, tu.Message(tu.ID(ownerID), msgText).
+					WithLinkPreviewOptions(&telego.LinkPreviewOptions{IsDisabled: true}))
+				if err != nil {
+					b.log.Warn("send spam suspicion text", "err", err, "owner", ownerID)
+					info += ". Не удалось прислать текст."
+				} else if copied != nil {
+					info += ". Текст в предыдущем сообщении."
+					b.linkOwnerDMSource(ownerID, copied.MessageID, chatID, threadID, message.MessageID, false)
+				}
+			}
+		}
+		info += details
+		if card := b.sendNotificationOne(b.runCtx, ownerID, info, "notify spam suspicion", keyboard); card != nil {
 			// Карточка тоже пригодна для ответа (без частичной цитаты).
 			b.linkOwnerDMSource(ownerID, card.MessageID, chatID, threadID, message.MessageID, false)
 		}
@@ -842,10 +870,15 @@ func spamVoteText(yes, no, margin int) string {
 		voteRuleLine(margin), voteTallyLine(yes, no))
 }
 
-func spamVoteKeyboard() *telego.InlineKeyboardMarkup {
+// botMsgID задаётся для ЛС-карточки, где нужен ID групповой плашки.
+func spamVoteKeyboard(botMsgID int) *telego.InlineKeyboardMarkup {
+	suffix := ""
+	if botMsgID > 0 {
+		suffix = ":" + strconv.Itoa(botMsgID)
+	}
 	return tu.InlineKeyboard(tu.InlineKeyboardRow(
-		tu.InlineKeyboardButton("🚫 Да, спам").WithCallbackData("sv:1"),
-		tu.InlineKeyboardButton("✅ Нет, не спам").WithCallbackData("sv:0"),
+		tu.InlineKeyboardButton("🚫 Да, спам").WithCallbackData("sv:1"+suffix),
+		tu.InlineKeyboardButton("✅ Нет, не спам").WithCallbackData("sv:0"+suffix),
 	))
 }
 
@@ -897,21 +930,54 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	if query.Message == nil {
 		return nil
 	}
-	// Строгий парсер: форматтер эмитит ровно sv:0/sv:1; всё остальное —
-	// чужой или битый payload и голосом не считается.
-	var isSpamVote bool
-	switch query.Data {
-	case "sv:1":
-		isSpamVote = true
-	case "sv:0":
-		isSpamVote = false
-	default:
+	chat := query.Message.GetChat()
+	voter := query.From.ID
+	dm := chat.Type == telego.ChatTypePrivate
+	payload, prefixOK := strings.CutPrefix(query.Data, "sv:")
+	choice, voteID, hasVoteID := strings.Cut(payload, ":")
+	if !prefixOK || (choice != "1" && choice != "0") || dm != hasVoteID {
 		_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
 		return nil
 	}
-	chatID := query.Message.GetChat().ID
+	isSpamVote := choice == "1"
+	chatID := chat.ID
 	botMsgID := query.Message.GetMessageID()
-	voter := query.From.ID
+	var sourceMsgID int
+	if dm {
+		if !isOwnPrivateChat(chat, voter) || !b.isOwner(voter) || b.me == nil {
+			_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+			return nil
+		}
+		id, err := strconv.Atoi(voteID)
+		if err != nil || id <= 0 || strconv.Itoa(id) != voteID {
+			_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
+			return nil
+		}
+		// ID плашки из кнопки должен указывать на то же сообщение,
+		// которое бот привязал к этой ЛС-карточке.
+		link, found, err := b.db.OwnerDMLink(b.runCtx, b.me.ID, voter, query.Message.GetMessageID())
+		if err != nil || !found || link.IsForward || link.SourceMsgID <= 0 {
+			if err != nil {
+				b.log.Warn("get spam vote DM link", "err", err, "owner", voter)
+			}
+			_ = b.api.AnswerCallbackQuery(ctx,
+				tu.CallbackQuery(query.ID).WithText("Не удалось найти голосование для этой карточки."))
+			return nil
+		}
+		chatID, botMsgID, sourceMsgID = link.ChatID, id, link.SourceMsgID
+	}
+	closeDMVote := func() {
+		if !dm {
+			return
+		}
+		if _, err := b.api.EditMessageReplyMarkup(ctx, &telego.EditMessageReplyMarkupParams{
+			ChatID:      tu.ID(chat.ID),
+			MessageID:   query.Message.GetMessageID(),
+			ReplyMarkup: emptyKeyboard(),
+		}); err != nil && !isNotModified(err) {
+			b.log.Debug("remove spam vote DM buttons", "err", err, "owner", voter)
+		}
+	}
 
 	// Мёртвый чат (отклонён владельцем, бот кикнут, чат вне ALLOWED_CHATS)
 	// вердиктов не выносит: оставшаяся плашка живёт до суточного свипа, а
@@ -919,6 +985,7 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 	if !b.chatServiceable(chatID) {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Голосование уже закрыто."))
+		closeDMVote()
 		return nil
 	}
 
@@ -929,9 +996,12 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 			tu.CallbackQuery(query.ID).WithText("Не получилось — попробуй ещё раз."))
 		return nil
 	}
-	if !found {
+	if !found || (dm && v.TargetMsgID != sourceMsgID) {
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText("Голосование уже закрыто."))
+		if !found {
+			closeDMVote()
+		}
 		return nil
 	}
 	if voter == v.AuthorID {
@@ -968,10 +1038,15 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 			"voter", userLabel(query.From), "vote", voteWord, "golden", true)
 		// Тост после сохранения вердикта: проигравшему параллельному
 		// админу честное «уже закрыто», а не ложное «решено».
-		taken, err := b.acceptSpamVerdict(v, func(int, int) (bool, string, bool) {
-			return isSpamVote, "админ " + userLabel(query.From), true
-		})
+		role := "админ "
 		toast := "Решено голосом админа."
+		if dm {
+			role = "владелец "
+			toast = "Решение владельца принято."
+		}
+		taken, err := b.acceptSpamVerdict(v, func(int, int) (bool, string, bool) {
+			return isSpamVote, role + userLabel(query.From), true
+		})
 		if err != nil {
 			toast = "Не удалось сохранить решение — попробуйте ещё раз."
 		} else if !taken {
@@ -979,6 +1054,9 @@ func (b *Bot) handleSpamVoteCallback(ctx *th.Context, query telego.CallbackQuery
 		}
 		_ = b.api.AnswerCallbackQuery(ctx,
 			tu.CallbackQuery(query.ID).WithText(toast))
+		if err == nil {
+			closeDMVote()
+		}
 		return nil
 	}
 
@@ -1080,9 +1158,9 @@ func (b *Bot) voteView(v storage.SpamVote, yes, no, margin int) (string, *telego
 			infos = map[int64]storage.UserInfo{}
 		}
 		return manualVoteText(mentionOrID(infos, v.InitiatorID),
-			mentionOrID(infos, v.AuthorID), yes, no, margin), spamVoteKeyboard()
+			mentionOrID(infos, v.AuthorID), yes, no, margin), spamVoteKeyboard(0)
 	}
-	return spamVoteText(yes, no, margin), spamVoteKeyboard()
+	return spamVoteText(yes, no, margin), spamVoteKeyboard(0)
 }
 
 // voteReason собирает причину события «vote:<id,id,...>» из голосов «за».

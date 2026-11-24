@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"html"
 	"strings"
@@ -41,7 +42,7 @@ func (b *Bot) handleGroupInfoCommand(ctx *th.Context, message telego.Message) er
 		b.log.Debug("delete /info command", "err", err, "chat", chatID)
 	}
 
-	card := b.buildUserInfoCard(chatID, targetID)
+	card := b.buildUserInfoCard(b.runCtx, chatID, targetID)
 	b.sendHTML(chatID, threadOf(message), b.modReceiver(chatID, message), renderUserInfoCard(card))
 	b.log.Info("user info card", "chat", chatID, "target", targetID, "by", message.From.ID)
 	return nil
@@ -59,7 +60,7 @@ type userInfoCard struct {
 
 // buildUserInfoCard собирает все данные одним проходом; каждая секция
 // отказоустойчива независимо — ошибка одной не убивает карточку.
-func (b *Bot) buildUserInfoCard(chatID, targetID int64) userInfoCard {
+func (b *Bot) buildUserInfoCard(ctx context.Context, chatID, targetID int64) userInfoCard {
 	c := userInfoCard{}
 
 	infos, err := b.db.GetUserInfos(b.runCtx, []int64{targetID})
@@ -88,7 +89,7 @@ func (b *Bot) buildUserInfoCard(chatID, targetID int64) userInfoCard {
 	}
 
 	// Живой статус членства тем же запросом даёт и текущий мьют.
-	m, err := b.api.GetChatMember(b.runCtx, &telego.GetChatMemberParams{
+	m, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{
 		ChatID: tu.ID(chatID),
 		UserID: targetID,
 	})
@@ -111,6 +112,74 @@ func (b *Bot) buildUserInfoCard(chatID, targetID int64) userInfoCard {
 		c.live = "👤 Сейчас не в чате"
 	}
 	return c
+}
+
+// otherUserChatsInfo дополняет карточку владельца живыми данными о членстве
+// в других обслуживаемых чатах и локальной историей активности.
+func (b *Bot) otherUserChatsInfo(ctx context.Context, sourceChatID, userID int64) string {
+	chats, err := b.db.ListChats(ctx)
+	if err != nil {
+		return "\n\nДругие чаты бота: не удалось проверить."
+	}
+	totals, err := b.db.UserMessageTotalsByChat(ctx, userID)
+	if err != nil {
+		b.log.Warn("info card: message totals by chat", "err", err, "user", userID)
+	}
+
+	var lines strings.Builder
+	incomplete, truncated := false, false
+	for _, chat := range chats {
+		if chat.ChatID == sourceChatID {
+			continue
+		}
+		if ctx.Err() != nil {
+			incomplete = true
+			break
+		}
+		serviceable, err := b.chatServiceableChecked(ctx, chat.ChatID)
+		if err != nil {
+			incomplete = true
+			continue
+		}
+		if !serviceable {
+			continue
+		}
+		member, err := b.api.GetChatMember(ctx, &telego.GetChatMemberParams{ChatID: tu.ID(chat.ChatID), UserID: userID})
+		if err != nil || member == nil {
+			incomplete = true
+			continue
+		}
+		if !member.MemberIsMember() {
+			continue
+		}
+
+		joined := "вход неизвестен"
+		if at, ok, err := b.db.MemberJoinedAt(ctx, chat.ChatID, userID); err == nil && ok {
+			joined = "последний вход " + dateMSK(at)
+		}
+		messages := "нет данных о сообщениях"
+		if totals != nil {
+			n := totals[chat.ChatID]
+			messages = fmt.Sprintf("%d %s", n, pluralRU(n, "сообщение", "сообщения", "сообщений"))
+		}
+		line := fmt.Sprintf("\n• %s · %s · %s", chatLinkHTML(chat), joined, messages)
+		// shortcut: список ограничен размером карточки; для больших списков понадобится разбиение на сообщения.
+		if lines.Len()+len(line) > 2000 {
+			truncated = true
+			break
+		}
+		lines.WriteString(line)
+	}
+	if lines.Len() == 0 && !incomplete {
+		return "\n\nДругие чаты бота: членство не найдено."
+	}
+	if truncated {
+		lines.WriteString("\n… Остальные чаты не поместились в карточку.")
+	}
+	if incomplete {
+		lines.WriteString("\nЧасть чатов проверить не удалось.")
+	}
+	return "\n\n<b>Другие чаты бота</b>" + lines.String()
 }
 
 // joinedLine — строка про вход. members.joined_at пишется при каждом
