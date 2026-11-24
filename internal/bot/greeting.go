@@ -252,11 +252,12 @@ func (b *Bot) cancelGreetingInputOnCommand(ctx context.Context, message telego.M
 	}
 }
 
-// handlePrivateText получает некомандные личные сообщения. Его единственная
-// работа — флоу ввода текста «после капчи»; всё остальное игнорируется (та же
-// тишина, что была до появления этого флоу).
+// handlePrivateText направляет сообщения из лички в ожидающий их сценарий.
 func (b *Bot) handlePrivateText(ctx *th.Context, message telego.Message) error {
 	if message.From == nil {
+		return nil
+	}
+	if b.handleRejectionReason(ctx, message) {
 		return nil
 	}
 	// Ответ реплаем на пересланное ботом сообщение — публикация в исходном

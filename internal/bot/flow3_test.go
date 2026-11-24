@@ -492,16 +492,15 @@ func TestApprovalCallbackDecisions(t *testing.T) {
 	})
 
 	for _, tc := range []struct {
-		name      string
-		action    string
-		pre       string
-		want      string
-		wantLeave bool
+		name   string
+		action string
+		pre    string
+		want   string
 	}{
-		{"pending → да: включён", "y", storage.ChatPending, storage.ChatApproved, false},
-		{"pending → нет: rejected и выход", "n", storage.ChatPending, storage.ChatRejected, true},
-		{"нет на approved — поздним нет не выключаем", "n", storage.ChatApproved, storage.ChatApproved, false},
-		{"да на rejected — реанимация", "y", storage.ChatRejected, storage.ChatApproved, false},
+		{"pending → да: включён", "y", storage.ChatPending, storage.ChatApproved},
+		{"pending → нет: ждём причину", "n", storage.ChatPending, storage.ChatPending},
+		{"нет на approved — поздним нет не выключаем", "n", storage.ChatApproved, storage.ChatApproved},
+		{"да на rejected — реанимация", "y", storage.ChatRejected, storage.ChatApproved},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -512,29 +511,11 @@ func TestApprovalCallbackDecisions(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if !tc.wantLeave {
-				if st, exists, _ := db.GetChatApproval(ctx, chat); st != tc.want || !exists {
-					t.Fatalf("status = %q exists=%v, want %q", st, exists, tc.want)
-				}
-			} else {
-				// Выход асинхронный (goSafe): ждём LeaveChat, затем dropChat,
-				// который удаляет строку реестра вместе со статусом.
-				deadline := time.Now().Add(3 * time.Second)
-				for fc.callCount("leaveChat") == 0 && time.Now().Before(deadline) {
-					time.Sleep(20 * time.Millisecond)
-				}
-				if fc.callCount("leaveChat") == 0 {
-					t.Fatal("reject must leave the chat")
-				}
-				for time.Now().Before(deadline) {
-					if _, exists, _ := db.GetChatApproval(ctx, chat); !exists {
-						break
-					}
-					time.Sleep(20 * time.Millisecond)
-				}
-				if _, exists, _ := db.GetChatApproval(ctx, chat); exists {
-					t.Fatalf("successful leave must drop the registry row (want %q)", tc.want)
-				}
+			if st, exists, _ := db.GetChatApproval(ctx, chat); st != tc.want || !exists {
+				t.Fatalf("status = %q exists=%v, want %q", st, exists, tc.want)
+			}
+			if fc.callCount("leaveChat") != 0 {
+				t.Fatal("button must never leave the chat without a reason")
 			}
 			if b.chatApproved(chat) != (tc.want == storage.ChatApproved) {
 				t.Fatal("approval cache out of sync with DB")
@@ -554,50 +535,130 @@ func TestApprovalCallbackDecisions(t *testing.T) {
 	})
 }
 
-func TestRejectApprovalPreservesPrompt(t *testing.T) {
-	const chatID, ownerID, promptID = -100555, 999, 123
+func TestRejectApprovalSendsReasonBeforeLeaving(t *testing.T) {
+	const chatID, ownerID, approvalID, reasonPromptID = -100555, 999, 123, 555
 	for _, tc := range []struct {
-		name, wantText string
+		name           string
+		copyFails      bool
 		pendingCaptcha bool
+		approveFirst   bool
 	}{
-		{"success", "🚪 Бот вышел из чата", false},
-		{"failure", "⚠️ Чат отклонён, но боту не удалось выйти", true},
+		{name: "success"},
+		{name: "delivery failure can be retried", copyFails: true},
+		{name: "leave failure can be retried without another post", pendingCaptcha: true},
+		{name: "approval cancels the rejection", approveFirst: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, db, fc := newFlowBot(t)
 			b.cfg.OwnerIDs = map[int64]struct{}{ownerID: {}}
+			fc.resp["copyMessage"] = `{"message_id":321}`
+			if tc.copyFails {
+				fc.errSeq["copyMessage"] = []*telegoapi.Error{{ErrorCode: 403, Description: "bot cannot send messages"}}
+			}
+			if tc.pendingCaptcha {
+				b.store.BeginKickoff(chatID, testUserID)
+			}
 			if err := db.SetChatApproval(b.runCtx, chatID, storage.ChatPending); err != nil {
 				t.Fatal(err)
 			}
-			wantCalls := "answerCallbackQuery,leaveChat,editMessageReplyMarkup,sendMessage"
-			if tc.pendingCaptcha {
-				b.store.BeginKickoff(chatID, testUserID)
-				wantCalls = "answerCallbackQuery,editMessageReplyMarkup,sendMessage"
-			}
-			if err := b.handleApprovalCallback(nil, telego.CallbackQuery{
+			dm := telego.Chat{ID: ownerID, Type: telego.ChatTypePrivate}
+			query := telego.CallbackQuery{
 				ID: "q", From: telego.User{ID: ownerID}, Data: "appr:n:" + strconv.Itoa(chatID),
-				Message: &telego.Message{MessageID: promptID, Chat: telego.Chat{ID: ownerID, Type: "private"}},
-			}); err != nil {
+				Message: &telego.Message{MessageID: approvalID, Chat: dm},
+			}
+			if err := b.handleApprovalCallback(nil, query); err != nil {
 				t.Fatal(err)
 			}
-
-			if fc.callCount("editMessageText") != 0 {
-				t.Fatal("reject overwrote the original prompt")
+			prompts := fc.callBodies("sendMessage")
+			if len(prompts) != 1 || !strings.Contains(prompts[0], `"force_reply":true`) ||
+				!strings.Contains(prompts[0], `"chat_id":999`) {
+				t.Fatalf("expected a reason prompt in the owner's DM: %v", prompts)
 			}
-			waitFor(t, func() bool { return fc.callCount("sendMessage") != 0 })
-			calls := fc.callList()
-			if strings.Join(calls, ",") != wantCalls {
-				t.Fatalf("unexpected Telegram calls: %v", calls)
+			reason := telego.Message{Chat: dm, From: &query.From, MessageID: 777, Text: "Это частный бот."}
+			if err := b.handlePrivateText(nil, reason); err != nil {
+				t.Fatal(err)
+			}
+			if fc.callCount("copyMessage") != 0 || fc.callCount("leaveChat") != 0 || fc.callCount("editMessageReplyMarkup") != 0 {
+				t.Fatal("an unrelated DM must not publish, leave or change the approval prompt")
+			}
+			reason.ReplyToMessage = &telego.Message{MessageID: reasonPromptID}
+			if tc.approveFirst {
+				query.Data = "appr:y:" + strconv.Itoa(chatID)
+				if err := b.handleApprovalCallback(nil, query); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := b.handlePrivateText(nil, reason); err != nil {
+				t.Fatal(err)
+			}
+			if tc.approveFirst {
+				if fc.callCount("copyMessage") != 0 || fc.callCount("leaveChat") != 0 {
+					t.Fatal("reason was acted on after chat approval")
+				}
+				return
+			}
+			if tc.copyFails {
+				if st, exists, _ := db.GetChatApproval(b.runCtx, chatID); st != storage.ChatPending || !exists ||
+					fc.callCount("leaveChat") != 0 {
+					t.Fatal("failed publication should leave the chat pending and the bot in it")
+				}
+				if err := b.handlePrivateText(nil, reason); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.pendingCaptcha {
+				waitFor(t, func() bool {
+					b.leaveMu.Lock()
+					defer b.leaveMu.Unlock()
+					return !b.leaveInflight[chatID]
+				})
+				if fc.callCount("copyMessage") != 1 || fc.callCount("leaveChat") != 0 {
+					t.Fatal("the reason was delivered but an active captcha must block leaving")
+				}
+				b.store.FinishKickoff(chatID, testUserID)
+				if err := b.handlePrivateText(nil, reason); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			waitFor(t, func() bool {
+				bodies := fc.callBodies("sendMessage")
+				return strings.Contains(bodies[len(bodies)-1], "Бот вышел из чата")
+			})
+			copies := fc.callBodies("copyMessage")
+			wantCopies := 1
+			if tc.copyFails {
+				wantCopies++
+			}
+			if len(copies) != wantCopies || fc.callCount("editMessageText") != 0 ||
+				fc.callCount("editMessageReplyMarkup") != 1 || fc.callCount("leaveChat") != 1 {
+				t.Fatalf("unexpected Telegram calls: %v", fc.callList())
+			}
+			var copied struct {
+				ChatID     int64 `json:"chat_id"`
+				FromChatID int64 `json:"from_chat_id"`
+				MessageID  int   `json:"message_id"`
+			}
+			if err := json.Unmarshal([]byte(copies[len(copies)-1]), &copied); err != nil {
+				t.Fatal(err)
+			}
+			if copied.ChatID != chatID || copied.FromChatID != ownerID || copied.MessageID != reason.MessageID {
+				t.Fatalf("wrong message copied: %+v", copied)
+			}
+			calls := strings.Join(fc.callList(), ",")
+			if strings.LastIndex(calls, "copyMessage") > strings.Index(calls, "leaveChat") {
+				t.Fatalf("reason must be published before leaving: %s", calls)
 			}
 			var sent struct {
 				ChatID          int64                  `json:"chat_id"`
 				Text            string                 `json:"text"`
 				ReplyParameters telego.ReplyParameters `json:"reply_parameters"`
 			}
-			if err := json.Unmarshal([]byte(fc.callBodies("sendMessage")[0]), &sent); err != nil {
+			bodies := fc.callBodies("sendMessage")
+			if err := json.Unmarshal([]byte(bodies[len(bodies)-1]), &sent); err != nil {
 				t.Fatal(err)
 			}
-			if sent.ChatID != ownerID || sent.Text != tc.wantText || sent.ReplyParameters.MessageID != promptID {
+			if sent.ChatID != ownerID || sent.Text != "🚪 Бот вышел из чата" || sent.ReplyParameters.MessageID != approvalID {
 				t.Fatalf("unexpected reply: %+v", sent)
 			}
 		})

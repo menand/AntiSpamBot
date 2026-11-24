@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -99,17 +100,17 @@ func (b *Bot) setApprovalCache(chatID int64, approved bool) {
 func (b *Bot) delApprovalCache(chatID int64) {
 	b.approvalMu.Lock()
 	delete(b.approvalCache, chatID)
+	maps.DeleteFunc(b.rejectionPrompts, func(_ int64, prompt *rejectionPrompt) bool {
+		return prompt.chatID == chatID
+	})
 	b.approvalMu.Unlock()
 }
 
-// handleApprovalCallback — кнопки «Да/Нет» на ЛС-вопросе о новом чате. Решает
-// только владелец бота. Решение атомарное (ClaimChatApproval): первое нажатие
-// выигрывает, проигравший в гонке владелец получает отдельный ответ с
-// фактическим статусом. telego обрабатывает callback'и параллельно, поэтому
-// гонка «Да»/«Нет» двух владельцев реальна и её нужно разрешать на уровне БД.
+// handleApprovalCallback обрабатывает решение владельца по новому чату.
+// «Нет» запрашивает причину в ЛС; бот останется в чате до её доставки.
 func (b *Bot) handleApprovalCallback(ctx *th.Context, query telego.CallbackQuery) error {
 	_ = b.api.AnswerCallbackQuery(ctx, tu.CallbackQuery(query.ID))
-	if !b.isOwner(query.From.ID) {
+	if query.Message == nil || !isOwnPrivateChat(query.Message.GetChat(), query.From.ID) || !b.isOwner(query.From.ID) {
 		return nil
 	}
 	approve, chatID, ok := parseApprovalCallback(query.Data)
@@ -125,99 +126,61 @@ func (b *Bot) handleApprovalCallback(ctx *th.Context, query telego.CallbackQuery
 		// Бот вышел/был кикнут или чат перенесён в супергруппу: живого
 		// вопроса по этому chat_id уже нет (см. carryApprovalOnMigrate).
 		// Записывать статус заново нельзя — он оживил бы мёртвый чат.
-		b.replyToApproval(ctx, query,
+		b.replyToApproval(ctx, query.Message,
 			"ℹ️ Чат больше не в реестре бота (бот вышел или перенесён в супергруппу).")
 		return nil
 	}
 
-	if approve {
-		switch status {
-		case storage.ChatApproved:
-			b.replyToApproval(ctx, query, "✅ Бот уже включён в этом чате")
-			return nil
-		case storage.ChatRejected:
-			// Страховочный повторный апрув: LeaveChat при отклонении мог не
-			// пройти (бот всё ещё участник), и владельцу нужен путь назад.
-			// Условный UPDATE (ReapproveChat), а не SetChatApproval: если выход
-			// всё же прошёл и строка удалена (dropChat), слепой upsert
-			// воскресил бы чат, из которого бот уже вышел.
-			reapproved, err := b.db.ReapproveChat(b.runCtx, chatID)
-			if err != nil {
-				b.log.Warn("re-approve rejected chat", "err", err, "chat", chatID)
-				return nil
-			}
-			if !reapproved {
-				// Гонка с dropChat: после чтения статуса строка исчезла
-				// (бот вышел). Мёртвый чат не воскрешаем.
-				b.replyToApproval(ctx, query,
-					"ℹ️ Бот уже вышел из этого чата — включить его заново нельзя.")
-				return nil
-			}
-		default: // pending
-			claimed, err := b.db.ClaimChatApproval(b.runCtx, chatID, storage.ChatApproved)
-			if err != nil {
-				b.log.Warn("claim approve", "err", err, "chat", chatID)
-				return nil
-			}
-			if !claimed {
-				b.loserOfApprovalRace(ctx, query, chatID)
-				return nil
-			}
-		}
-		b.setApprovalCache(chatID, true)
-		b.postApprovedConfirmation(chatID)
-		b.replyToApproval(ctx, query, "✅ Бот включён в этом чате")
+	if status == storage.ChatApproved {
+		b.replyToApproval(ctx, query.Message, "✅ Бот уже включён в этом чате")
+		return nil
+	}
+	if !approve {
+		b.askRejectionReason(ctx, query, chatID)
 		return nil
 	}
 
-	switch status {
-	case storage.ChatApproved:
-		// Чат уже включён — поздним «Нет» активный чат не выключаем.
-		b.replyToApproval(ctx, query, "✅ Чат уже включён другим владельцем")
+	b.leaveMu.Lock()
+	if b.leaveInflight[chatID] {
+		b.leaveMu.Unlock()
+		b.ownerDMNotice(ctx, query.From.ID, "ℹ️ Бот уже обрабатывает выход из этого чата.")
 		return nil
-	case storage.ChatRejected:
-		b.replyToApproval(ctx, query, "🚫 Чат уже отклонён")
-		return nil
-	default: // pending
-		claimed, err := b.db.ClaimChatApproval(b.runCtx, chatID, storage.ChatRejected)
-		if err != nil {
-			b.log.Warn("claim reject", "err", err, "chat", chatID)
-			return nil
-		}
-		if !claimed {
-			b.loserOfApprovalRace(ctx, query, chatID)
-			return nil
-		}
 	}
-	b.setApprovalCache(chatID, false)
-	b.leaveChatAndCleanup(chatID, "owner rejected chat", func(leaveErr error) {
-		replyCtx, cancel := b.liveCtx()
-		defer cancel()
-		text := "🚪 Бот вышел из чата"
-		if leaveErr != nil {
-			text = "⚠️ Чат отклонён, но боту не удалось выйти"
-		}
-		b.replyToApproval(replyCtx, query, text)
-	})
+	var approved bool
+	if status == storage.ChatRejected {
+		approved, err = b.db.ReapproveChat(b.runCtx, chatID)
+	} else {
+		approved, err = b.db.ClaimChatApproval(b.runCtx, chatID, storage.ChatApproved)
+	}
+	b.leaveMu.Unlock()
+	if err != nil {
+		b.log.Warn("claim approve", "err", err, "chat", chatID)
+		return nil
+	}
+	if !approved {
+		b.loserOfApprovalRace(ctx, query, chatID)
+		return nil
+	}
+	b.setApprovalCache(chatID, true)
+	b.postApprovedConfirmation(chatID)
+	b.replyToApproval(ctx, query.Message, "✅ Бот включён в этом чате")
 	return nil
 }
 
-// loserOfApprovalRace — владелец проиграл гонку решения (первый нажал кнопку
-// раньше него). Перечитываем фактический статус, чтобы текст ЛС соответствовал
-// реальности: в гонке «Да»/«Да» чат включён, в гонке «Нет»/«Нет» — отклонён.
+// loserOfApprovalRace объясняет владельцу, как изменился статус чата.
 func (b *Bot) loserOfApprovalRace(ctx *th.Context, query telego.CallbackQuery, chatID int64) {
 	cur, exists, err := b.db.GetChatApproval(b.runCtx, chatID)
 	if err != nil || !exists {
-		b.replyToApproval(ctx, query, "ℹ️ Решение по чату уже принято")
+		b.replyToApproval(ctx, query.Message, "ℹ️ Решение по чату уже принято")
 		return
 	}
 	switch cur {
 	case storage.ChatApproved:
-		b.replyToApproval(ctx, query, "✅ Чат уже включён другим владельцем")
+		b.replyToApproval(ctx, query.Message, "✅ Чат уже включён другим владельцем")
 	case storage.ChatRejected:
-		b.replyToApproval(ctx, query, "🚫 Чат уже отклонён другим владельцем")
+		b.ownerDMNotice(ctx, query.From.ID, "🚫 Чат уже отклонён другим владельцем.")
 	default:
-		b.replyToApproval(ctx, query, "ℹ️ Решение по чату ещё не принято")
+		b.ownerDMNotice(ctx, query.From.ID, "ℹ️ Решение по чату ещё не принято.")
 	}
 }
 
@@ -241,12 +204,9 @@ func parseApprovalCallback(data string) (approve bool, chatID int64, ok bool) {
 }
 
 // replyToApproval сохраняет в исходном ЛС ссылку на чат и имя добавившего.
-func (b *Bot) replyToApproval(ctx context.Context, query telego.CallbackQuery, text string) {
-	if query.Message == nil {
-		return
-	}
-	chatID := query.Message.GetChat().ID
-	messageID := query.Message.GetMessageID()
+func (b *Bot) replyToApproval(ctx context.Context, prompt telego.MaybeInaccessibleMessage, text string) {
+	chatID := prompt.GetChat().ID
+	messageID := prompt.GetMessageID()
 	if _, err := b.api.EditMessageReplyMarkup(ctx, &telego.EditMessageReplyMarkupParams{
 		ChatID:      tu.ID(chatID),
 		MessageID:   messageID,
@@ -289,11 +249,7 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 	b.leaveInflight[chatID] = true
 	b.leaveMu.Unlock()
 	b.goSafe("leaveChatAndCleanup", func() {
-		defer func() {
-			b.leaveMu.Lock()
-			delete(b.leaveInflight, chatID)
-			b.leaveMu.Unlock()
-		}()
+		defer b.endChatLeave(chatID)
 		// onDone обязан прозвучать при любом исходе — включая панику посреди
 		// retryTG/dropChat: иначе защёлкнувшийся leaveInflight навсегда
 		// обезоружил бы кнопку выхода (см. leaveChatByOwner).
@@ -335,6 +291,12 @@ func (b *Bot) leaveChatAndCleanup(chatID int64, why string, onDone func(error)) 
 			onDone(nil)
 		}
 	})
+}
+
+func (b *Bot) endChatLeave(chatID int64) {
+	b.leaveMu.Lock()
+	delete(b.leaveInflight, chatID)
+	b.leaveMu.Unlock()
 }
 
 const (

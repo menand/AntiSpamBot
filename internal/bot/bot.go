@@ -116,6 +116,8 @@ type Bot struct {
 	// соглашению, что chatCache (запись ~1 байт на известный чат).
 	approvalMu    sync.Mutex
 	approvalCache map[int64]bool
+	// shortcut: один запрос на владельца под approvalMu; SQLite понадобится, если запросы должны переживать рестарт.
+	rejectionPrompts map[int64]*rejectionPrompt
 
 	// leaveInflight — чаты, из которых бот прямо сейчас выводится по запросу
 	// владельца (menu:leavec). Защита от двойного клика по «Да, выйти»: второй
@@ -418,7 +420,7 @@ func (b *Bot) Run(parent context.Context) error {
 	bh.HandleMessage(b.handleWhatsNewCommand, th.CommandEqual("whatnew"))
 	bh.HandleMessage(b.handlePrivateStart, th.CommandEqual("start"))
 	bh.HandleMessage(b.handleHelpCommand, th.CommandEqual("help"))
-	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // флоу ввода текста приветствия
+	bh.HandleMessage(b.handlePrivateText, privateMessagePredicate) // ответы на запросы бота и ввод приветствия
 	bh.HandleMessage(b.handleGroupMessage)                         // фолбэк: сервис-сообщения + счётчики в группах
 	bh.HandleEditedMessage(b.handleEditedGroupMessage)             // спам-чек правок (обход «невинный текст → правка в спам»)
 
